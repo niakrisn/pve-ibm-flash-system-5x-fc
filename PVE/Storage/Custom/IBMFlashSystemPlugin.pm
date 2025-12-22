@@ -577,7 +577,8 @@ sub _get_local_wwpns {
 sub _get_hostname {
     my ($class) = @_;
 
-    my $hostname = PVE::Cluster::get_node_name() || `hostname`;
+    # Try to get FQDN first, fall back to short hostname
+    my $hostname = eval { `hostname -f` } || `hostname`;
     chomp $hostname;
 
     return $hostname;
@@ -590,12 +591,11 @@ sub _ensure_host_exists {
     my $hostname = $class->_get_hostname();
     my $host_cluster = $scfg->{hostcluster} or die "host_cluster not configured\n";
 
-    # Check if host already exists
-    my $result = $class->_api_request($scfg, 'POST', '/lshost', {
-        name => $hostname,
-    });
+    # Check if host already exists (get all hosts and filter locally)
+    my $result = $class->_api_request($scfg, 'POST', '/lshost', {});
 
-    my $hosts = $result->{host} || [];
+    # API returns array directly, not {host: [...]}
+    my $hosts = ref($result) eq 'ARRAY' ? $result : [];
     my $host_exists = 0;
 
     for my $host (@$hosts) {
@@ -672,24 +672,14 @@ sub activate_volume {
     my $hostname = $class->_ensure_host_exists($scfg);
     my $vdisk_id = $class->_get_vdisk_id($scfg, $volname);
 
-    # Check if already mapped
-    my $result = $class->_api_request($scfg, 'GET', "/lsvdiskhostmap?vdisk=$vdisk_id", {});
-
-    my $mappings = $result->{mapping} || [];
-    my $already_mapped = 0;
-
-    for my $mapping (@$mappings) {
-        if ($mapping->{host} eq $hostname) {
-            $already_mapped = 1;
-            last;
-        }
-    }
-
-    # Map volume to host if not already mapped
-    unless ($already_mapped) {
+    # Try to map volume to host (ignore error if already mapped)
+    eval {
         $class->_api_request($scfg, 'POST', "/mkvdiskhostmap/$vdisk_id", {
             host => $hostname,
         });
+    };
+    if ($@ && $@ !~ /already mapped|CMMVC6035E/) {
+        die "Failed to map volume: $@\n";
     }
 
     # Rescan SCSI bus to discover new device
@@ -711,7 +701,9 @@ sub deactivate_volume {
     my $vdisk_id = $class->_get_vdisk_id($scfg, $volname);
 
     eval {
-        $class->_api_request($scfg, 'POST', "/rmvdiskhostmap/$vdisk_id/$hostname", {});
+        $class->_api_request($scfg, 'POST', "/rmvdiskhostmap/$vdisk_id", {
+            host => $hostname,
+        });
     };
     if ($@) {
         warn "Failed to unmap volume: $@\n";
