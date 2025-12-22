@@ -5,16 +5,19 @@ use warnings;
 use LWP::UserAgent;
 use LWP::Protocol::https;
 use JSON;
-use File::Slurp;
-use File::Basename;
 use URI;
-use MIME::Base64;
+use POSIX qw(strtod);
 use PVE::Tools qw(run_command file_get_contents file_set_contents);
 use PVE::INotify;
 use PVE::Cluster;
 use PVE::Storage::Plugin;
 
-use base qw(PVE::Storage::CustomPlugin);
+use base qw(PVE::Storage::Plugin);
+
+# Storage plugin type
+sub type {
+    return 'ibmflash';
+}
 
 # API version
 sub api {
@@ -25,25 +28,27 @@ sub api {
 sub options {
     return {
         portal => { fixed => 1 },
+        port => { optional => 1 },
+        pool => { fixed => 1 },
+        hostcluster => { fixed => 1 },
         username => { fixed => 1 },
         password => { fixed => 1 },
-        pool => { fixed => 1 },
-        host_cluster => { fixed => 1 },
-        timeout => { optional => 1, default => 30 },
-        verify_ssl => { optional => 1, default => 0 },
-        max_retries => { optional => 1, default => 3 },
-        retry_delay => { optional => 1, default => 1 },
+        timeout => { optional => 1 },
+        verify_ssl => { optional => 1 },
+        max_retries => { optional => 1 },
+        retry_delay => { optional => 1 },
+        nodes => { optional => 1 },
+        disable => { optional => 1 },
+        content => { optional => 1 },
+        shared => { optional => 1 },
     };
 }
 
 # Plugin capabilities
 sub plugindata {
     return {
-        content => { images => 1, rootdir => 1 },
-        format => { raw => 1 },
-        migration => { shared => 1 },
-        clone => { base => 1 },
-        snapshot => { base => 1 },
+        content => [{ images => 1, rootdir => 1 }],
+        format => [{ raw => 1 }, 'raw'],
     };
 }
 
@@ -62,6 +67,38 @@ sub volume_has_feature {
     return $features->{$feature} // 0;
 }
 
+# Plugin properties
+sub properties {
+    return {
+        hostcluster => {
+            description => "Host cluster name for dynamic host creation.",
+            type => 'string',
+        },
+        timeout => {
+            description => "API request timeout in seconds.",
+            type => 'integer',
+            minimum => 1,
+            maximum => 300,
+        },
+        verify_ssl => {
+            description => "Verify SSL certificate.",
+            type => 'boolean',
+        },
+        max_retries => {
+            description => "Maximum number of API request retries.",
+            type => 'integer',
+            minimum => 0,
+            maximum => 10,
+        },
+        retry_delay => {
+            description => "Delay between retries in seconds.",
+            type => 'integer',
+            minimum => 0,
+            maximum => 60,
+        },
+    };
+}
+
 # ============================================================================
 # REST Client & Token Management
 # ============================================================================
@@ -73,9 +110,9 @@ sub _get_token_path {
 
 # Read cached token
 sub _get_cached_token {
-    my ($self) = @_;
+    my ($class) = @_;
 
-    my $token_path = $self->_get_token_path();
+    my $token_path = $class->_get_token_path();
 
     return unless -f $token_path;
 
@@ -91,9 +128,9 @@ sub _get_cached_token {
 
 # Write token to cache with secure permissions
 sub _set_cached_token {
-    my ($self, $token) = @_;
+    my ($class, $token) = @_;
 
-    my $token_path = $self->_get_token_path();
+    my $token_path = $class->_get_token_path();
 
     eval { file_set_contents($token_path, $token, 0600) };
     if ($@) {
@@ -105,9 +142,9 @@ sub _set_cached_token {
 
 # Clear cached token
 sub _clear_cached_token {
-    my ($self) = @_;
+    my ($class) = @_;
 
-    my $token_path = $self->_get_token_path();
+    my $token_path = $class->_get_token_path();
 
     if (-f $token_path) {
         unlink $token_path or warn "Failed to delete token cache: $!\n";
@@ -118,7 +155,7 @@ sub _clear_cached_token {
 
 # Initialize LWP::UserAgent
 sub _init_ua {
-    my ($self, $scfg) = @_;
+    my ($class, $scfg) = @_;
 
     my $ua = LWP::UserAgent->new();
     $ua->timeout($scfg->{timeout} || 30);
@@ -138,13 +175,18 @@ sub _init_ua {
 
 # Build API URL
 sub _build_url {
-    my ($self, $scfg, $endpoint) = @_;
+    my ($class, $scfg, $endpoint) = @_;
 
     my $portal = $scfg->{portal};
     $portal =~ s/^https?:\/\///;  # Remove protocol if present
 
-    my $base_url = "https://$portal";
+    my $port = $scfg->{port};
+    my $base_url = $port ? "https://$portal:$port" : "https://$portal";
     my $url = URI->new($base_url);
+
+    # All IBM FlashSystem API endpoints have /rest prefix
+    $endpoint = "/rest$endpoint" unless $endpoint =~ /^\/rest/;
+
     $url->path($endpoint);
 
     return $url->as_string;
@@ -152,10 +194,10 @@ sub _build_url {
 
 # Authenticate and get token
 sub _authenticate {
-    my ($self, $scfg) = @_;
+    my ($class, $scfg) = @_;
 
-    my $ua = $self->_init_ua($scfg);
-    my $url = $self->_build_url($scfg, '/auth');
+    my $ua = $class->_init_ua($scfg);
+    my $url = $class->_build_url($scfg, '/auth');
 
     my $request = HTTP::Request->new(POST => $url);
     $request->header('X-Auth-Username' => $scfg->{username});
@@ -181,20 +223,20 @@ sub _authenticate {
     }
 
     # Cache the token
-    $self->_set_cached_token($token);
+    $class->_set_cached_token($token);
 
     return $token;
 }
 
 # Core API request method with token retry logic
 sub _api_request {
-    my ($self, $scfg, $method, $endpoint, $data) = @_;
+    my ($class, $scfg, $method, $endpoint, $data) = @_;
 
     $method = uc($method);
     die "Invalid HTTP method: $method\n" unless $method =~ /^(GET|POST|PUT|DELETE)$/;
 
-    my $ua = $self->_init_ua($scfg);
-    my $url = $self->_build_url($scfg, $endpoint);
+    my $ua = $class->_init_ua($scfg);
+    my $url = $class->_build_url($scfg, $endpoint);
 
     my $max_retries = $scfg->{max_retries} || 3;
     my $retry_delay = $scfg->{retry_delay} || 1;
@@ -202,11 +244,11 @@ sub _api_request {
     my $response;
 
     while ($attempts <= $max_retries) {
-        my $token = $self->_get_cached_token();
+        my $token = $class->_get_cached_token();
 
         # If no token, authenticate first
         unless ($token) {
-            $token = $self->_authenticate($scfg);
+            $token = $class->_authenticate($scfg);
         }
 
         # Build request
@@ -229,8 +271,8 @@ sub _api_request {
             warn "Token expired or invalid (status: $status_code), re-authenticating...\n";
 
             # Clear cache and re-authenticate
-            $self->_clear_cached_token();
-            $token = $self->_authenticate($scfg);
+            $class->_clear_cached_token();
+            $token = $class->_authenticate($scfg);
 
             $attempts++;
             sleep($retry_delay) if $attempts <= $max_retries;
@@ -265,15 +307,14 @@ sub _api_request {
 
 # Get storage status (total/free space)
 sub status {
-    my ($self, $scfg) = @_;
+    my ($class, $storeid, $scfg, $cache) = @_;
 
     my $pool_name = $scfg->{pool} or die "Pool not configured\n";
 
-    my $result = $self->_api_request($scfg, 'POST', '/lsmdiskgrp', {
-        name => $pool_name,
-    });
+    my $result = $class->_api_request($scfg, 'POST', '/lsmdiskgrp', {});
 
-    my $diskgrps = $result->{diskgrp} || [];
+    # IBM FlashSystem API returns array directly, not {diskgrp: [...]}
+    my $diskgrps = ref($result) eq 'ARRAY' ? $result : [];
 
     my $pool_info;
     for my $grp (@$diskgrps) {
@@ -285,20 +326,46 @@ sub status {
 
     die "Pool '$pool_name' not found\n" unless $pool_info;
 
-    # Convert capacity to bytes (IBM returns in MB or GB)
-    my $total = $pool_info->{capacity} || 0;
-    my $free = $pool_info->{free_capacity} || $total;
+    # Parse capacity strings like "1.00TB" to bytes
+    my $total = $class->_parse_capacity($pool_info->{capacity} || '0');
+    my $free = $class->_parse_capacity($pool_info->{free_capacity} || '0');
+    my $used = $total - $free;
 
-    # Assume capacity is in MB, convert to bytes
-    $total *= 1024 * 1024;
-    $free *= 1024 * 1024;
+    return ($total, $free, $used, 1);
+}
 
-    return ($total, $free, $pool_info->{used_capacity} || 0, 1);
+# Parse capacity string (e.g., "1.00TB", "512GB") to bytes
+sub _parse_capacity {
+    my ($class, $capacity_str) = @_;
+
+    return 0 unless $capacity_str;
+
+    # Format: "1.00TB", "512.5GB", "1024MB"
+    my ($value, $unit) = $capacity_str =~ /([\d.]+)(\w+)/;
+
+    return 0 unless defined $value && defined $unit;
+
+    # Convert string to float
+    $value = strtod($value);
+
+    # Convert to bytes
+    my %multipliers = (
+        'TB' => 1024 * 1024 * 1024 * 1024,
+        'GB' => 1024 * 1024 * 1024,
+        'MB' => 1024 * 1024,
+        'KB' => 1024,
+        'B'  => 1,
+    );
+
+    $unit = uc($unit);
+    my $multiplier = $multipliers{$unit} || 1;
+
+    return int($value * $multiplier);
 }
 
 # Allocate a new volume
 sub alloc_image {
-    my ($self, $scfg, $storeid, $volname, $size, $fmt) = @_;
+    my ($class, $scfg, $storeid, $volname, $size, $fmt) = @_;
 
     $fmt = 'raw' if !defined($fmt);
 
@@ -307,7 +374,7 @@ sub alloc_image {
     # Convert size from GB to bytes (Proxmox passes size in GB)
     my $size_bytes = $size * 1024 * 1024 * 1024;
 
-    my $result = $self->_api_request($scfg, 'POST', '/mkvdisk', {
+    my $result = $class->_api_request($scfg, 'POST', '/mkvdisk', {
         name => $volname,
         mdiskgrp => $pool_name,
         size => $size_bytes,
@@ -321,9 +388,9 @@ sub alloc_image {
 
 # Get volume size information
 sub volume_size_info {
-    my ($self, $scfg, $volname, $timeout) = @_;
+    my ($class, $scfg, $volname, $timeout) = @_;
 
-    my $result = $self->_api_request($scfg, 'POST', '/lsvdisk', {
+    my $result = $class->_api_request($scfg, 'POST', '/lsvdisk', {
         name => $volname,
     });
 
@@ -349,11 +416,11 @@ sub volume_size_info {
 
 # List volumes in the storage
 sub list_volumes {
-    my ($self, $scfg, $storeid, $vmid, $content_types) = @_;
+    my ($class, $scfg, $storeid, $vmid, $content_types) = @_;
 
     my $pool_name = $scfg->{pool} or die "Pool not configured\n";
 
-    my $result = $self->_api_request($scfg, 'POST', '/lsvdisk', {});
+    my $result = $class->_api_request($scfg, 'POST', '/lsvdisk', {});
 
     my $vdisks = $result->{vdisk} || [];
     my $volumes = [];
@@ -395,9 +462,9 @@ sub list_volumes {
 
 # Delete a volume
 sub delete_volume {
-    my ($self, $scfg, $volname) = @_;
+    my ($class, $scfg, $volname) = @_;
 
-    $self->_api_request($scfg, 'POST', '/rmvdisk', {
+    $class->_api_request($scfg, 'POST', '/rmvdisk', {
         name => $volname,
     });
 
@@ -410,7 +477,7 @@ sub delete_volume {
 
 # Get local Fibre Channel WWPNs
 sub _get_local_wwpns {
-    my ($self) = @_;
+    my ($class) = @_;
 
     my $wwpns = [];
 
@@ -445,7 +512,7 @@ sub _get_local_wwpns {
 
 # Get hostname for this node
 sub _get_hostname {
-    my ($self) = @_;
+    my ($class) = @_;
 
     my $hostname = PVE::Cluster::get_node_name() || `hostname`;
     chomp $hostname;
@@ -455,13 +522,13 @@ sub _get_hostname {
 
 # Ensure host exists on storage array, create if not
 sub _ensure_host_exists {
-    my ($self, $scfg) = @_;
+    my ($class, $scfg) = @_;
 
-    my $hostname = $self->_get_hostname();
-    my $host_cluster = $scfg->{host_cluster} or die "host_cluster not configured\n";
+    my $hostname = $class->_get_hostname();
+    my $host_cluster = $scfg->{hostcluster} or die "host_cluster not configured\n";
 
     # Check if host already exists
-    my $result = $self->_api_request($scfg, 'POST', '/lshost', {
+    my $result = $class->_api_request($scfg, 'POST', '/lshost', {
         name => $hostname,
     });
 
@@ -477,9 +544,9 @@ sub _ensure_host_exists {
 
     # Create host if not exists
     unless ($host_exists) {
-        my $wwpns = $self->_get_local_wwpns();
+        my $wwpns = $class->_get_local_wwpns();
 
-        my $create_result = $self->_api_request($scfg, 'POST', '/mkhost', {
+        my $create_result = $class->_api_request($scfg, 'POST', '/mkhost', {
             name => $hostname,
             hostcluster => $host_cluster,
             fcwwpn => $wwpns,
@@ -493,9 +560,9 @@ sub _ensure_host_exists {
 
 # Get vdisk UID for device path
 sub _get_vdisk_uid {
-    my ($self, $scfg, $volname) = @_;
+    my ($class, $scfg, $volname) = @_;
 
-    my $result = $self->_api_request($scfg, 'POST', '/lsvdisk', {
+    my $result = $class->_api_request($scfg, 'POST', '/lsvdisk', {
         name => $volname,
     });
 
@@ -516,9 +583,9 @@ sub _get_vdisk_uid {
 
 # Get volume ID by name
 sub _get_vdisk_id {
-    my ($self, $scfg, $volname) = @_;
+    my ($class, $scfg, $volname) = @_;
 
-    my $result = $self->_api_request($scfg, 'POST', '/lsvdisk', {
+    my $result = $class->_api_request($scfg, 'POST', '/lsvdisk', {
         name => $volname,
     });
 
@@ -539,13 +606,13 @@ sub _get_vdisk_id {
 
 # Activate volume (map to host)
 sub activate_volume {
-    my ($self, $scfg, $storeid, $volname, $snapname, $cache) = @_;
+    my ($class, $scfg, $storeid, $volname, $snapname, $cache) = @_;
 
-    my $hostname = $self->_ensure_host_exists($scfg);
-    my $vdisk_id = $self->_get_vdisk_id($scfg, $volname);
+    my $hostname = $class->_ensure_host_exists($scfg);
+    my $vdisk_id = $class->_get_vdisk_id($scfg, $volname);
 
     # Check if already mapped
-    my $result = $self->_api_request($scfg, 'GET', "/lsvdiskhostmap?vdisk=$vdisk_id", {});
+    my $result = $class->_api_request($scfg, 'GET', "/lsvdiskhostmap?vdisk=$vdisk_id", {});
 
     my $mappings = $result->{mapping} || [];
     my $already_mapped = 0;
@@ -559,7 +626,7 @@ sub activate_volume {
 
     # Map volume to host if not already mapped
     unless ($already_mapped) {
-        $self->_api_request($scfg, 'POST', "/mkvdiskhostmap/$vdisk_id", {
+        $class->_api_request($scfg, 'POST', "/mkvdiskhostmap/$vdisk_id", {
             host => $hostname,
         });
     }
@@ -577,13 +644,13 @@ sub activate_volume {
 
 # Deactivate volume (unmap from host)
 sub deactivate_volume {
-    my ($self, $scfg, $storeid, $volname, $snapname, $cache) = @_;
+    my ($class, $scfg, $storeid, $volname, $snapname, $cache) = @_;
 
-    my $hostname = $self->_get_hostname();
-    my $vdisk_id = $self->_get_vdisk_id($scfg, $volname);
+    my $hostname = $class->_get_hostname();
+    my $vdisk_id = $class->_get_vdisk_id($scfg, $volname);
 
     eval {
-        $self->_api_request($scfg, 'POST', "/rmvdiskhostmap/$vdisk_id/$hostname", {});
+        $class->_api_request($scfg, 'POST', "/rmvdiskhostmap/$vdisk_id/$hostname", {});
     };
     if ($@) {
         warn "Failed to unmap volume: $@\n";
@@ -594,9 +661,9 @@ sub deactivate_volume {
 
 # Get device path for volume
 sub path {
-    my ($self, $scfg, $volname, $snapname) = @_;
+    my ($class, $scfg, $volname, $storeid, $snapname) = @_;
 
-    my $vdisk_uid = $self->_get_vdisk_uid($scfg, $volname);
+    my $vdisk_uid = $class->_get_vdisk_uid($scfg, $volname);
 
     # Return WWN-based device path
     my $path = "/dev/disk/by-id/scsi-3$vdisk_uid";
@@ -610,16 +677,16 @@ sub path {
 
 # Get snapshot vdisk name
 sub _snapshot_name {
-    my ($self, $volname, $snapname) = @_;
+    my ($class, $volname, $snapname) = @_;
 
     return "${volname}-${snapname}";
 }
 
 # Get FlashCopy mapping ID
 sub _get_fcmap_id {
-    my ($self, $scfg, $source_vol, $target_vol) = @_;
+    my ($class, $scfg, $source_vol, $target_vol) = @_;
 
-    my $result = $self->_api_request($scfg, 'POST', '/lsfcmap', {});
+    my $result = $class->_api_request($scfg, 'POST', '/lsfcmap', {});
 
     my $fcmaps = $result->{fcmap} || [];
     my $fcmap_id;
@@ -636,12 +703,12 @@ sub _get_fcmap_id {
 
 # Check if snapshot exists
 sub volume_has_snapshot {
-    my ($self, $scfg, $volname, $snapname) = @_;
+    my ($class, $scfg, $volname, $snapname) = @_;
 
-    my $snapshot_name = $self->_snapshot_name($volname, $snapname);
+    my $snapshot_name = $class->_snapshot_name($volname, $snapname);
 
     eval {
-        my $result = $self->_api_request($scfg, 'POST', '/lsvdisk', {
+        my $result = $class->_api_request($scfg, 'POST', '/lsvdisk', {
             name => $snapshot_name,
         });
     };
@@ -651,14 +718,14 @@ sub volume_has_snapshot {
 
 # Create a snapshot using FlashCopy
 sub volume_snapshot {
-    my ($self, $scfg, $storeid, $volname, $snapname) = @_;
+    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
 
-    my $snapshot_name = $self->_snapshot_name($volname, $snapname);
+    my $snapshot_name = $class->_snapshot_name($volname, $snapname);
     my $pool_name = $scfg->{pool} or die "Pool not configured\n";
-    my $source_vdisk_id = $self->_get_vdisk_id($scfg, $volname);
+    my $source_vdisk_id = $class->_get_vdisk_id($scfg, $volname);
 
     # Get source volume size
-    my $result = $self->_api_request($scfg, 'POST', '/lsvdisk', {
+    my $result = $class->_api_request($scfg, 'POST', '/lsvdisk', {
         name => $volname,
     });
 
@@ -673,17 +740,17 @@ sub volume_snapshot {
     }
 
     # Step 1: Create target volume (snapshot)
-    $self->_api_request($scfg, 'POST', '/mkvdisk', {
+    $class->_api_request($scfg, 'POST', '/mkvdisk', {
         name => $snapshot_name,
         mdiskgrp => $pool_name,
         size => $source_size,
         unit => 'b',
     });
 
-    my $target_vdisk_id = $self->_get_vdisk_id($scfg, $snapshot_name);
+    my $target_vdisk_id = $class->_get_vdisk_id($scfg, $snapshot_name);
 
     # Step 2: Create FlashCopy mapping
-    my $fcmap_result = $self->_api_request($scfg, 'POST', '/mkfcmap', {
+    my $fcmap_result = $class->_api_request($scfg, 'POST', '/mkfcmap', {
         source_vdisk => $source_vdisk_id,
         target_vdisk => $target_vdisk_id,
         copyrate => 50,  # 50% copy rate
@@ -692,44 +759,44 @@ sub volume_snapshot {
     my $fcmap_id = $fcmap_result->{id} or die "No FlashCopy mapping ID returned\n";
 
     # Step 3: Prepare FlashCopy
-    $self->_api_request($scfg, 'POST', "/prestartfcmap/$fcmap_id", {});
+    $class->_api_request($scfg, 'POST', "/prestartfcmap/$fcmap_id", {});
 
     # Step 4: Start FlashCopy
-    $self->_api_request($scfg, 'POST', "/startfcmap/$fcmap_id", {});
+    $class->_api_request($scfg, 'POST', "/startfcmap/$fcmap_id", {});
 
     return $snapshot_name;
 }
 
 # Rollback to a snapshot
 sub volume_snapshot_rollback {
-    my ($self, $scfg, $storeid, $volname, $snapname) = @_;
+    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
 
-    my $snapshot_name = $self->_snapshot_name($volname, $snapname);
+    my $snapshot_name = $class->_snapshot_name($volname, $snapname);
 
     # Get FlashCopy mapping ID
-    my $fcmap_id = $self->_get_fcmap_id($scfg, $volname, $snapshot_name);
+    my $fcmap_id = $class->_get_fcmap_id($scfg, $volname, $snapshot_name);
 
     die "FlashCopy mapping not found for snapshot '$snapname'\n" unless $fcmap_id;
 
     # Restore FlashCopy mapping (rollback)
-    $self->_api_request($scfg, 'POST', "/restorefcmap/$fcmap_id", {});
+    $class->_api_request($scfg, 'POST', "/restorefcmap/$fcmap_id", {});
 
     return;
 }
 
 # Delete a snapshot
 sub volume_snapshot_delete {
-    my ($self, $scfg, $storeid, $volname, $snapname) = @_;
+    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
 
-    my $snapshot_name = $self->_snapshot_name($volname, $snapname);
+    my $snapshot_name = $class->_snapshot_name($volname, $snapname);
 
     # Get FlashCopy mapping ID
-    my $fcmap_id = $self->_get_fcmap_id($scfg, $volname, $snapshot_name);
+    my $fcmap_id = $class->_get_fcmap_id($scfg, $volname, $snapshot_name);
 
     if ($fcmap_id) {
         # Step 1: Stop FlashCopy mapping if active
         eval {
-            $self->_api_request($scfg, 'POST', "/stopfcmap/$fcmap_id", {});
+            $class->_api_request($scfg, 'POST', "/stopfcmap/$fcmap_id", {});
         };
         if ($@ && $@ !~ /already stopped|not active|not found/i) {
             warn "Failed to stop FlashCopy mapping: $@\n";
@@ -737,7 +804,7 @@ sub volume_snapshot_delete {
 
         # Step 2: Remove FlashCopy mapping
         eval {
-            $self->_api_request($scfg, 'POST', "/rmfcmap/$fcmap_id", {});
+            $class->_api_request($scfg, 'POST', "/rmfcmap/$fcmap_id", {});
         };
         if ($@ && $@ !~ /not found/i) {
             warn "Failed to remove FlashCopy mapping: $@\n";
@@ -746,7 +813,7 @@ sub volume_snapshot_delete {
 
     # Step 3: Delete snapshot volume
     eval {
-        $self->_api_request($scfg, 'POST', '/rmvdisk', {
+        $class->_api_request($scfg, 'POST', '/rmvdisk', {
             name => $snapshot_name,
         });
     };
@@ -755,6 +822,20 @@ sub volume_snapshot_delete {
     }
 
     return;
+}
+
+1;
+
+# Activate storage (no-op for SAN)
+sub activate_storage {
+    my ($class, $storeid, $scfg, $cache) = @_;
+    return 1;
+}
+
+# Deactivate storage (no-op for SAN)  
+sub deactivate_storage {
+    my ($class, $storeid, $scfg, $cache) = @_;
+    return 1;
 }
 
 1;
