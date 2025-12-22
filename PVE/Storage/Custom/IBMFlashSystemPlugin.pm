@@ -363,38 +363,83 @@ sub _parse_capacity {
     return int($value * $multiplier);
 }
 
+# Parse volume name (vm-<vmid>-disk-<diskid>) into components
+sub parse_volname {
+    my ($class, $volname) = @_;
+
+    if ($volname =~ m/^vm-(\d+)-disk-(\d+)$/) {
+        my $vmid = $1;
+        my $diskid = $2;
+        my $format = 'raw';  # We only support raw format
+        return ('images', $volname, $vmid, undef, undef, undef, $format);
+    }
+
+    die "unable to parse ibmflash volume name '$volname'\n";
+}
+
 # Allocate a new volume
 sub alloc_image {
-    my ($class, $scfg, $storeid, $volname, $size, $fmt) = @_;
+    my ($class, $storeid, $scfg, $vmid, $fmt, $name, $size) = @_;
 
     $fmt = 'raw' if !defined($fmt);
 
+    # Generate volume name if not provided
+    if (!$name) {
+        $name = $class->find_free_diskname($storeid, $scfg, $vmid, $fmt);
+    }
+
     my $pool_name = $scfg->{pool} or die "Pool not configured\n";
 
-    # Convert size from GB to bytes (Proxmox passes size in GB)
-    my $size_bytes = $size * 1024 * 1024 * 1024;
+    # Proxmox passes size in bytes, convert to GB for IBM API
+    my $size_gb = int($size / (1024 * 1024 * 1024));
+
+    warn "alloc_image: Creating volume '$name' in pool '$pool_name' with size '$size_gb' GB (from $size bytes)\n";
 
     my $result = $class->_api_request($scfg, 'POST', '/mkvdisk', {
-        name => $volname,
+        name => $name,
         mdiskgrp => $pool_name,
-        size => $size_bytes,
-        unit => 'b',
+        size => $size_gb,
+        unit => 'gb',
     });
 
     my $vol_id = $result->{id} or die "No volume ID returned from mkvdisk\n";
 
-    return $volname;
+    return $name;
+}
+
+# Parse capacity string (like "10.00GB", "1.00TB") to GB
+sub _parse_capacity_to_gb {
+    my ($class, $capacity_str) = @_;
+
+    return 0 if !$capacity_str || $capacity_str eq '0';
+
+    if ($capacity_str =~ /^([\d.]+)(\w+)$/) {
+        my $value = $1;
+        my $unit = uc($2);
+
+        if ($unit eq 'TB') {
+            return $value * 1024;
+        } elsif ($unit eq 'GB') {
+            return $value;
+        } elsif ($unit eq 'MB') {
+            return $value / 1024;
+        }
+    }
+
+    # If no unit or unknown, assume GB
+    return $capacity_str;
 }
 
 # Get volume size information
 sub volume_size_info {
-    my ($class, $scfg, $volname, $timeout) = @_;
+    my ($class, $scfg, $storeid, $volname, $timeout) = @_;
 
     my $result = $class->_api_request($scfg, 'POST', '/lsvdisk', {
         name => $volname,
     });
 
-    my $vdisks = $result->{vdisk} || [];
+    # API returns array directly, not {vdisk: [...]}
+    my $vdisks = ref($result) eq 'ARRAY' ? $result : [];
     my $vdisk_info;
 
     for my $vdisk (@$vdisks) {
@@ -406,53 +451,58 @@ sub volume_size_info {
 
     die "Volume '$volname' not found\n" unless $vdisk_info;
 
-    my $size = $vdisk_info->{capacity} || 0;
+    my $capacity_str = $vdisk_info->{capacity} || '0';
+    my $size_gb = $class->_parse_capacity_to_gb($capacity_str);
+    my $size_bytes = int($size_gb * 1024 * 1024 * 1024);
 
-    # Convert from bytes to GB (Proxmox expects GB)
-    my $size_gb = $size / (1024 * 1024 * 1024);
-
-    return sprintf("%.2f", $size_gb);
+    return $size_bytes;
 }
 
-# List volumes in the storage
-sub list_volumes {
-    my ($class, $scfg, $storeid, $vmid, $content_types) = @_;
+# List images (VM disks) in the storage
+sub list_images {
+    my ($class, $storeid, $scfg, $vmid, $vollist, $cache) = @_;
 
     my $pool_name = $scfg->{pool} or die "Pool not configured\n";
 
     my $result = $class->_api_request($scfg, 'POST', '/lsvdisk', {});
 
-    my $vdisks = $result->{vdisk} || [];
+    # API returns array directly, not {vdisk: [...]}
+    my $vdisks = ref($result) eq 'ARRAY' ? $result : [];
     my $volumes = [];
 
     for my $vdisk (@$vdisks) {
         # Filter by pool if vdisk has pool info
-        if (defined $vdisk->{mdiskgrp} && $vdisk->{mdiskgrp} ne $pool_name) {
+        if (defined $vdisk->{mdisk_grp_name} && $vdisk->{mdisk_grp_name} ne $pool_name) {
             next;
         }
 
         my $volname = $vdisk->{name};
-        my $size = $vdisk->{capacity} || 0;
 
-        # Convert from bytes to GB
-        my $size_gb = $size / (1024 * 1024 * 1024);
+        # Only list volumes matching VM image pattern
+        next if $volname !~ m/^vm-(\d+)-/;
 
-        # Parse VMID from volume name if present
-        my $owner;
-        if ($volname =~ /^vm-(\d+)-/) {
-            $owner = $1;
+        my $owner = $1;
+
+        # Filter by vollist if specified
+        my $volid = "$storeid:$volname";
+        if ($vollist) {
+            my $found = grep { $_ eq $volid } @$vollist;
+            next if !$found;
+        } else {
+            # Filter by vmid if specified (when vollist is not provided)
+            next if defined($vmid) && ($owner ne $vmid);
         }
 
-        # Filter by vmid if specified
-        if (defined $vmid && defined $owner && $owner != $vmid) {
-            next;
-        }
+        my $capacity_str = $vdisk->{capacity} || '0';
+
+        # Parse capacity string like "10.00GB" to bytes (Proxmox expects bytes)
+        my $size_gb = $class->_parse_capacity_to_gb($capacity_str);
+        my $size_bytes = int($size_gb * 1024 * 1024 * 1024);
 
         push @$volumes, {
-            volid => "$storeid:$volname",
-            name => $volname,
-            size => sprintf("%.2f", $size_gb),
+            volid => $volid,
             format => 'raw',
+            size => $size_bytes,
             vmid => $owner,
         };
     }
@@ -460,9 +510,9 @@ sub list_volumes {
     return $volumes;
 }
 
-# Delete a volume
-sub delete_volume {
-    my ($class, $scfg, $volname) = @_;
+# Free (delete) a volume
+sub free_image {
+    my ($class, $storeid, $scfg, $volname, $isBase) = @_;
 
     $class->_api_request($scfg, 'POST', '/rmvdisk', {
         name => $volname,
