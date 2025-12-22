@@ -367,14 +367,25 @@ sub _parse_capacity {
 sub parse_volname {
     my ($class, $volname) = @_;
 
-    if ($volname =~ m/^vm-(\d+)-disk-(\d+)$/) {
+    if ($volname =~ m/^vm-(\d+)-disk-(\d+)(\.\w+)?$/) {
         my $vmid = $1;
         my $diskid = $2;
-        my $format = 'raw';  # We only support raw format
+        my $extension = $3 // '';
+        my $format = $extension eq '.raw' || !$extension ? 'raw' : 'raw';  # We only support raw format
         return ('images', $volname, $vmid, undef, undef, undef, $format);
     }
 
     die "unable to parse ibmflash volume name '$volname'\n";
+}
+
+# Find free diskname - block storage doesn't use file extensions
+sub find_free_diskname {
+    my ($class, $storeid, $scfg, $vmid, $fmt, $add_fmt_suffix) = @_;
+
+    # We only support raw format, no extensions needed for block storage
+    $add_fmt_suffix = undef;
+
+    return $class->SUPER::find_free_diskname($storeid, $scfg, $vmid, $fmt, $add_fmt_suffix);
 }
 
 # Allocate a new volume
@@ -390,10 +401,10 @@ sub alloc_image {
 
     my $pool_name = $scfg->{pool} or die "Pool not configured\n";
 
-    # Proxmox passes size in bytes, convert to GB for IBM API
-    my $size_gb = int($size / (1024 * 1024 * 1024));
+    # Proxmox passes size in kilobytes, convert to GB for IBM API
+    my $size_gb = int($size / (1024 * 1024));
 
-    warn "alloc_image: Creating volume '$name' in pool '$pool_name' with size '$size_gb' GB (from $size bytes)\n";
+    warn "alloc_image: Creating volume '$name' in pool '$pool_name' with size '$size_gb' GB (from $size KB)\n";
 
     my $result = $class->_api_request($scfg, 'POST', '/mkvdisk', {
         name => $name,
@@ -478,8 +489,8 @@ sub list_images {
 
         my $volname = $vdisk->{name};
 
-        # Only list volumes matching VM image pattern
-        next if $volname !~ m/^vm-(\d+)-/;
+        # Only list volumes matching VM image pattern (vm-<vmid>-disk-<diskid> with optional extension)
+        next if $volname !~ m/^vm-(\d+)-disk-(\d+)(\.\w+)?$/;
 
         my $owner = $1;
 
@@ -514,9 +525,11 @@ sub list_images {
 sub free_image {
     my ($class, $storeid, $scfg, $volname, $isBase) = @_;
 
-    $class->_api_request($scfg, 'POST', '/rmvdisk', {
-        name => $volname,
-    });
+    # Get the vdisk ID by name
+    my $vdisk_id = $class->_get_vdisk_id($scfg, $volname);
+
+    # Delete using ID in URL path: /rmvdisk/{id}
+    $class->_api_request($scfg, 'POST', "/rmvdisk/$vdisk_id");
 
     return;
 }
@@ -612,11 +625,10 @@ sub _ensure_host_exists {
 sub _get_vdisk_uid {
     my ($class, $scfg, $volname) = @_;
 
-    my $result = $class->_api_request($scfg, 'POST', '/lsvdisk', {
-        name => $volname,
-    });
+    my $result = $class->_api_request($scfg, 'POST', '/lsvdisk', {});
 
-    my $vdisks = $result->{vdisk} || [];
+    # API returns array directly, not {vdisk: [...]}
+    my $vdisks = ref($result) eq 'ARRAY' ? $result : [];
     my $vdisk_uid;
 
     for my $vdisk (@$vdisks) {
@@ -635,11 +647,10 @@ sub _get_vdisk_uid {
 sub _get_vdisk_id {
     my ($class, $scfg, $volname) = @_;
 
-    my $result = $class->_api_request($scfg, 'POST', '/lsvdisk', {
-        name => $volname,
-    });
+    my $result = $class->_api_request($scfg, 'POST', '/lsvdisk', {});
 
-    my $vdisks = $result->{vdisk} || [];
+    # API returns array directly, not {vdisk: [...]}
+    my $vdisks = ref($result) eq 'ARRAY' ? $result : [];
     my $vdisk_id;
 
     for my $vdisk (@$vdisks) {
@@ -710,15 +721,18 @@ sub deactivate_volume {
 }
 
 # Get device path for volume
-sub path {
-    my ($class, $scfg, $volname, $storeid, $snapname) = @_;
+sub filesystem_path {
+    my ($class, $scfg, $volname, $snapname) = @_;
 
     my $vdisk_uid = $class->_get_vdisk_uid($scfg, $volname);
 
     # Return WWN-based device path
     my $path = "/dev/disk/by-id/scsi-3$vdisk_uid";
 
-    return $path;
+    # Parse volname to get vmid and vtype
+    my ($vtype, $name, $vmid) = $class->parse_volname($volname);
+
+    return wantarray ? ($path, $vmid, $vtype) : $path;
 }
 
 # ============================================================================
