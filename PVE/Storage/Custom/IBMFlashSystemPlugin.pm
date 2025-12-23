@@ -444,16 +444,17 @@ sub alloc_image {
 
     my $pool_name = $scfg->{pool} or die "Pool not configured\n";
 
-    # Proxmox passes size in kilobytes, convert to GB for IBM API
-    my $size_gb = int($size / (1024 * 1024));
+    # Proxmox passes size in kilobytes, convert to Bytes for IBM API
+    # Using bytes ensures exact size without rounding (e.g., 10.5 GB)
+    my $size_bytes = $size * 1024;
 
-    warn "alloc_image: Creating volume '$name' in pool '$pool_name' with size '$size_gb' GB (from $size KB)\n";
+    warn "alloc_image: Creating volume '$name' in pool '$pool_name' with size '$size_bytes' bytes (from $size KB)\n";
 
     my $result = $class->_api_request($scfg, 'POST', '/mkvdisk', {
         name => $name,
         mdiskgrp => $pool_name,
-        size => $size_gb,
-        unit => 'gb',
+        size => $size_bytes,
+        unit => 'b',
     });
 
     my $vol_id = $result->{id} or die "No volume ID returned from mkvdisk\n";
@@ -931,12 +932,21 @@ sub _remove_multipath_device {
     };
 
     if ($mpath_name) {
-        eval {
-            run_command(['/sbin/multipath', '-f', $mpath_name]);
-        };
-        if ($@) {
-            warn "Could not flush multipath device $mpath_name: $@\n";
-            return 0;
+        # Try to flush multipath device with retry (device may be briefly busy after VM shutdown)
+        my $max_retries = 2;
+        for my $attempt (1..$max_retries) {
+            eval {
+                run_command(['/sbin/multipath', '-f', $mpath_name]);
+            };
+            if ($@) {
+                if ($attempt < $max_retries) {
+                    select(undef, undef, undef, 0.5);  # Wait 500ms before retry
+                    next;
+                }
+                warn "Could not flush multipath device $mpath_name: $@\n";
+                return 0;
+            }
+            last;  # Success
         }
     }
 
@@ -1441,11 +1451,22 @@ sub volume_snapshot_delete {
     return;
 }
 
-# Activate storage - validates Volume Protection is disabled
+# Activate storage - validates configuration
 sub activate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
 
-    # Check pool exists and Volume Protection is disabled
+    # Check 1: Verify host cluster exists
+    my $host_cluster = $scfg->{hostcluster} or die "hostcluster not configured\n";
+    eval {
+        $class->_api_request($scfg, 'POST', "/lshostcluster/$host_cluster", {});
+    };
+    if ($@) {
+        die "[IBM FlashSystem] ERROR: Host cluster '$host_cluster' not found. " .
+            "Please create the host cluster on the storage array first:\n" .
+            "  mkhostcluster -name $host_cluster\n";
+    }
+
+    # Check 2: Verify pool exists and Volume Protection is disabled
     # This prevents storage initialization if protection is enabled
     $class->_get_pool_info($scfg);
 
