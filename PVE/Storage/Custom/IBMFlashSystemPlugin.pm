@@ -411,6 +411,12 @@ sub alloc_image {
 
     $fmt = 'raw' if !defined($fmt);
 
+    # Reject state/vmstate volumes - RAM snapshots not supported on block storage
+    # State files must be stored on local directory storage, not on SAN
+    if ($name && $name =~ /-state-/) {
+        die "RAM/state snapshots are not supported on block storage. Please use local storage for VM state.\n";
+    }
+
     # Generate volume name if not provided
     if (!$name) {
         $name = $class->find_free_diskname($storeid, $scfg, $vmid, $fmt);
@@ -1049,7 +1055,7 @@ sub volume_snapshot_rollback {
     eval {
         $class->_api_request($scfg, 'POST', "/stopfcmap/$fcmap_id", {});
     };
-    warn "Failed to stop original FlashCopy mapping: $@\n" if $@ && $@ !~ /already stopped|not active/i;
+    warn "Failed to stop original FlashCopy mapping: $@\n" if $@ && $@ !~ /already stopped|not active|stopping/i;
 
     $class->_api_request($scfg, 'POST', "/rmfcmap/$fcmap_id", { force => JSON::true });
 
