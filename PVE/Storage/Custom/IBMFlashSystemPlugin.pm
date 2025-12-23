@@ -763,7 +763,39 @@ sub free_image {
     # Get the vdisk ID by name
     my $vdisk_id = $class->_get_vdisk_id($scfg, $volname);
 
-    # Delete using ID in URL path: /rmvdisk/{id}
+    # Step 1: Remove all FlashCopy mappings for this volume
+    eval {
+        my $fcmaps = $class->_api_request($scfg, 'POST', '/lsfcmap', {});
+        $fcmaps = [] if ref($fcmaps) ne 'ARRAY';
+
+        for my $fcmap (@$fcmaps) {
+            my $source = $fcmap->{source_vdisk_name} || '';
+            my $target = $fcmap->{target_vdisk_name} || '';
+
+            if ($source eq $volname || $target eq $volname) {
+                my $fcmap_id = $fcmap->{id};
+
+                # Stop the mapping first
+                eval { $class->_api_request($scfg, 'POST', "/stopfcmap/$fcmap_id", {}); };
+
+                # Remove the mapping with force flag
+                eval {
+                    $class->_api_request($scfg, 'POST', "/rmfcmap/$fcmap_id", { force => JSON::true });
+                };
+            }
+        }
+    };
+
+    # Step 2: Get hostname and remove host mappings
+    my $hostname = eval { $class->_ensure_host_exists($scfg) };
+    if ($hostname) {
+        # Remove volume mapping from host (ignore error if not mapped)
+        eval {
+            $class->_api_request($scfg, 'POST', "/rmvdiskhostmap/$vdisk_id/$hostname", {});
+        };
+    }
+
+    # Step 3: Delete the volume
     $class->_api_request($scfg, 'POST', "/rmvdisk/$vdisk_id");
 
     return;
@@ -1355,6 +1387,15 @@ sub volume_snapshot_delete {
         }
     }
 
+    # Remove host mapping from snapshot volume before deletion
+    eval {
+        my $vdisk_id = $class->_get_vdisk_id($scfg, $snapshot_name);
+        my $hostname = $class->_ensure_host_exists($scfg);
+
+        # Remove volume mapping from host
+        $class->_api_request($scfg, 'POST', "/rmvdiskhostmap/$vdisk_id/$hostname", {});
+    };
+
     # Delete snapshot volume
     eval {
         my $vdisk_id = $class->_get_vdisk_id($scfg, $snapshot_name);
@@ -1366,8 +1407,6 @@ sub volume_snapshot_delete {
 
     return;
 }
-
-1;
 
 # Activate storage - validates Volume Protection is disabled
 sub activate_storage {
