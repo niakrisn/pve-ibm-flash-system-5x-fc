@@ -1208,6 +1208,21 @@ sub filesystem_path {
     return wantarray ? ($path, $vmid, $vtype) : $path;
 }
 
+# Get path for volume - overrides base class method
+# Required for block storage to prevent base class from looking for 'path' config
+sub path {
+    my ($class, $scfg, $volname, $storeid, $snapname) = @_;
+
+    # Delegate to filesystem_path which handles device resolution
+    my ($path, $vmid, $vtype) = $class->filesystem_path($scfg, $volname, $snapname);
+
+    # Return empty string if path not found (device not activated)
+    # Do NOT die - this allows template conversion to work
+    $path = '' if !defined($path);
+
+    return ($path, $vmid, $vtype);
+}
+
 # ============================================================================
 # FlashCopy Snapshot Operations
 # ============================================================================
