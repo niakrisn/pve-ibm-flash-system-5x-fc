@@ -444,16 +444,16 @@ sub _parse_capacity_to_gb {
         my $unit = uc($2);
 
         if ($unit eq 'TB') {
-            return $value * 1024;
+            return int($value * 1024);
         } elsif ($unit eq 'GB') {
-            return $value;
+            return int($value);
         } elsif ($unit eq 'MB') {
-            return $value / 1024;
+            return int($value / 1024);
         }
     }
 
     # If no unit or unknown, assume GB
-    return $capacity_str;
+    return int($capacity_str);
 }
 
 # Get volume size information
@@ -926,7 +926,8 @@ sub _get_fcmap_id {
 
     my $result = $class->_api_request($scfg, 'POST', '/lsfcmap', {});
 
-    my $fcmaps = $result->{fcmap} || [];
+    # API returns array directly
+    my $fcmaps = ref($result) eq 'ARRAY' ? $result : [];
     my $fcmap_id;
 
     for my $fcmap (@$fcmaps) {
@@ -941,7 +942,7 @@ sub _get_fcmap_id {
 
 # Check if snapshot exists
 sub volume_has_snapshot {
-    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
+    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
 
     my $snapshot_name = $class->_snapshot_name($storeid, $scfg, $volname, $snapname);
 
@@ -955,35 +956,64 @@ sub volume_has_snapshot {
 
 # Create a snapshot using FlashCopy
 sub volume_snapshot {
-    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
+    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
 
     my $snapshot_name = $class->_snapshot_name($storeid, $scfg, $volname, $snapname);
     my $pool_name = $scfg->{pool} or die "Pool not configured\n";
-    my $source_vdisk_id = $class->_get_vdisk_id($scfg, $volname);
 
-    # Get source volume size - query by name
+    # Get source volume size - query by name and parse to GB
     my $result = $class->_api_request($scfg, 'POST', "/lsvdisk/$volname", {});
     my $source_info = ref($result) eq 'ARRAY' ? $result->[0] : $result;
-    my $source_size = $source_info->{capacity} || 0;
+    my $capacity_str = $source_info->{capacity} || '0';
+    my $size_gb = $class->_parse_capacity_to_gb($capacity_str);
 
-    # Step 1: Create target volume (snapshot)
-    $class->_api_request($scfg, 'POST', '/mkvdisk', {
-        name => $snapshot_name,
-        mdiskgrp => $pool_name,
-        size => $source_size,
-        unit => 'b',
-    });
+    # Step 1: Create target volume (snapshot) if not exists
+    # thin: true (boolean) - critical for snapshots, no immediate space allocation
+    eval {
+        $class->_api_request($scfg, 'POST', '/mkvolume', {
+            name => $snapshot_name,
+            pool => $pool_name,
+            size => $size_gb,
+            unit => 'gb',
+            thin => JSON::true,
+        });
+    };
+    if ($@ && $@ !~ /already exists/i) {
+        die "Failed to create snapshot volume: $@\n";
+    }
 
-    my $target_vdisk_id = $class->_get_vdisk_id($scfg, $snapshot_name);
+    # Step 2: Create FlashCopy mapping using volume names (not IDs)
+    # copyrate: 0 = copy-on-write (snapshot mode), data copied only on change
+    my $fcmap_id;
+    eval {
+        my $fcmap_result = $class->_api_request($scfg, 'POST', '/mkfcmap', {
+            source => $volname,
+            target => $snapshot_name,
+            copyrate => 0,
+        });
+        # Handle response: may be hashref or string that needs decoding
+        if (ref($fcmap_result) eq 'HASH') {
+            $fcmap_id = $fcmap_result->{id};
+        } else {
+            # Try to decode if it's a string
+            eval {
+                require JSON;
+                my $decoded = decode_json($fcmap_result);
+                $fcmap_id = $decoded->{id} if ref($decoded) eq 'HASH';
+            };
+        }
+    };
+    if ($@) {
+        # If mapping already exists, get its ID
+        if ($@ =~ /already exists|identical map/i) {
+            $fcmap_id = $class->_get_fcmap_id($scfg, $volname, $snapshot_name);
+            die "FlashCopy mapping exists but ID not found\n" unless defined $fcmap_id;
+        } else {
+            die "Failed to create FlashCopy mapping: $@\n";
+        }
+    }
 
-    # Step 2: Create FlashCopy mapping
-    my $fcmap_result = $class->_api_request($scfg, 'POST', '/mkfcmap', {
-        source_vdisk => $source_vdisk_id,
-        target_vdisk => $target_vdisk_id,
-        copyrate => 50,  # 50% copy rate
-    });
-
-    my $fcmap_id = $fcmap_result->{id} or die "No FlashCopy mapping ID returned\n";
+    die "No FlashCopy mapping ID available\n" unless defined $fcmap_id;
 
     # Step 3: Prepare FlashCopy
     $class->_api_request($scfg, 'POST', "/prestartfcmap/$fcmap_id", {});
@@ -996,14 +1026,14 @@ sub volume_snapshot {
 
 # Rollback to a snapshot
 sub volume_snapshot_rollback {
-    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
+    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
 
     my $snapshot_name = $class->_snapshot_name($storeid, $scfg, $volname, $snapname);
 
     # Get FlashCopy mapping ID
     my $fcmap_id = $class->_get_fcmap_id($scfg, $volname, $snapshot_name);
 
-    die "FlashCopy mapping not found for snapshot '$snapname'\n" unless $fcmap_id;
+    die "FlashCopy mapping not found for snapshot '$snapname'\n" unless defined $fcmap_id;
 
     # Restore FlashCopy mapping (rollback)
     $class->_api_request($scfg, 'POST', "/restorefcmap/$fcmap_id", {});
@@ -1013,25 +1043,25 @@ sub volume_snapshot_rollback {
 
 # Delete a snapshot
 sub volume_snapshot_delete {
-    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
+    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
 
     my $snapshot_name = $class->_snapshot_name($storeid, $scfg, $volname, $snapname);
 
     # Get FlashCopy mapping ID
     my $fcmap_id = $class->_get_fcmap_id($scfg, $volname, $snapshot_name);
 
-    if ($fcmap_id) {
+    if (defined $fcmap_id) {
         # Step 1: Stop FlashCopy mapping if active
         eval {
             $class->_api_request($scfg, 'POST', "/stopfcmap/$fcmap_id", {});
         };
-        if ($@ && $@ !~ /already stopped|not active|not found/i) {
+        if ($@ && $@ !~ /already stopped|not active|not found|in the stopped state/i) {
             warn "Failed to stop FlashCopy mapping: $@\n";
         }
 
-        # Step 2: Remove FlashCopy mapping
+        # Step 2: Remove FlashCopy mapping (force required for stopped mappings)
         eval {
-            $class->_api_request($scfg, 'POST', "/rmfcmap/$fcmap_id", {});
+            $class->_api_request($scfg, 'POST', "/rmfcmap/$fcmap_id", { force => JSON::true });
         };
         if ($@ && $@ !~ /not found/i) {
             warn "Failed to remove FlashCopy mapping: $@\n";
@@ -1040,9 +1070,8 @@ sub volume_snapshot_delete {
 
     # Step 3: Delete snapshot volume
     eval {
-        $class->_api_request($scfg, 'POST', '/rmvdisk', {
-            name => $snapshot_name,
-        });
+        my $vdisk_id = $class->_get_vdisk_id($scfg, $snapshot_name);
+        $class->_api_request($scfg, 'POST', "/rmvdisk/$vdisk_id");
     };
     if ($@) {
         die "Failed to delete snapshot volume: $@\n";
