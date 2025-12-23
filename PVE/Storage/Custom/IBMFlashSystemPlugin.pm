@@ -573,6 +573,39 @@ sub _get_local_wwpns {
     return $wwpns;
 }
 
+# Scan Fibre Channel hosts to discover new devices
+sub _scan_fc_hosts {
+    my ($class) = @_;
+
+    # Find FC hosts by checking /sys/class/fc_host/
+    if (-d '/sys/class/fc_host') {
+        opendir(my $dh, '/sys/class/fc_host') or do {
+            warn "Can't open /sys/class/fc_host: $!\n";
+            return;
+        };
+
+        while (my $host = readdir($dh)) {
+            next if $host =~ /^\./;
+            next if $host eq '..';
+
+            # Trigger SCSI scan on this host
+            my $scan_file = "/sys/class/scsi_host/$host/scan";
+            if (-f $scan_file) {
+                eval {
+                    open(my $fh, '>', $scan_file) or die "Can't open $scan_file: $!\n";
+                    print $fh "- - -\n";
+                    close($fh);
+                };
+                warn "Failed to scan $host: $@\n" if $@;
+            }
+        }
+
+        closedir($dh);
+    }
+
+    return;
+}
+
 # Get hostname for this node
 sub _get_hostname {
     my ($class) = @_;
@@ -690,6 +723,9 @@ sub activate_volume {
         warn "SCSI rescan failed: $@\n";
     }
 
+    # Additionally, scan FC hosts directly (rescan-scsi-bus may not scan all hosts)
+    $class->_scan_fc_hosts();
+
     return 1;
 }
 
@@ -718,8 +754,8 @@ sub filesystem_path {
 
     my $vdisk_uid = $class->_get_vdisk_uid($scfg, $volname);
 
-    # Return WWN-based device path
-    my $path = "/dev/disk/by-id/scsi-3$vdisk_uid";
+    # Return WWN-based device path (symlink is lowercase)
+    my $path = "/dev/disk/by-id/scsi-3" . lc($vdisk_uid);
 
     # Parse volname to get vmid and vtype
     my ($vtype, $name, $vmid) = $class->parse_volname($volname);
