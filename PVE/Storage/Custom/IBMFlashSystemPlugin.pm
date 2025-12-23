@@ -1138,7 +1138,7 @@ sub filesystem_path {
 # ============================================================================
 
 # Get snapshot vdisk name
-# Uses pve_snap_ prefix for easy identification in IBM storage GUI
+# Uses snap- prefix for easy identification in IBM storage GUI
 sub _snapshot_name {
     my ($class, $storeid, $scfg, $volname, $snapname) = @_;
 
@@ -1146,7 +1146,7 @@ sub _snapshot_name {
     my $safe_snapname = $snapname;
     $safe_snapname =~ s/[^a-zA-Z0-9._-]/_/g;
 
-    return "pve_snap_${volname}_${safe_snapname}";
+    return "snap-${volname}-${safe_snapname}";
 }
 
 # Get FlashCopy mapping ID
