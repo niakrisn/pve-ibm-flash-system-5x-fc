@@ -965,7 +965,7 @@ sub volume_snapshot {
     my $result = $class->_api_request($scfg, 'POST', "/lsvdisk/$volname", {});
     my $source_info = ref($result) eq 'ARRAY' ? $result->[0] : $result;
     my $capacity_str = $source_info->{capacity} || '0';
-    my $size_gb = $class->_parse_capacity_to_gb($capacity_str);
+    my $size_gb = $class->_parse_capacity_to_gb($capacity_str) + 0;  # Force numeric
 
     # Step 1: Create target volume (snapshot) if not exists
     # thin: true (boolean) - critical for snapshots, no immediate space allocation
