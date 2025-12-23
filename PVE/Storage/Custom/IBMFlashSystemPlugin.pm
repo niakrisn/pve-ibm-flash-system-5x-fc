@@ -54,7 +54,7 @@ sub plugindata {
 
 # Feature support
 sub volume_has_feature {
-    my ($class, $scfg, $feature, $volname, $snapname, $running) = @_;
+    my ($class, $scfg, $feature, $storeid, $volname, $snapname, $running) = @_;
 
     my $features = {
         snapshot => 1,
@@ -460,19 +460,15 @@ sub _parse_capacity_to_gb {
 sub volume_size_info {
     my ($class, $scfg, $storeid, $volname, $timeout) = @_;
 
-    my $result = $class->_api_request($scfg, 'POST', '/lsvdisk', {
-        name => $volname,
-    });
+    # Query specific volume by name: POST /lsvdisk/{volname}
+    # API may return array or single object
+    my $result = $class->_api_request($scfg, 'POST', "/lsvdisk/$volname", {});
 
-    # API returns array directly, not {vdisk: [...]}
-    my $vdisks = ref($result) eq 'ARRAY' ? $result : [];
     my $vdisk_info;
-
-    for my $vdisk (@$vdisks) {
-        if ($vdisk->{name} eq $volname) {
-            $vdisk_info = $vdisk;
-            last;
-        }
+    if (ref($result) eq 'ARRAY') {
+        $vdisk_info = $result->[0];
+    } else {
+        $vdisk_info = $result;
     }
 
     die "Volume '$volname' not found\n" unless $vdisk_info;
@@ -567,7 +563,11 @@ sub _get_local_wwpns {
             next if $host =~ /^\./;
             next if $host eq '..';
 
-            my $port_name_file = "/sys/class/fc_host/$host/port_name";
+            # Untaint the hostname - only allow alphanumeric, underscore, hyphen
+            my ($clean_host) = $host =~ /^([\w-]+)$/;
+            next unless $clean_host;
+
+            my $port_name_file = "/sys/class/fc_host/$clean_host/port_name";
             if (-f $port_name_file) {
                 my $wwpn = eval { file_get_contents($port_name_file) };
                 if ($wwpn) {
@@ -603,15 +603,19 @@ sub _scan_fc_hosts {
             next if $host =~ /^\./;
             next if $host eq '..';
 
+            # Untaint the hostname - only allow alphanumeric, underscore, hyphen
+            my ($clean_host) = $host =~ /^([\w-]+)$/;
+            next unless $clean_host;
+
             # Trigger SCSI scan on this host
-            my $scan_file = "/sys/class/scsi_host/$host/scan";
+            my $scan_file = "/sys/class/scsi_host/$clean_host/scan";
             if (-f $scan_file) {
                 eval {
                     open(my $fh, '>', $scan_file) or die "Can't open $scan_file: $!\n";
                     print $fh "- - -\n";
                     close($fh);
                 };
-                warn "Failed to scan $host: $@\n" if $@;
+                warn "Failed to scan $clean_host: $@\n" if $@;
             }
         }
 
@@ -662,17 +666,26 @@ sub _remove_scsi_devices {
         while (my $dev = readdir($dh)) {
             next if $dev !~ /^sd/;
 
-            my $wwid_file = "$sys_path/$dev/device/wwid";
+            # Untaint the device name - only allow sd followed by alphanumeric
+            my ($clean_dev) = $dev =~ /^(sd[\w]+)$/;
+            next unless $clean_dev;
+
+            my $wwid_file = "$sys_path/$clean_dev/device/wwid";
             if (-e $wwid_file) {
                 my $wwid = eval { file_get_contents($wwid_file) };
                 chomp $wwid if $wwid;
                 # WWID format is naa.60050763808185cfd000000000000030
                 if ($wwid && $wwid =~ /$wwn/i) {
-                    # Delete this SCSI device from the bus
-                    eval {
-                        run_command(['/bin/sh', '-c', "echo 1 > $sys_path/$dev/device/delete"]);
-                    };
-                    warn "Failed to remove $dev: $@\n" if $@;
+                    # Delete this SCSI device from the bus using sysfs directly
+                    my $delete_file = "$sys_path/$clean_dev/device/delete";
+                    if (-f $delete_file) {
+                        eval {
+                            open(my $fh, '>', $delete_file) or die "Can't open $delete_file: $!\n";
+                            print $fh "1\n";
+                            close($fh);
+                        };
+                        warn "Failed to remove $clean_dev: $@\n" if $@;
+                    }
                 }
             }
         }
@@ -734,20 +747,22 @@ sub _ensure_host_exists {
 sub _get_vdisk_uid {
     my ($class, $scfg, $volname) = @_;
 
-    my $result = $class->_api_request($scfg, 'POST', '/lsvdisk', {});
+    # Query specific volume by name: POST /lsvdisk/{volname}
+    # API may return array or single object
+    my $result = $class->_api_request($scfg, 'POST', "/lsvdisk/$volname", {});
 
-    # API returns array directly, not {vdisk: [...]}
-    my $vdisks = ref($result) eq 'ARRAY' ? $result : [];
-    my $vdisk_uid;
-
-    for my $vdisk (@$vdisks) {
-        if ($vdisk->{name} eq $volname) {
-            $vdisk_uid = $vdisk->{vdisk_UID};
-            last;
-        }
+    my $vdisk_info;
+    if (ref($result) eq 'ARRAY') {
+        # API returned array, take first element
+        $vdisk_info = $result->[0];
+    } else {
+        # API returned single object
+        $vdisk_info = $result;
     }
 
-    die "Volume '$volname' not found or has no vdisk_UID\n" unless $vdisk_uid;
+    die "Volume '$volname' not found or has no vdisk_UID\n" unless $vdisk_info;
+
+    my $vdisk_uid = $vdisk_info->{vdisk_UID} or die "Volume '$volname' has no vdisk_UID\n";
 
     return $vdisk_uid;
 }
@@ -756,27 +771,29 @@ sub _get_vdisk_uid {
 sub _get_vdisk_id {
     my ($class, $scfg, $volname) = @_;
 
-    my $result = $class->_api_request($scfg, 'POST', '/lsvdisk', {});
+    # Query specific volume by name: POST /lsvdisk/{volname}
+    # API may return array or single object
+    my $result = $class->_api_request($scfg, 'POST', "/lsvdisk/$volname", {});
 
-    # API returns array directly, not {vdisk: [...]}
-    my $vdisks = ref($result) eq 'ARRAY' ? $result : [];
-    my $vdisk_id;
-
-    for my $vdisk (@$vdisks) {
-        if ($vdisk->{name} eq $volname) {
-            $vdisk_id = $vdisk->{id};
-            last;
-        }
+    my $vdisk_info;
+    if (ref($result) eq 'ARRAY') {
+        # API returned array, take first element
+        $vdisk_info = $result->[0];
+    } else {
+        # API returned single object
+        $vdisk_info = $result;
     }
 
-    die "Volume '$volname' not found\n" unless $vdisk_id;
+    die "Volume '$volname' not found\n" unless $vdisk_info;
+
+    my $vdisk_id = $vdisk_info->{id} or die "Volume '$volname' has no id\n";
 
     return $vdisk_id;
 }
 
 # Activate volume (map to host)
 sub activate_volume {
-    my ($class, $scfg, $storeid, $volname, $snapname, $cache) = @_;
+    my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
 
     my $hostname = $class->_ensure_host_exists($scfg);
     my $vdisk_id = $class->_get_vdisk_id($scfg, $volname);
@@ -807,7 +824,7 @@ sub activate_volume {
 
 # Deactivate volume (unmap from host)
 sub deactivate_volume {
-    my ($class, $scfg, $storeid, $volname, $snapname, $cache) = @_;
+    my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
 
     # Get volume info
     my $vdisk_uid = $class->_get_vdisk_uid($scfg, $volname);
@@ -840,14 +857,51 @@ sub deactivate_volume {
     return;
 }
 
+# Resolve device path using hybrid approach for maximum compatibility
+# Prefers /dev/mapper/3<UID> (Enterprise standard) but falls back to /dev/disk/by-id/scsi-3<UID>
+# If allow_missing is true, returns undef instead of dying when device not found
+sub _resolve_device_path {
+    my ($class, $vdisk_uid, $allow_missing) = @_;
+
+    my $uid_lc = lc($vdisk_uid);
+    my $mapper_path = "/dev/mapper/3" . $uid_lc;
+    my $by_id_path = "/dev/disk/by-id/scsi-3" . $uid_lc;
+
+    # Prefer /dev/mapper (user_friendly_names no) - Enterprise standard
+    if (-e $mapper_path) {
+        return $mapper_path;
+    }
+
+    # Fallback to /dev/disk/by-id (works with any multipath config)
+    if (-e $by_id_path) {
+        return $by_id_path;
+    }
+
+    # Device not found - return undef if allowed, otherwise die
+    return undef if $allow_missing;
+
+    die "Multipath device not found for UID '$vdisk_uid' (tried: $mapper_path, $by_id_path)\n";
+}
+
 # Get device path for volume
 sub filesystem_path {
     my ($class, $scfg, $volname, $snapname) = @_;
 
-    my $vdisk_uid = $class->_get_vdisk_uid($scfg, $volname);
+    # Get vdisk UID - this may fail if volume doesn't exist
+    my $vdisk_uid = eval { $class->_get_vdisk_uid($scfg, $volname) };
+    if ($@) {
+        # Volume doesn't exist or already unmapped, return undef
+        my ($vtype, $name, $vmid) = $class->parse_volname($volname);
+        my $empty = '';
+        return wantarray ? ($empty, $vmid, $vtype) : $empty;
+    }
 
-    # Return WWN-based device path (symlink is lowercase)
-    my $path = "/dev/disk/by-id/scsi-3" . lc($vdisk_uid);
+    # Use hybrid path resolution with allow_missing flag
+    # This returns undef if device is already removed (during deactivation)
+    my $path = $class->_resolve_device_path($vdisk_uid, 1);  # 1 = allow_missing
+
+    # If path is undef (device removed), return empty string
+    $path = '' unless defined $path;
 
     # Parse volname to get vmid and vtype
     my ($vtype, $name, $vmid) = $class->parse_volname($volname);
@@ -861,7 +915,7 @@ sub filesystem_path {
 
 # Get snapshot vdisk name
 sub _snapshot_name {
-    my ($class, $volname, $snapname) = @_;
+    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
 
     return "${volname}-${snapname}";
 }
@@ -887,14 +941,13 @@ sub _get_fcmap_id {
 
 # Check if snapshot exists
 sub volume_has_snapshot {
-    my ($class, $scfg, $volname, $snapname) = @_;
+    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
 
-    my $snapshot_name = $class->_snapshot_name($volname, $snapname);
+    my $snapshot_name = $class->_snapshot_name($storeid, $scfg, $volname, $snapname);
 
     eval {
-        my $result = $class->_api_request($scfg, 'POST', '/lsvdisk', {
-            name => $snapshot_name,
-        });
+        # Query specific snapshot by name: POST /lsvdisk/{snapshot_name}
+        $class->_api_request($scfg, 'POST', "/lsvdisk/$snapshot_name", {});
     };
 
     return $@ ? 0 : 1;
@@ -902,26 +955,16 @@ sub volume_has_snapshot {
 
 # Create a snapshot using FlashCopy
 sub volume_snapshot {
-    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
 
-    my $snapshot_name = $class->_snapshot_name($volname, $snapname);
+    my $snapshot_name = $class->_snapshot_name($storeid, $scfg, $volname, $snapname);
     my $pool_name = $scfg->{pool} or die "Pool not configured\n";
     my $source_vdisk_id = $class->_get_vdisk_id($scfg, $volname);
 
-    # Get source volume size
-    my $result = $class->_api_request($scfg, 'POST', '/lsvdisk', {
-        name => $volname,
-    });
-
-    my $vdisks = $result->{vdisk} || [];
-    my $source_size = 0;
-
-    for my $vdisk (@$vdisks) {
-        if ($vdisk->{name} eq $volname) {
-            $source_size = $vdisk->{capacity} || 0;
-            last;
-        }
-    }
+    # Get source volume size - query by name
+    my $result = $class->_api_request($scfg, 'POST', "/lsvdisk/$volname", {});
+    my $source_info = ref($result) eq 'ARRAY' ? $result->[0] : $result;
+    my $source_size = $source_info->{capacity} || 0;
 
     # Step 1: Create target volume (snapshot)
     $class->_api_request($scfg, 'POST', '/mkvdisk', {
@@ -953,9 +996,9 @@ sub volume_snapshot {
 
 # Rollback to a snapshot
 sub volume_snapshot_rollback {
-    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
 
-    my $snapshot_name = $class->_snapshot_name($volname, $snapname);
+    my $snapshot_name = $class->_snapshot_name($storeid, $scfg, $volname, $snapname);
 
     # Get FlashCopy mapping ID
     my $fcmap_id = $class->_get_fcmap_id($scfg, $volname, $snapshot_name);
@@ -970,9 +1013,9 @@ sub volume_snapshot_rollback {
 
 # Delete a snapshot
 sub volume_snapshot_delete {
-    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
 
-    my $snapshot_name = $class->_snapshot_name($volname, $snapname);
+    my $snapshot_name = $class->_snapshot_name($storeid, $scfg, $volname, $snapname);
 
     # Get FlashCopy mapping ID
     my $fcmap_id = $class->_get_fcmap_id($scfg, $volname, $snapshot_name);
