@@ -364,11 +364,14 @@ sub _get_pool_info {
 
     # Check Volume Protection status (unless explicitly skipped)
     if (!$skip_protection_check) {
-        my $protection = $pool_info->{vdisk_protection_enabled} || 'no';
-        if ($protection eq 'yes') {
-            die "[IBM FlashSystem] ERROR: Volume Protection is ENABLED on pool '$pool_name'. " .
-                "Storage will not initialize to prevent orphan volumes. Disable it using: " .
-                "'chmdiskgrp -vdiskprotection disable $pool_name'\n";
+        # Check actual protection status, not just enabled flag
+        # vdisk_protection_enabled can be 'yes' but globally disabled
+        # vdisk_protection_status shows real state: active, inactive, disabled
+        my $protection_status = $pool_info->{vdisk_protection_status} || 'inactive';
+        if ($protection_status eq 'active') {
+            die "[IBM FlashSystem] ERROR: Volume Protection is ACTIVE on pool '$pool_name'. " .
+                "Storage will not initialize to prevent orphan volumes. " .
+                "Disable protection using: 'chmdiskgrp -vdiskprotection disable $pool_name'\n";
         }
     }
 
