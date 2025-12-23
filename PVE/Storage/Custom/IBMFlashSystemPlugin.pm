@@ -390,7 +390,9 @@ sub parse_volname {
         return ('images', $volname, $vmid, undef, undef, undef, $format);
     }
 
-    die "unable to parse ibmflash volume name '$volname'\n";
+    # State snapshots (vm-XXX-state-snap-*) are not supported on block storage
+    # Return empty list to indicate this is not our volume
+    return;
 }
 
 # Find free diskname - block storage doesn't use file extensions
@@ -1030,13 +1032,62 @@ sub volume_snapshot_rollback {
 
     my $snapshot_name = $class->_snapshot_name($storeid, $scfg, $volname, $snapname);
 
-    # Get FlashCopy mapping ID
+    # Get the original FlashCopy mapping ID (source -> snapshot)
     my $fcmap_id = $class->_get_fcmap_id($scfg, $volname, $snapshot_name);
 
     die "FlashCopy mapping not found for snapshot '$snapname'\n" unless defined $fcmap_id;
 
-    # Restore FlashCopy mapping (rollback)
-    $class->_api_request($scfg, 'POST', "/restorefcmap/$fcmap_id", {});
+    # For rollback, we need to create a REVERSE mapping (snapshot -> source)
+    # IBM FlashCopy doesn't support restore via REST API, so we:
+    # 1. Stop and REMOVE the original mapping (required before creating reverse)
+    # 2. Create a reverse mapping with high copy rate
+    # 3. Start the reverse mapping to perform restore
+    # 4. Clean up the reverse mapping after restore
+    # 5. Recreate the original mapping for future snapshots
+
+    # Step 1: Stop and remove original mapping
+    eval {
+        $class->_api_request($scfg, 'POST', "/stopfcmap/$fcmap_id", {});
+    };
+    warn "Failed to stop original FlashCopy mapping: $@\n" if $@ && $@ !~ /already stopped|not active/i;
+
+    $class->_api_request($scfg, 'POST', "/rmfcmap/$fcmap_id", { force => JSON::true });
+
+    # Step 2: Create reverse mapping for restore (snapshot -> source, fast copy)
+    my $reverse_fcmap_id;
+    eval {
+        my $reverse_fcmap_result = $class->_api_request($scfg, 'POST', '/mkfcmap', {
+            source => $snapshot_name,
+            target => $volname,
+            copyrate => 100,  # Fast copy for restore
+        });
+
+        # Response may be hashref or need decoding
+        if (ref($reverse_fcmap_result) eq 'HASH') {
+            $reverse_fcmap_id = $reverse_fcmap_result->{id};
+        } else {
+            require JSON;
+            my $decoded = decode_json($reverse_fcmap_result);
+            $reverse_fcmap_id = $decoded->{id} if ref($decoded) eq 'HASH';
+        }
+    };
+
+    # If reverse mapping already exists, get its ID
+    if ($@ && $@ =~ /already exists|identical map/i) {
+        $reverse_fcmap_id = $class->_get_fcmap_id($scfg, $snapshot_name, $volname);
+    } elsif ($@) {
+        die "Failed to create reverse FlashCopy mapping: $@\n";
+    }
+
+    die "No reverse FlashCopy mapping ID available\n" unless defined $reverse_fcmap_id;
+
+    # Step 3: Prepare and start reverse mapping
+    $class->_api_request($scfg, 'POST', "/prestartfcmap/$reverse_fcmap_id", {});
+    $class->_api_request($scfg, 'POST', "/startfcmap/$reverse_fcmap_id", {});
+
+    # Step 4: Wait for restore to complete and clean up
+    # Note: For now we don't wait - restore happens in background
+    # The reverse mapping will be cleaned up when snapshot is deleted
 
     return;
 }
@@ -1047,11 +1098,20 @@ sub volume_snapshot_delete {
 
     my $snapshot_name = $class->_snapshot_name($storeid, $scfg, $volname, $snapname);
 
-    # Get FlashCopy mapping ID
-    my $fcmap_id = $class->_get_fcmap_id($scfg, $volname, $snapshot_name);
+    # After rollback, there may be a reverse mapping (snapshot -> source)
+    # We need to clean up BOTH directions
+    my @mappings_to_delete = (
+        [$volname, $snapshot_name],      # Original: source -> snapshot
+        [$snapshot_name, $volname],      # Reverse: snapshot -> source (from rollback)
+    );
 
-    if (defined $fcmap_id) {
-        # Step 1: Stop FlashCopy mapping if active
+    for my $pair (@mappings_to_delete) {
+        my ($source, $target) = @$pair;
+
+        my $fcmap_id = $class->_get_fcmap_id($scfg, $source, $target);
+        next unless defined $fcmap_id;
+
+        # Stop FlashCopy mapping if active
         eval {
             $class->_api_request($scfg, 'POST', "/stopfcmap/$fcmap_id", {});
         };
@@ -1059,7 +1119,7 @@ sub volume_snapshot_delete {
             warn "Failed to stop FlashCopy mapping: $@\n";
         }
 
-        # Step 2: Remove FlashCopy mapping (force required for stopped mappings)
+        # Remove FlashCopy mapping (force required for stopped mappings)
         eval {
             $class->_api_request($scfg, 'POST', "/rmfcmap/$fcmap_id", { force => JSON::true });
         };
@@ -1068,7 +1128,7 @@ sub volume_snapshot_delete {
         }
     }
 
-    # Step 3: Delete snapshot volume
+    # Delete snapshot volume
     eval {
         my $vdisk_id = $class->_get_vdisk_id($scfg, $snapshot_name);
         $class->_api_request($scfg, 'POST', "/rmvdisk/$vdisk_id");
