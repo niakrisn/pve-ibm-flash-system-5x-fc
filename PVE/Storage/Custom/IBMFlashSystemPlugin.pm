@@ -465,70 +465,57 @@ sub alloc_image {
 sub clone_image {
     my ($class, $scfg, $storeid, $volname, $vmid, $snapname) = @_;
 
-    warn "clone_image: START - volname=$volname, target_vmid=$vmid\n";
-
     # Check if source is a template by two methods:
     # 1. Check if volume name starts with "base-"
     # 2. Check if the source VM is marked as template in config
     my $is_base = $class->volume_is_base($scfg, $volname);
-    warn "clone_image: is_base (from volume_is_base)=$is_base\n";
 
     # Extract source VMID from volume name
     # Matches: vm-<VMID>-disk-<ID> or base-<VMID>-disk-<ID>
     my $source_vmid;
     if ($volname =~ m/^(?:base-|vm-)?(\d+)-disk-\d+$/) {
         $source_vmid = $1;
-        warn "clone_image: Extracted source_vmid=$source_vmid from volname=$volname\n";
     }
 
     # If not base by name, check VM config
     if (!$is_base && defined $source_vmid) {
         my $vm_config_file = "/etc/pve/qemu-server/$source_vmid.conf";
-        warn "clone_image: Checking VM config file: $vm_config_file\n";
         if (-f $vm_config_file) {
-            warn "clone_image: File exists, reading...\n";
             # Read VM config to check for template flag
             if (open(my $fh, '<', $vm_config_file)) {
                 while (my $line = <$fh>) {
                     chomp $line;
                     if ($line =~ /^template:\s*1/) {
-                        warn "clone_image: Found template flag in VM $source_vmid config\n";
                         $is_base = 1;
                         last;
                     }
                 }
                 close($fh);
-            } else {
-                warn "clone_image: Cannot read VM config: $!\n";
             }
-        } else {
-            warn "clone_image: VM config file not found: $vm_config_file\n";
         }
     }
 
     # Generate new volume name for the clone
     my $new_name = $class->find_free_diskname($storeid, $scfg, $vmid, 'raw');
 
-    warn "clone_image: is_base=$is_base, new_name=$new_name\n";
-
     if ($is_base) {
         # Linked clone from base template using FlashCopy
-        warn "clone_image: Creating linked clone '$new_name' from template volume '$volname'\n";
+        warn "Creating linked clone '$new_name' from template volume '$volname'\n";
 
         # Get source volume size
         my $vdisk_info = $class->_api_request($scfg, 'POST', "/lsvdisk/$volname", {});
         $vdisk_info = $vdisk_info->[0] if ref($vdisk_info) eq 'ARRAY';
         my $size_gb = $class->_parse_capacity_to_gb($vdisk_info->{capacity} || '0');
 
-        # Create target volume (thin provisioned for space efficiency)
+        # Create target volume as regular vdisk (not thin volume)
+        # Using mkvdisk instead of mkvolume for better compatibility
         my $pool_name = $scfg->{pool} or die "Pool not configured\n";
         eval {
-            $class->_api_request($scfg, 'POST', '/mkvolume', {
+            $class->_api_request($scfg, 'POST', '/mkvdisk', {
                 name => $new_name,
-                pool => $pool_name,
+                mdiskgrp => $pool_name,
                 size => $size_gb,
                 unit => 'gb',
-                thin => JSON::true,
             });
         };
         if ($@) {
@@ -573,7 +560,7 @@ sub clone_image {
         }
     } else {
         # Full clone - create new volume and copy data
-        warn "clone_image: Creating full clone '$new_name' from volume '$volname'\n";
+        warn "Creating full clone '$new_name' from volume '$volname'\n";
 
         # Get source volume size
         my $vdisk_info = $class->_api_request($scfg, 'POST', "/lsvdisk/$volname", {});
@@ -634,6 +621,33 @@ sub template_image {
     });
 
     return $base_name;
+}
+
+# Provide QEMU block device options for PVE 10.1+
+# This is required for VMs to start with block storage plugins
+sub qemu_blockdev_options {
+    my ($class, $scfg, $storeid, $volname, $snapshot, $vmid) = @_;
+
+    # For block storage, activate the volume first to get the device path
+    # Note: activate_volume signature is ($class, $storeid, $scfg, $volname, $snapname, $cache)
+    $class->activate_volume($storeid, $scfg, $volname, $snapshot, {});
+
+    # Wait for device to appear (up to 5 seconds)
+    my $path;
+    for my $i (1..10) {
+        $path = ($class->filesystem_path($scfg, $volname, $snapshot))[0];
+        last if $path;
+        select(undef, undef, undef, 0.5);  # Sleep 0.5 seconds
+    }
+
+    # If still no path (activation failed), return empty hash
+    return {} if !$path;
+
+    # Return QEMU blockdev configuration for block device
+    return {
+        driver => 'file',
+        filename => $path,
+    };
 }
 
 # Parse capacity string (like "10.00GB", "1.00TB") to GB
