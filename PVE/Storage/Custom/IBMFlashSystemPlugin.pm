@@ -53,35 +53,20 @@ sub plugindata {
 }
 
 # Feature support
-# Returns hashref for features that support different states (base, current, snap)
-# Returns 1 for simple boolean features
+# Returns 1 if feature is supported, undef otherwise
 sub volume_has_feature {
     my ($class, $scfg, $feature, $storeid, $volname, $snapname, $running) = @_;
 
-    # Features with state support (base, current, snap)
-    my %state_features = (
-        snapshot => { current => 1, snap => 1 },
-        clone => { base => 1, current => 1, snap => 1 },
-        copy => { base => 1, current => 1, snap => 1 },
-        sparseinit => { base => 1, current => 1 },
+    # Features supported by IBM FlashSystem
+    my %features = (
+        snapshot => 1,
+        clone => 1,        # Supports both linked and full clone via clone_image
+        copy => 1,         # Supports copying via clone_image
+        template => 1,     # Supports template conversion
+        sparseinit => 1,   # Supports sparse initialization
     );
 
-    # Simple boolean features
-    my %bool_features = (
-        template => 1,
-    );
-
-    # Check state features first
-    if (exists $state_features{$feature}) {
-        return $state_features{$feature};
-    }
-
-    # Check boolean features
-    if (exists $bool_features{$feature}) {
-        return 1;
-    }
-
-    return undef;
+    return $features{$feature} // undef;
 }
 
 # Plugin properties
