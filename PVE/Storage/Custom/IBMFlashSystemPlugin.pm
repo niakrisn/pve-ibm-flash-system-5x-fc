@@ -378,20 +378,33 @@ sub _get_pool_info {
     return $pool_info;
 }
 
-# Parse volume name (vm-<vmid>-disk-<diskid>) into components
+# Parse volume name into components
+# Handles: vm-<vmid>-disk-<diskid>, base-<vmid>-disk-<diskid>
+# Note: vm-<vmid>-state-<snapname> is handled separately (returns empty list for block storage)
 sub parse_volname {
     my ($class, $volname) = @_;
 
+    # VM/CT disks: vm-<VMID>-disk-<INDEX>
     if ($volname =~ m/^vm-(\d+)-disk-(\d+)(\.\w+)?$/) {
         my $vmid = $1;
         my $diskid = $2;
         my $extension = $3 // '';
-        my $format = $extension eq '.raw' || !$extension ? 'raw' : 'raw';  # We only support raw format
+        my $format = $extension eq '.raw' || !$extension ? 'raw' : 'raw';
         return ('images', $volname, $vmid, undef, undef, undef, $format);
     }
 
-    # State snapshots (vm-XXX-state-snap-*) are not supported on block storage
+    # Template/base disks: base-<VMID>-disk-<INDEX>
+    if ($volname =~ m/^base-(\d+)-disk-(\d+)(\.\w+)?$/) {
+        my $vmid = $1;
+        my $diskid = $2;
+        my $extension = $3 // '';
+        my $format = $extension eq '.raw' || !$extension ? 'raw' : 'raw';
+        return ('images', $volname, $vmid, undef, undef, undef, $format);
+    }
+
+    # State snapshots (vm-XXX-state-*) are not supported on block storage
     # Return empty list to indicate this is not our volume
+    # PVE will handle state files on local storage via vmstatestorage config
     return;
 }
 
@@ -403,6 +416,13 @@ sub find_free_diskname {
     $add_fmt_suffix = undef;
 
     return $class->SUPER::find_free_diskname($storeid, $scfg, $vmid, $fmt, $add_fmt_suffix);
+}
+
+# Check if volume is a base template (immutable)
+sub volume_is_base {
+    my ($class, $scfg, $volname) = @_;
+
+    return ($volname =~ m/^base-\d+-disk-\d+$/) ? 1 : 0;
 }
 
 # Allocate a new volume
@@ -439,6 +459,181 @@ sub alloc_image {
     my $vol_id = $result->{id} or die "No volume ID returned from mkvdisk\n";
 
     return $name;
+}
+
+# Clone an image (linked clone from base template or full clone)
+sub clone_image {
+    my ($class, $scfg, $storeid, $volname, $vmid, $snapname) = @_;
+
+    warn "clone_image: START - volname=$volname, target_vmid=$vmid\n";
+
+    # Check if source is a template by two methods:
+    # 1. Check if volume name starts with "base-"
+    # 2. Check if the source VM is marked as template in config
+    my $is_base = $class->volume_is_base($scfg, $volname);
+    warn "clone_image: is_base (from volume_is_base)=$is_base\n";
+
+    # Extract source VMID from volume name
+    # Matches: vm-<VMID>-disk-<ID> or base-<VMID>-disk-<ID>
+    my $source_vmid;
+    if ($volname =~ m/^(?:base-|vm-)?(\d+)-disk-\d+$/) {
+        $source_vmid = $1;
+        warn "clone_image: Extracted source_vmid=$source_vmid from volname=$volname\n";
+    }
+
+    # If not base by name, check VM config
+    if (!$is_base && defined $source_vmid) {
+        my $vm_config_file = "/etc/pve/qemu-server/$source_vmid.conf";
+        warn "clone_image: Checking VM config file: $vm_config_file\n";
+        if (-f $vm_config_file) {
+            warn "clone_image: File exists, reading...\n";
+            # Read VM config to check for template flag
+            if (open(my $fh, '<', $vm_config_file)) {
+                while (my $line = <$fh>) {
+                    chomp $line;
+                    if ($line =~ /^template:\s*1/) {
+                        warn "clone_image: Found template flag in VM $source_vmid config\n";
+                        $is_base = 1;
+                        last;
+                    }
+                }
+                close($fh);
+            } else {
+                warn "clone_image: Cannot read VM config: $!\n";
+            }
+        } else {
+            warn "clone_image: VM config file not found: $vm_config_file\n";
+        }
+    }
+
+    # Generate new volume name for the clone
+    my $new_name = $class->find_free_diskname($storeid, $scfg, $vmid, 'raw');
+
+    warn "clone_image: is_base=$is_base, new_name=$new_name\n";
+
+    if ($is_base) {
+        # Linked clone from base template using FlashCopy
+        warn "clone_image: Creating linked clone '$new_name' from template volume '$volname'\n";
+
+        # Get source volume size
+        my $vdisk_info = $class->_api_request($scfg, 'POST', "/lsvdisk/$volname", {});
+        $vdisk_info = $vdisk_info->[0] if ref($vdisk_info) eq 'ARRAY';
+        my $size_gb = $class->_parse_capacity_to_gb($vdisk_info->{capacity} || '0');
+
+        # Create target volume (thin provisioned for space efficiency)
+        my $pool_name = $scfg->{pool} or die "Pool not configured\n";
+        eval {
+            $class->_api_request($scfg, 'POST', '/mkvolume', {
+                name => $new_name,
+                pool => $pool_name,
+                size => $size_gb,
+                unit => 'gb',
+                thin => JSON::true,
+            });
+        };
+        if ($@) {
+            die "Failed to create target volume for clone: $@\n";
+        }
+
+        # Create a FlashCopy mapping from base to new volume (copy-on-write)
+        my $fcmap_result;
+        eval {
+            $fcmap_result = $class->_api_request($scfg, 'POST', '/mkfcmap', {
+                source => $volname,
+                target => $new_name,
+                copyrate => 0,        # Copy-on-write (no immediate copy)
+            });
+        };
+        if ($@) {
+            # Clean up target volume if FlashCopy fails
+            eval {
+                my $target_id = $class->_get_vdisk_id($scfg, $new_name);
+                $class->_api_request($scfg, 'POST', "/rmvdisk/$target_id");
+            };
+            die "Failed to create FlashCopy mapping for clone: $@\n";
+        }
+
+        # Get mapping ID and pre-start/start it
+        my $fcmap_id = $fcmap_result->{id};
+        if (!defined $fcmap_id || $fcmap_id eq '') {
+            # Try to decode if it's a string
+            if (ref($fcmap_result) eq '' && $fcmap_result =~ /^\d+$/) {
+                $fcmap_id = $fcmap_result;
+            } else {
+                die "Invalid FlashCopy mapping ID returned\n";
+            }
+        }
+
+        eval {
+            $class->_api_request($scfg, 'POST', "/prestartfcmap/$fcmap_id", {});
+            $class->_api_request($scfg, 'POST', "/startfcmap/$fcmap_id", {});
+        };
+        if ($@) {
+            warn "Failed to start FlashCopy mapping: $@\n";
+        }
+    } else {
+        # Full clone - create new volume and copy data
+        warn "clone_image: Creating full clone '$new_name' from volume '$volname'\n";
+
+        # Get source volume size
+        my $vdisk_info = $class->_api_request($scfg, 'POST', "/lsvdisk/$volname", {});
+        $vdisk_info = $vdisk_info->[0] if ref($vdisk_info) eq 'ARRAY';
+        my $size_gb = $class->_parse_capacity_to_gb($vdisk_info->{capacity} || '0');
+
+        # Create target volume with same size
+        my $pool_name = $scfg->{pool} or die "Pool not configured\n";
+        $class->_api_request($scfg, 'POST', '/mkvdisk', {
+            name => $new_name,
+            mdiskgrp => $pool_name,
+            size => $size_gb,
+            unit => 'gb',
+        });
+
+        # Create FlashCopy mapping with copyrate 100 (full copy)
+        my $fcmap_result = $class->_api_request($scfg, 'POST', '/mkfcmap', {
+            source => $volname,
+            target => $new_name,
+            copyrate => 100,      # Fast copy
+        });
+
+        my $fcmap_id = $fcmap_result->{id} || $fcmap_result;
+        $class->_api_request($scfg, 'POST', "/prestartfcmap/$fcmap_id", {});
+        $class->_api_request($scfg, 'POST', "/startfcmap/$fcmap_id", {});
+
+        # Wait for copy to complete (optional - could be async)
+        # For now we return immediately and let the copy complete in background
+    }
+
+    return $new_name;
+}
+
+# Convert a regular volume to a base template (immutable)
+# This is called when 'qm template <vmid>' is executed
+sub template_image {
+    my ($class, $scfg, $storeid, $volname) = @_;
+
+    # Only convert vm- volumes to base- volumes
+    if ($volname !~ m/^vm-(\d+)-disk-(\d+)$/) {
+        die "Volume '$volname' is not a regular VM disk, cannot convert to template\n";
+    }
+
+    my $vmid = $1;
+    my $diskid = $2;
+    my $base_name = "base-${vmid}-disk-${diskid}";
+
+    warn "template_image: Converting '$volname' to template '$base_name'\n";
+
+    # Rename the volume using IBM API
+    # First, get the vdisk ID
+    my $vdisk_id = $class->_get_vdisk_id($scfg, $volname);
+
+    # Use the REST API to rename - IBM FlashSystem supports volume rename
+    # The API endpoint is POST /chvdisk with name parameter
+    $class->_api_request($scfg, 'POST', "/chvdisk/$vdisk_id", {
+        name => $base_name,
+    });
+
+    return $base_name;
 }
 
 # Parse capacity string (like "10.00GB", "1.00TB") to GB
@@ -488,7 +683,7 @@ sub volume_size_info {
     return $size_bytes;
 }
 
-# List images (VM disks) in the storage
+# List images (VM disks and base templates) in the storage
 sub list_images {
     my ($class, $storeid, $scfg, $vmid, $vollist, $cache) = @_;
 
@@ -508,10 +703,17 @@ sub list_images {
 
         my $volname = $vdisk->{name};
 
-        # Only list volumes matching VM image pattern (vm-<vmid>-disk-<diskid> with optional extension)
-        next if $volname !~ m/^vm-(\d+)-disk-(\d+)(\.\w+)?$/;
-
-        my $owner = $1;
+        # Only list volumes matching VM image patterns:
+        # - vm-<vmid>-disk-<diskid> (regular VM/CT disks)
+        # - base-<vmid>-disk-<diskid> (base template disks)
+        my $owner;
+        if ($volname =~ m/^vm-(\d+)-disk-(\d+)(\.\w+)?$/) {
+            $owner = $1;
+        } elsif ($volname =~ m/^base-(\d+)-disk-(\d+)(\.\w+)?$/) {
+            $owner = $1;
+        } else {
+            next;  # Not a VM or base volume
+        }
 
         # Filter by vollist if specified
         my $volid = "$storeid:$volname";
@@ -922,10 +1124,15 @@ sub filesystem_path {
 # ============================================================================
 
 # Get snapshot vdisk name
+# Uses pve_snap_ prefix for easy identification in IBM storage GUI
 sub _snapshot_name {
     my ($class, $storeid, $scfg, $volname, $snapname) = @_;
 
-    return "${volname}-${snapname}";
+    # Sanitize snapshot name: replace special chars with underscore
+    my $safe_snapname = $snapname;
+    $safe_snapname =~ s/[^a-zA-Z0-9._-]/_/g;
+
+    return "pve_snap_${volname}_${safe_snapname}";
 }
 
 # Get FlashCopy mapping ID
