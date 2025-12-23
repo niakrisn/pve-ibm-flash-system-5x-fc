@@ -645,29 +645,22 @@ sub template_image {
 
 # Provide QEMU block device options for PVE 10.1+
 # This is required for VMs to start with block storage plugins
+# Reference: LVMPlugin.pm uses driver => 'host_device' for block storage
 sub qemu_blockdev_options {
-    my ($class, $scfg, $storeid, $volname, $snapshot, $vmid) = @_;
+    my ($class, $scfg, $storeid, $volname, $machine_version, $options) = @_;
 
-    # For block storage, activate the volume first to get the device path
-    # Note: activate_volume signature is ($class, $storeid, $scfg, $volname, $snapname, $cache)
-    $class->activate_volume($storeid, $scfg, $volname, $snapshot, {});
-
-    # Wait for device to appear (up to 5 seconds)
-    my $path;
-    for my $i (1..10) {
-        $path = ($class->filesystem_path($scfg, $volname, $snapshot))[0];
-        last if $path;
-        select(undef, undef, undef, 0.5);  # Sleep 0.5 seconds
-    }
-
-    # If still no path (activation failed), return empty hash
-    return {} if !$path;
+    # Get the device path - activation is handled separately by PVE
+    my ($path) = $class->path($scfg, $volname, $storeid, $options->{'snapshot-name'});
 
     # Return QEMU blockdev configuration for block device
-    return {
-        driver => 'file',
+    # CRITICAL: Use 'host_device' driver for block devices, not 'file'
+    # 'file' driver is for file-based storage, 'host_device' for block devices
+    my $blockdev = {
+        driver => 'host_device',
         filename => $path,
     };
+
+    return $blockdev;
 }
 
 # Parse capacity string (like "10.00GB", "1.00TB") to GB
