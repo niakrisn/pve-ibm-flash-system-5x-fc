@@ -595,8 +595,25 @@ sub clone_image {
     return $new_name;
 }
 
+# Create a base template from a regular volume
+# Called by PVE::Storage::vdisk_create_base() when 'qm template' is executed
+# Delegates to template_image which handles the IBM API rename
+sub create_base {
+    my ($class, $storeid, $scfg, $volname) = @_;
+
+    # Parse volname to validate
+    my ($vtype, $name, $vmid, $basename, $basevmid, $isBase, $format) =
+        $class->parse_volname($volname);
+
+    die "create_base on wrong vtype '$vtype'\n" if $vtype ne 'images';
+    die "create_base not possible with base image\n" if $isBase;
+
+    # Delegate to template_image which handles the rename via IBM API
+    return $class->template_image($scfg, $storeid, $volname);
+}
+
 # Convert a regular volume to a base template (immutable)
-# This is called when 'qm template <vmid>' is executed
+# Called by create_base or directly for template operations
 sub template_image {
     my ($class, $scfg, $storeid, $volname) = @_;
 
