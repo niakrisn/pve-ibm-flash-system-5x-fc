@@ -760,7 +760,23 @@ sub list_images {
 sub free_image {
     my ($class, $storeid, $scfg, $volname, $isBase) = @_;
 
-    # Get the vdisk ID by name
+    # VM state volumes (vm-*-state-*) are simple vdisks without FlashCopy dependencies
+    # These should be deleted directly without complex cleanup
+    if ($volname =~ /-state-/) {
+        my $vdisk_id = $class->_get_vdisk_id($scfg, $volname);
+        eval {
+            # Remove host mapping if present
+            my $hostname = eval { $class->_ensure_host_exists($scfg) };
+            if ($hostname) {
+                $class->_api_request($scfg, 'POST', "/rmvdiskhostmap/$vdisk_id/$hostname", {});
+            }
+        };
+        # Delete the state volume
+        $class->_api_request($scfg, 'POST', "/rmvdisk/$vdisk_id");
+        return;
+    }
+
+    # Get the vdisk ID by name for regular volumes
     my $vdisk_id = $class->_get_vdisk_id($scfg, $volname);
 
     # Step 1: Remove all FlashCopy mappings for this volume
@@ -785,6 +801,23 @@ sub free_image {
             }
         }
     };
+
+    # Step 1.5: For base volumes, check if there are dependent volumes
+    # If this is a template volume, check if there are any mappings where this is the source
+    if ($isBase) {
+        eval {
+            my $fcmaps = $class->_api_request($scfg, 'POST', '/lsfcmap', {});
+            $fcmaps = [] if ref($fcmaps) ne 'ARRAY';
+
+            for my $fcmap (@$fcmaps) {
+                my $source = $fcmap->{source_vdisk_name} || '';
+                # If this volume is still a source for some mapping, there are dependent clones
+                if ($source eq $volname) {
+                    die "Cannot delete template volume '$volname': it has dependent clones. Delete clones first.\n";
+                }
+            }
+        };
+    }
 
     # Step 2: Get hostname and remove host mappings
     my $hostname = eval { $class->_ensure_host_exists($scfg) };
