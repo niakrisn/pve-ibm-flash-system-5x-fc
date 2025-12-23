@@ -309,22 +309,8 @@ sub _api_request {
 sub status {
     my ($class, $storeid, $scfg, $cache) = @_;
 
-    my $pool_name = $scfg->{pool} or die "Pool not configured\n";
-
-    my $result = $class->_api_request($scfg, 'POST', '/lsmdiskgrp', {});
-
-    # IBM FlashSystem API returns array directly, not {diskgrp: [...]}
-    my $diskgrps = ref($result) eq 'ARRAY' ? $result : [];
-
-    my $pool_info;
-    for my $grp (@$diskgrps) {
-        if ($grp->{name} eq $pool_name) {
-            $pool_info = $grp;
-            last;
-        }
-    }
-
-    die "Pool '$pool_name' not found\n" unless $pool_info;
+    # Get pool info (includes Volume Protection check)
+    my $pool_info = $class->_get_pool_info($scfg);
 
     # Parse capacity strings like "1.00TB" to bytes
     my $total = $class->_parse_capacity($pool_info->{capacity} || '0');
@@ -361,6 +347,32 @@ sub _parse_capacity {
     my $multiplier = $multipliers{$unit} || 1;
 
     return int($value * $multiplier);
+}
+
+# Get pool info from storage array with Volume Protection check
+# Returns hashref with pool data or dies if pool not found or protection is enabled
+sub _get_pool_info {
+    my ($class, $scfg, $skip_protection_check) = @_;
+
+    my $pool_name = $scfg->{pool} or die "Pool not configured\n";
+
+    # Use specific pool endpoint: POST /lsmdiskgrp/<pool_name>
+    my $endpoint = "/lsmdiskgrp/$pool_name";
+    my $pool_info = $class->_api_request($scfg, 'POST', $endpoint, {});
+
+    die "Pool '$pool_name' not found or API returned unexpected data\n" unless $pool_info;
+
+    # Check Volume Protection status (unless explicitly skipped)
+    if (!$skip_protection_check) {
+        my $protection = $pool_info->{vdisk_protection_enabled} || 'no';
+        if ($protection eq 'yes') {
+            die "[IBM FlashSystem] ERROR: Volume Protection is ENABLED on pool '$pool_name'. " .
+                "Storage will not initialize to prevent orphan volumes. Disable it using: " .
+                "'chmdiskgrp -vdiskprotection disable $pool_name'\n";
+        }
+    }
+
+    return $pool_info;
 }
 
 # Parse volume name (vm-<vmid>-disk-<diskid>) into components
@@ -995,13 +1007,18 @@ sub volume_snapshot_delete {
 
 1;
 
-# Activate storage (no-op for SAN)
+# Activate storage - validates Volume Protection is disabled
 sub activate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
+
+    # Check pool exists and Volume Protection is disabled
+    # This prevents storage initialization if protection is enabled
+    $class->_get_pool_info($scfg);
+
     return 1;
 }
 
-# Deactivate storage (no-op for SAN)  
+# Deactivate storage (no-op for SAN)
 sub deactivate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
     return 1;
