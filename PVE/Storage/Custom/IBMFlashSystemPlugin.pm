@@ -1210,17 +1210,30 @@ sub filesystem_path {
 
 # Get path for volume - overrides base class method
 # Required for block storage to prevent base class from looking for 'path' config
+# Returns the expected device path based on vdisk UID from API, regardless of
+# whether the device is currently activated/mapped to the host
 sub path {
     my ($class, $scfg, $volname, $storeid, $snapname) = @_;
 
-    # Delegate to filesystem_path which handles device resolution
-    my ($path, $vmid, $vtype) = $class->filesystem_path($scfg, $volname, $snapname);
+    # Get vdisk UID from IBM API (works even if volume is not mapped)
+    my $vdisk_uid = eval { $class->_get_vdisk_uid($scfg, $volname) };
+    if ($@) {
+        # Volume doesn't exist in API, return empty result
+        my ($vtype, $name, $vmid) = $class->parse_volname($volname);
+        return ('', $vmid, $vtype);
+    }
 
-    # Return empty string if path not found (device not activated)
-    # Do NOT die - this allows template conversion to work
-    $path = '' if !defined($path);
+    # Construct expected device path based on UID
+    # Use /dev/mapper/3<UID> format (standard for IBM FlashSystem)
+    my $uid_lc = lc($vdisk_uid);
+    my $expected_path = "/dev/mapper/3${uid_lc}";
 
-    return ($path, $vmid, $vtype);
+    # Parse volname to get vmid and vtype
+    my ($vtype, $name, $vmid) = $class->parse_volname($volname);
+
+    # Return expected path even if device doesn't exist yet
+    # Proxmox only needs to know WHERE the device WILL be
+    return ($expected_path, $vmid, $vtype);
 }
 
 # ============================================================================
