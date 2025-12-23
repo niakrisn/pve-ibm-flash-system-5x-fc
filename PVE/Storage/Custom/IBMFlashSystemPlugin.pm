@@ -606,6 +606,67 @@ sub _scan_fc_hosts {
     return;
 }
 
+# Remove multipath device for a given vdisk UID
+# Handles both user_friendly_names (mpathX) and WWN-based naming
+sub _remove_multipath_device {
+    my ($class, $vdisk_uid) = @_;
+
+    my $wwn = lc($vdisk_uid);
+
+    # Try to find the multipath device by WWN
+    my $mpath_name = eval {
+        my $output = `multipath -ll 2>/dev/null`;
+        if ($output =~ /mpath(\w+)\s+\($wwn\)/m) {
+            return "mpath$1";
+        }
+        return undef;
+    };
+
+    if ($mpath_name) {
+        eval {
+            run_command(['/sbin/multipath', '-f', $mpath_name]);
+        };
+        if ($@) {
+            warn "Could not flush multipath device $mpath_name: $@\n";
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+# Remove underlying SCSI devices for a given vdisk UID
+# Finds all sd* devices with matching WWID in sysfs
+sub _remove_scsi_devices {
+    my ($class, $vdisk_uid) = @_;
+
+    my $wwn = lc($vdisk_uid);
+    my $sys_path = "/sys/block";
+
+    if (opendir(my $dh, $sys_path)) {
+        while (my $dev = readdir($dh)) {
+            next if $dev !~ /^sd/;
+
+            my $wwid_file = "$sys_path/$dev/device/wwid";
+            if (-e $wwid_file) {
+                my $wwid = eval { file_get_contents($wwid_file) };
+                chomp $wwid if $wwid;
+                # WWID format is naa.60050763808185cfd000000000000030
+                if ($wwid && $wwid =~ /$wwn/i) {
+                    # Delete this SCSI device from the bus
+                    eval {
+                        run_command(['/bin/sh', '-c', "echo 1 > $sys_path/$dev/device/delete"]);
+                    };
+                    warn "Failed to remove $dev: $@\n" if $@;
+                }
+            }
+        }
+        closedir($dh);
+    }
+
+    return 1;
+}
+
 # Get hostname for this node
 sub _get_hostname {
     my ($class) = @_;
@@ -733,16 +794,32 @@ sub activate_volume {
 sub deactivate_volume {
     my ($class, $scfg, $storeid, $volname, $snapname, $cache) = @_;
 
-    my $hostname = $class->_get_hostname();
+    # Get volume info
+    my $vdisk_uid = $class->_get_vdisk_uid($scfg, $volname);
     my $vdisk_id = $class->_get_vdisk_id($scfg, $volname);
 
+    # Get FQDN hostname (must match storage array host name)
+    my $hostname = $class->_get_hostname();
+
+    # Step 1: Flush multipath device from kernel
+    my $flush_ok = $class->_remove_multipath_device($vdisk_uid);
+    if (!$flush_ok) {
+        # Device is busy (mounted or in use), cannot safely deactivate
+        warn "Cannot deactivate volume $volname: multipath device is busy\n";
+        return;
+    }
+
+    # Step 2: Delete underlying SCSI devices
+    $class->_remove_scsi_devices($vdisk_uid);
+
+    # Step 3: Unmap volume from host via storage API
     eval {
         $class->_api_request($scfg, 'POST', "/rmvdiskhostmap/$vdisk_id", {
             host => $hostname,
         });
     };
     if ($@) {
-        warn "Failed to unmap volume: $@\n";
+        warn "IBM API: Failed to unmap volume $volname from host $hostname: $@\n";
     }
 
     return;
