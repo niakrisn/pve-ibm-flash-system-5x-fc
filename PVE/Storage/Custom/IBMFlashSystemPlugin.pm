@@ -2003,17 +2003,21 @@ sub path {
         return ('', $vmid, $vtype);
     }
 
-    # Construct expected device path based on UID
-    # Use /dev/mapper/3<UID> format (standard for IBM FlashSystem)
-    my $uid_lc = lc($vdisk_uid);
-    my $expected_path = "/dev/mapper/3${uid_lc}";
+    # Wait for multipath device to appear (up to 10 seconds)
+    # This is critical for UEFI VM creation where qemu-img is called immediately
+    my $mpath = $class->_wait_for_multipath_device($vdisk_uid, 10);
+
+    # If device not found, fall back to expected path format
+    # Use /dev/mapper/3600<uid> format (actual device name)
+    if (!$mpath) {
+        my $uid_lc = lc($vdisk_uid);
+        $mpath = "/dev/mapper/3600${uid_lc}";
+    }
 
     # Parse volname to get vmid and vtype
     my ($vtype, $name, $vmid) = $class->parse_volname($volname);
 
-    # Return expected path even if device doesn't exist yet
-    # Proxmox only needs to know WHERE the device WILL be
-    return ($expected_path, $vmid, $vtype);
+    return ($mpath, $vmid, $vtype);
 }
 
 # ============================================================================
