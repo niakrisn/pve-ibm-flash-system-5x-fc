@@ -1319,14 +1319,26 @@ sub free_image {
             # Check if this is a snapshot volume for the disk we're deleting
             # Snapshot volumes are named as: snap-${volname}-${snapname}
             if ($snap_volname =~ /^snap-${volname}-/) {
+                my $snap_vdisk_id = $volume->{vdisk_id};
+
                 $class->_log('info', "Deleting snapshot volume",
                     scfg => $scfg,
                     storeid => $storeid,
                     volname => $volname,
                     snap_volname => $snap_volname,
+                    snap_vdisk_id => $snap_vdisk_id || 'undef',
                 );
 
-                my $snap_vdisk_id = $volume->{vdisk_id};
+                # Skip if vdisk_id is not available
+                if (!defined $snap_vdisk_id) {
+                    $class->_log('warn', "Snapshot volume has no vdisk_id, skipping",
+                        scfg => $scfg,
+                        storeid => $storeid,
+                        snap_volname => $snap_volname,
+                    );
+                    next;
+                }
+
                 eval {
                     # Remove FlashCopy mappings for the snapshot volume
                     my $snap_fcmaps = $class->_api_request($scfg, 'POST', '/lsfcmap', {});
