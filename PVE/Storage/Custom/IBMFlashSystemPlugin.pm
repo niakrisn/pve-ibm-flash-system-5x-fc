@@ -1083,7 +1083,7 @@ sub qemu_blockdev_options {
     return $blockdev;
 }
 
-# Parse capacity string (like "10.00GB", "1.00TB") to GB
+# Parse capacity string (like "10.00GB", "1.00TB", "128.00KB") to GB
 sub _parse_capacity_to_gb {
     my ($class, $capacity_str) = @_;
 
@@ -1099,6 +1099,10 @@ sub _parse_capacity_to_gb {
             return int($value);
         } elsif ($unit eq 'MB') {
             return int($value / 1024);
+        } elsif ($unit eq 'KB') {
+            return int($value / 1024 / 1024);  # KB to GB
+        } elsif ($unit eq 'BYTES') {
+            return int($value / 1024 / 1024 / 1024);  # Bytes to GB
         }
     }
 
