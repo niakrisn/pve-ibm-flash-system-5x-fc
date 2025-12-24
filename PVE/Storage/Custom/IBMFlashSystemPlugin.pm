@@ -1317,7 +1317,8 @@ sub free_image {
         for my $volume (@$volumes) {
             my $snap_volname = $volume->{name} || '';
             # Check if this is a snapshot volume for the disk we're deleting
-            if ($snap_volname =~ /^${volname}-snap-/) {
+            # Snapshot volumes are named as: snap-${volname}-${snapname}
+            if ($snap_volname =~ /^snap-${volname}-/) {
                 $class->_log('info', "Deleting snapshot volume",
                     scfg => $scfg,
                     storeid => $storeid,
