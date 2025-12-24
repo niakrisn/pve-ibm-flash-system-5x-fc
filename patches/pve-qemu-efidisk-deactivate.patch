@@ -1,0 +1,20 @@
+--- a/usr/share/perl5/PVE/API2/Qemu.pm
++++ b/usr/share/perl5/PVE/API2/Qemu.pm
+@@ -626,6 +626,14 @@
+                     my $cvm_type = PVE::QemuServer::CPUConfig::get_cvm_type($conf);
+                     die
+                         "SEV-SNP uses consolidated read-only firmware and does not require an EFI disk\n"
+                         if $cvm_type && $cvm_type eq 'snp';
+
+                     ($volid, $size) = PVE::QemuServer::OVMF::create_efidisk(
+                         $storecfg, $storeid, $vmid, $fmt, $arch, $disk, $smm, $cvm_type,
+                     );
++
++                    # Deactivate efidisk after OVMF_VARS is written
++                    # Block storage volumes remain mapped if not explicitly deactivated
++                    eval {
++                        PVE::Storage::deactivate_volumes($storecfg, [$volid]);
++                    };
++                    log_warn($@) if $@;
+                 } elsif ($ds eq 'tpmstate0') {
+                     # A fixed size is used for TPM state volumes
