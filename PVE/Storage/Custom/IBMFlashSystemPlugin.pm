@@ -6,13 +6,157 @@ use LWP::UserAgent;
 use LWP::Protocol::https;
 use JSON;
 use URI;
-use POSIX qw(strtod);
+use POSIX qw(strtod strftime);
 use PVE::Tools qw(run_command file_get_contents file_set_contents);
 use PVE::INotify;
 use PVE::Cluster;
 use PVE::Storage::Plugin;
 
 use base qw(PVE::Storage::Plugin);
+
+# ============================================================================
+# Logging Infrastructure
+# ============================================================================
+
+# Log file path
+my $LOGFILE = "/var/log/pve-storage-ibm.log";
+my $logfh;
+
+# Initialize log file handle
+sub _init_log {
+    return if defined $logfh;
+
+    open($logfh, '>>', $LOGFILE) or do {
+        warn "Failed to open log file $LOGFILE: $!\n";
+        return;
+    };
+
+    # Set autoflush for real-time logging
+    my $old_fh = select($logfh);
+    $| = 1;
+    select($old_fh);
+
+    # Set restrictive permissions (root:adm 640)
+    chmod(0640, $LOGFILE);
+
+    return;
+}
+
+# Main logging function
+# Usage: $class->_log($level, $message, %context)
+# Levels: error, warn, info, debug
+# Context: scfg, storeid, vmid, volname, endpoint, duration, status
+sub _log {
+    my ($class, $level, $message, %context) = @_;
+
+    # Check debug level from config
+    my $level_num = $context{scfg} ? ($context{scfg}->{debug} || 0) : 0;
+    return if $level_num == 0;
+
+    # Map level names to priority numbers
+    my %level_priority = (
+        'error' => 0,  # Always log errors
+        'warn'  => 0,  # Always log warnings
+        'info'  => 1,  # Log at level 1+
+        'debug' => 2,  # Log at level 2
+    );
+
+    my $priority = $level_priority{$level} // 2;
+    return if $priority > $level_num && $level !~ /^(error|warn)$/;
+
+    # Initialize log file handle
+    $class->_init_log();
+    return unless defined $logfh;
+
+    # Format timestamp
+    my $timestamp = strftime("%Y-%m-%d %H:%M:%S", localtime);
+
+    # Build context string
+    my $ctx_str = '';
+    if (%context) {
+        my @ctx_parts;
+        push @ctx_parts, "storeid=$context{storeid}" if $context{storeid};
+        push @ctx_parts, "vmid=$context{vmid}" if defined $context{vmid};
+        push @ctx_parts, "volname=$context{volname}" if $context{volname};
+        push @ctx_parts, "endpoint=$context{endpoint}" if $context{endpoint};
+        push @ctx_parts, "duration=$context{duration}ms" if defined $context{duration};
+        push @ctx_parts, "status=$context{status}" if $context{status};
+        $ctx_str = ' [' . join(', ', @ctx_parts) . ']' if @ctx_parts;
+    }
+
+    # Format and write log entry
+    my $log_entry = sprintf("%s [%s]%s %s\n",
+        $timestamp,
+        uc($level),
+        $ctx_str,
+        $message
+    );
+
+    print $logfh $log_entry;
+
+    return;
+}
+
+# Sanitize sensitive data from hashrefs for logging
+# Masks: password, token, secret, api_key, auth, credential
+sub _sanitize_for_log {
+    my ($class, $data) = @_;
+
+    return $data unless ref($data);
+
+    # Patterns for sensitive field names
+    my @sensitive_patterns = (
+        qr/password/i,
+        qr/token/i,
+        qr/secret/i,
+        qr/api[_-]?key/i,
+        qr/auth/i,
+        qr/credential/i,
+    );
+
+    # Recursively sanitize hashrefs
+    if (ref($data) eq 'HASH') {
+        my %clean;
+        foreach my $key (keys %$data) {
+            my $is_sensitive = grep { $key =~ $_ } @sensitive_patterns;
+            if ($is_sensitive) {
+                my $value = $data->{$key};
+                # Keep first 4 and last 4 chars, mask middle
+                if (defined $value && length($value) > 8) {
+                    $clean{$key} = substr($value, 0, 4) . '****' . substr($value, -4);
+                } else {
+                    $clean{$key} = '****';
+                }
+            } else {
+                $clean{$key} = $class->_sanitize_for_log($data->{$key});
+            }
+        }
+        return \%clean;
+    }
+
+    # Recursively sanitize arrayrefs
+    if (ref($data) eq 'ARRAY') {
+        return [map { $class->_sanitize_for_log($_) } @$data];
+    }
+
+    # Return scalars as-is
+    return $data;
+}
+
+# Convert sanitized data structure to JSON for logging
+sub _format_log_body {
+    my ($class, $data) = @_;
+
+    return '' unless defined $data;
+    return $data unless ref($data);
+
+    my $clean = $class->_sanitize_for_log($data);
+    return encode_json($clean);
+}
+
+# ============================================================================
+# Plugin Declaration
+# ============================================================================
 
 # Storage plugin type
 sub type {
@@ -41,6 +185,14 @@ sub options {
         disable => { optional => 1 },
         content => { optional => 1 },
         shared => { optional => 1 },
+        debug => {
+            optional => 1,
+            type => 'integer',
+            minimum => 0,
+            maximum => 2,
+            default => 0,
+            description => "Debug level (0=off, 1=basic, 2=verbose)",
+        },
     };
 }
 
@@ -97,6 +249,13 @@ sub properties {
             type => 'integer',
             minimum => 0,
             maximum => 60,
+        },
+        debug => {
+            description => "Debug logging level (0=off, 1=basic, 2=verbose). Logs to /var/log/pve-storage-ibm.log",
+            type => 'integer',
+            minimum => 0,
+            maximum => 2,
+            default => 0,
         },
     };
 }
@@ -198,6 +357,13 @@ sub _build_url {
 sub _authenticate {
     my ($class, $scfg) = @_;
 
+    my $start_time = time;
+
+    $class->_log('info', "Authenticating with IBM FlashSystem API",
+        scfg => $scfg,
+        endpoint => '/auth',
+    );
+
     my $ua = $class->_init_ua($scfg);
     my $url = $class->_build_url($scfg, '/auth');
 
@@ -208,6 +374,13 @@ sub _authenticate {
     my $response = $ua->request($request);
 
     unless ($response->is_success) {
+        my $duration = (time - $start_time) * 1000;
+        $class->_log('error', "Authentication failed",
+            scfg => $scfg,
+            endpoint => '/auth',
+            status => $response->status_line,
+            duration => int($duration),
+        );
         die "Authentication failed: " . $response->status_line . "\n";
     }
 
@@ -218,6 +391,13 @@ sub _authenticate {
         my $content = $response->decoded_content;
         my $data = eval { decode_json($content) };
         if ($@) {
+            my $duration = (time - $start_time) * 1000;
+            $class->_log('error', "Failed to parse authentication response",
+                scfg => $scfg,
+                endpoint => '/auth',
+                error => $@,
+                duration => int($duration),
+            );
             die "Failed to parse authentication response: $@\n";
         }
 
@@ -226,6 +406,13 @@ sub _authenticate {
 
     # Cache the token
     $class->_set_cached_token($token);
+
+    my $duration = (time - $start_time) * 1000;
+    $class->_log('info', "Authentication successful",
+        scfg => $scfg,
+        endpoint => '/auth',
+        duration => int($duration),
+    );
 
     return $token;
 }
@@ -236,6 +423,17 @@ sub _api_request {
 
     $method = uc($method);
     die "Invalid HTTP method: $method\n" unless $method =~ /^(GET|POST|PUT|DELETE)$/;
+
+    my $start_time = time;
+
+    # Log API request initiation (level 2: verbose)
+    my $request_body = $data ? $class->_format_log_body($data) : '';
+    $class->_log('debug', "API request: $method $endpoint",
+        scfg => $scfg,
+        endpoint => $endpoint,
+        method => $method,
+        body => $request_body,
+    ) if $request_body;
 
     my $ua = $class->_init_ua($scfg);
     my $url = $class->_build_url($scfg, $endpoint);
@@ -250,6 +448,9 @@ sub _api_request {
 
         # If no token, authenticate first
         unless ($token) {
+            $class->_log('info', "No cached token, authenticating",
+                scfg => $scfg,
+            );
             $token = $class->_authenticate($scfg);
         }
 
@@ -270,7 +471,12 @@ sub _api_request {
         my $content = $response->decoded_content || '';
 
         if ($status_code == 401 || $status_code == 403 || $content =~ /InvalidToken/i) {
-            warn "Token expired or invalid (status: $status_code), re-authenticating...\n";
+            $class->_log('warn', "Token expired, re-authenticating",
+                scfg => $scfg,
+                endpoint => $endpoint,
+                status => $status_code,
+                attempt => $attempts + 1,
+            );
 
             # Clear cache and re-authenticate
             $class->_clear_cached_token();
@@ -287,6 +493,12 @@ sub _api_request {
 
     # Check if we exhausted retries
     if ($attempts > $max_retries) {
+        my $duration = (time - $start_time) * 1000;
+        $class->_log('error', "API request failed after $max_retries authentication retries",
+            scfg => $scfg,
+            endpoint => $endpoint,
+            duration => int($duration),
+        );
         die "API request failed after $max_retries authentication retries\n";
     }
 
@@ -294,10 +506,28 @@ sub _api_request {
     unless ($response->is_success) {
         my $status = $response->status_line;
         my $content = $response->decoded_content;
+        my $duration = (time - $start_time) * 1000;
+
+        $class->_log('error', "API request failed",
+            scfg => $scfg,
+            endpoint => $endpoint,
+            method => $method,
+            status => $status,
+            duration => int($duration),
+        );
         die "API request failed: $status - $content\n";
     }
 
     my $content = $response->decoded_content;
+
+    # Log successful API response (level 2: verbose)
+    my $duration = (time - $start_time) * 1000;
+    $class->_log('debug', "API response received",
+        scfg => $scfg,
+        endpoint => $endpoint,
+        status => $response->code,
+        duration => int($duration),
+    );
 
     # Return decoded JSON if there's content
     return $content ? decode_json($content) : {};
@@ -436,6 +666,12 @@ sub alloc_image {
     # Reject state/vmstate volumes - RAM snapshots not supported on block storage
     # State files must be stored on local directory storage, not on SAN
     if ($name && $name =~ /-state-/) {
+        $class->_log('error', "RAM/state snapshots not supported on block storage",
+            scfg => $scfg,
+            storeid => $storeid,
+            vmid => $vmid,
+            volname => $name,
+        );
         die "RAM/state snapshots are not supported on block storage. Please use local storage for VM state.\n";
     }
 
@@ -450,7 +686,14 @@ sub alloc_image {
     # Using bytes ensures exact size without rounding (e.g., 10.5 GB)
     my $size_bytes = $size * 1024;
 
-    warn "alloc_image: Creating volume '$name' in pool '$pool_name' with size '$size_bytes' bytes (from $size KB)\n";
+    $class->_log('info', "Allocating volume",
+        scfg => $scfg,
+        storeid => $storeid,
+        vmid => $vmid,
+        volname => $name,
+        pool => $pool_name,
+        size_bytes => $size_bytes,
+    );
 
     my $result = $class->_api_request($scfg, 'POST', '/mkvdisk', {
         name => $name,
@@ -460,6 +703,14 @@ sub alloc_image {
     });
 
     my $vol_id = $result->{id} or die "No volume ID returned from mkvdisk\n";
+
+    $class->_log('info', "Volume allocated successfully",
+        scfg => $scfg,
+        storeid => $storeid,
+        vmid => $vmid,
+        volname => $name,
+        vdisk_id => $vol_id,
+    );
 
     return $name;
 }
@@ -503,7 +754,14 @@ sub clone_image {
 
     if ($is_base) {
         # Linked clone from base template using FlashCopy
-        warn "Creating linked clone '$new_name' from template volume '$volname'\n";
+        $class->_log('info', "Creating linked clone from template",
+            scfg => $scfg,
+            storeid => $storeid,
+            source_volname => $volname,
+            target_vmid => $vmid,
+            target_volname => $new_name,
+            clone_type => 'linked',
+        );
 
         # Get source volume size
         my $vdisk_info = $class->_api_request($scfg, 'POST', "/lsvdisk/$volname", {});
@@ -522,6 +780,12 @@ sub clone_image {
             });
         };
         if ($@) {
+            $class->_log('error', "Failed to create target volume for clone",
+                scfg => $scfg,
+                storeid => $storeid,
+                target_volname => $new_name,
+                error => $@,
+            );
             die "Failed to create target volume for clone: $@\n";
         }
 
@@ -535,6 +799,13 @@ sub clone_image {
             });
         };
         if ($@) {
+            $class->_log('error', "Failed to create FlashCopy mapping for clone",
+                scfg => $scfg,
+                storeid => $storeid,
+                source => $volname,
+                target => $new_name,
+                error => $@,
+            );
             # Clean up target volume if FlashCopy fails
             eval {
                 my $target_id = $class->_get_vdisk_id($scfg, $new_name);
@@ -550,6 +821,11 @@ sub clone_image {
             if (ref($fcmap_result) eq '' && $fcmap_result =~ /^\d+$/) {
                 $fcmap_id = $fcmap_result;
             } else {
+                $class->_log('error', "Invalid FlashCopy mapping ID returned",
+                    scfg => $scfg,
+                    storeid => $storeid,
+                    result => $fcmap_result,
+                );
                 die "Invalid FlashCopy mapping ID returned\n";
             }
         }
@@ -559,11 +835,31 @@ sub clone_image {
             $class->_api_request($scfg, 'POST', "/startfcmap/$fcmap_id", {});
         };
         if ($@) {
-            warn "Failed to start FlashCopy mapping: $@\n";
+            $class->_log('warn', "Failed to start FlashCopy mapping",
+                scfg => $scfg,
+                storeid => $storeid,
+                fcmap_id => $fcmap_id,
+                error => $@,
+            );
         }
+
+        $class->_log('info', "Linked clone created successfully",
+            scfg => $scfg,
+            storeid => $storeid,
+            source_volname => $volname,
+            target_volname => $new_name,
+            fcmap_id => $fcmap_id,
+        );
     } else {
         # Full clone - create new volume and copy data
-        warn "Creating full clone '$new_name' from volume '$volname'\n";
+        $class->_log('info', "Creating full clone",
+            scfg => $scfg,
+            storeid => $storeid,
+            source_volname => $volname,
+            target_vmid => $vmid,
+            target_volname => $new_name,
+            clone_type => 'full',
+        );
 
         # Get source volume size
         my $vdisk_info = $class->_api_request($scfg, 'POST', "/lsvdisk/$volname", {});
@@ -589,6 +885,14 @@ sub clone_image {
         my $fcmap_id = $fcmap_result->{id} || $fcmap_result;
         $class->_api_request($scfg, 'POST', "/prestartfcmap/$fcmap_id", {});
         $class->_api_request($scfg, 'POST', "/startfcmap/$fcmap_id", {});
+
+        $class->_log('info', "Full clone created successfully",
+            scfg => $scfg,
+            storeid => $storeid,
+            source_volname => $volname,
+            target_volname => $new_name,
+            fcmap_id => $fcmap_id,
+        );
 
         # Wait for copy to complete (optional - could be async)
         # For now we return immediately and let the copy complete in background
@@ -773,6 +1077,13 @@ sub list_images {
 sub free_image {
     my ($class, $storeid, $scfg, $volname, $isBase) = @_;
 
+    $class->_log('info', "Deleting volume",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+        is_base => $isBase,
+    );
+
     # VM state volumes (vm-*-state-*) are simple vdisks without FlashCopy dependencies
     # These should be deleted directly without complex cleanup
     if ($volname =~ /-state-/) {
@@ -786,6 +1097,12 @@ sub free_image {
         };
         # Delete the state volume
         $class->_api_request($scfg, 'POST', "/rmvdisk/$vdisk_id");
+
+        $class->_log('info', "State volume deleted",
+            scfg => $scfg,
+            storeid => $storeid,
+            volname => $volname,
+        );
         return;
     }
 
@@ -797,11 +1114,18 @@ sub free_image {
     # Step 1: Remove local multipath and SCSI devices before unmapping
     # This prevents stale devices from remaining after volume deletion
     if ($vdisk_uid) {
+        $class->_log('debug', "Removing local devices",
+            scfg => $scfg,
+            storeid => $storeid,
+            volname => $volname,
+            vdisk_uid => $vdisk_uid,
+        );
         $class->_remove_multipath_device($vdisk_uid);
         $class->_remove_scsi_devices($vdisk_uid);
     }
 
     # Step 2: Remove all FlashCopy mappings for this volume
+    my $mappings_removed = 0;
     eval {
         my $fcmaps = $class->_api_request($scfg, 'POST', '/lsfcmap', {});
         $fcmaps = [] if ref($fcmaps) ne 'ARRAY';
@@ -820,9 +1144,19 @@ sub free_image {
                 eval {
                     $class->_api_request($scfg, 'POST', "/rmfcmap/$fcmap_id", { force => JSON::true });
                 };
+                $mappings_removed++;
             }
         }
     };
+
+    if ($mappings_removed > 0) {
+        $class->_log('info', "Removed FlashCopy mappings",
+            scfg => $scfg,
+            storeid => $storeid,
+            volname => $volname,
+            count => $mappings_removed,
+        );
+    }
 
     # Step 3: For base volumes, check if there are dependent volumes
     # If this is a template volume, check if there are any mappings where this is the source
@@ -835,6 +1169,11 @@ sub free_image {
                 my $source = $fcmap->{source_vdisk_name} || '';
                 # If this volume is still a source for some mapping, there are dependent clones
                 if ($source eq $volname) {
+                    $class->_log('error', "Cannot delete template with dependent clones",
+                        scfg => $scfg,
+                        storeid => $storeid,
+                        volname => $volname,
+                    );
                     die "Cannot delete template volume '$volname': it has dependent clones. Delete clones first.\n";
                 }
             }
@@ -847,11 +1186,23 @@ sub free_image {
         # Remove volume mapping from host (ignore error if not mapped)
         eval {
             $class->_api_request($scfg, 'POST', "/rmvdiskhostmap/$vdisk_id", {host => $hostname});
+            $class->_log('debug', "Removed host mapping",
+                scfg => $scfg,
+                storeid => $storeid,
+                volname => $volname,
+                hostname => $hostname,
+            );
         };
     }
 
     # Step 5: Delete the volume
     $class->_api_request($scfg, 'POST', "/rmvdisk/$vdisk_id");
+
+    $class->_log('info', "Volume deleted successfully",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+    );
 
     return;
 }
@@ -903,13 +1254,16 @@ sub _get_local_wwpns {
 sub _scan_fc_hosts {
     my ($class) = @_;
 
+    $class->_log('debug', "Scanning Fibre Channel hosts", scfg => {});
+
     # Find FC hosts by checking /sys/class/fc_host/
     if (-d '/sys/class/fc_host') {
         opendir(my $dh, '/sys/class/fc_host') or do {
-            warn "Can't open /sys/class/fc_host: $!\n";
+            $class->_log('warn', "Cannot open /sys/class/fc_host", scfg => {});
             return;
         };
 
+        my $hosts_scanned = 0;
         while (my $host = readdir($dh)) {
             next if $host =~ /^\./;
             next if $host eq '..';
@@ -925,12 +1279,24 @@ sub _scan_fc_hosts {
                     open(my $fh, '>', $scan_file) or die "Can't open $scan_file: $!\n";
                     print $fh "- - -\n";
                     close($fh);
+                    $hosts_scanned++;
                 };
-                warn "Failed to scan $clean_host: $@\n" if $@;
+                if ($@) {
+                    $class->_log('warn', "Failed to scan FC host",
+                        scfg => {},
+                        host => $clean_host,
+                        error => $@,
+                    );
+                }
             }
         }
 
         closedir($dh);
+
+        $class->_log('debug', "FC host scan completed",
+            scfg => {},
+            hosts_scanned => $hosts_scanned,
+        );
     }
 
     return;
@@ -1049,6 +1415,12 @@ sub _ensure_host_exists {
 
     # Create host if not exists
     unless ($host_exists) {
+        $class->_log('info', "Creating host on storage array",
+            scfg => $scfg,
+            hostname => $hostname,
+            hostcluster => $host_cluster,
+        );
+
         my $wwpns = $class->_get_local_wwpns();
 
         my $create_result = $class->_api_request($scfg, 'POST', '/mkhost', {
@@ -1057,7 +1429,16 @@ sub _ensure_host_exists {
             fcwwpn => $wwpns,
         });
 
-        warn "Created host '$hostname' in cluster '$host_cluster'\n";
+        $class->_log('info', "Host created successfully",
+            scfg => $scfg,
+            hostname => $hostname,
+            hostcluster => $host_cluster,
+        );
+    } else {
+        $class->_log('debug', "Host already exists on storage array",
+            scfg => $scfg,
+            hostname => $hostname,
+        );
     }
 
     return $hostname;
@@ -1115,6 +1496,12 @@ sub _get_vdisk_id {
 sub activate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
 
+    $class->_log('info', "Activating volume",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+    );
+
     my $hostname = $class->_ensure_host_exists($scfg);
     my $vdisk_id = $class->_get_vdisk_id($scfg, $volname);
 
@@ -1125,6 +1512,13 @@ sub activate_volume {
         });
     };
     if ($@ && $@ !~ /already mapped|CMMVC6035E/) {
+        $class->_log('error', "Failed to map volume to host",
+            scfg => $scfg,
+            storeid => $storeid,
+            volname => $volname,
+            hostname => $hostname,
+            error => $@,
+        );
         die "Failed to map volume: $@\n";
     }
 
@@ -1132,12 +1526,25 @@ sub activate_volume {
     # This uses "- - -" which scans all channels, all targets, all LUNs
     $class->_scan_fc_hosts();
 
+    $class->_log('info', "Volume activated successfully",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+        hostname => $hostname,
+    );
+
     return 1;
 }
 
 # Deactivate volume (unmap from host)
 sub deactivate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
+
+    $class->_log('info', "Deactivating volume",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+    );
 
     # Get volume info
     my $vdisk_uid = $class->_get_vdisk_uid($scfg, $volname);
@@ -1150,7 +1557,11 @@ sub deactivate_volume {
     my $flush_ok = $class->_remove_multipath_device($vdisk_uid);
     if (!$flush_ok) {
         # Device is busy (mounted or in use), cannot safely deactivate
-        warn "Cannot deactivate volume $volname: multipath device is busy\n";
+        $class->_log('warn', "Cannot deactivate volume, device busy",
+            scfg => $scfg,
+            storeid => $storeid,
+            volname => $volname,
+        );
         return;
     }
 
@@ -1164,8 +1575,20 @@ sub deactivate_volume {
         });
     };
     if ($@) {
-        warn "IBM API: Failed to unmap volume $volname from host $hostname: $@\n";
+        $class->_log('warn', "Failed to unmap volume from host",
+            scfg => $scfg,
+            storeid => $storeid,
+            volname => $volname,
+            hostname => $hostname,
+            error => $@,
+        );
     }
+
+    $class->_log('info', "Volume deactivated successfully",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+    );
 
     return;
 }
