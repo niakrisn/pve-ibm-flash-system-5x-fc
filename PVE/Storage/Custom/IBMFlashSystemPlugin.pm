@@ -1828,7 +1828,20 @@ sub activate_volume {
     # Wait for multipath device to appear
     # After mapping and scanning, the device needs time to be created by multipathd
     my $vdisk_uid = eval { $class->_get_vdisk_uid($scfg, $volname) };
-    if ($vdisk_uid) {
+    if ($@) {
+        $class->_log('warn', "Failed to get vdisk_uid for waiting",
+            scfg => $scfg,
+            storeid => $storeid,
+            volname => $volname,
+            error => $@,
+        );
+    } elsif ($vdisk_uid) {
+        $class->_log('debug', "Waiting for multipath device",
+            scfg => $scfg,
+            storeid => $storeid,
+            volname => $volname,
+            vdisk_uid => $vdisk_uid,
+        );
         my $mpath = $class->_wait_for_multipath_device($vdisk_uid, 30);
         if (!$mpath) {
             $class->_log('warn', "Multipath device not ready after activation",
@@ -1837,7 +1850,20 @@ sub activate_volume {
                 volname => $volname,
                 vdisk_uid => $vdisk_uid,
             );
+        } else {
+            $class->_log('debug', "Multipath device ready",
+                scfg => $scfg,
+                storeid => $storeid,
+                volname => $volname,
+                mpath => $mpath,
+            );
         }
+    } else {
+        $class->_log('warn', "No vdisk_uid available - cannot wait for device",
+            scfg => $scfg,
+            storeid => $storeid,
+            volname => $volname,
+        );
     }
 
     $class->_log('info', "Volume activated successfully",
