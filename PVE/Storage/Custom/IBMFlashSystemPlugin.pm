@@ -1309,10 +1309,17 @@ sub free_image {
 
     # Step 3.5: Remove snapshot volumes for this disk
     # When deleting a VM, we need to also delete any snapshot volumes
-    # that were created for this disk (e.g., vm-100-disk-0-snap-snap1)
+    # that were created for this disk (e.g., snap-vm-100-disk-0-snap1)
     eval {
         my $volumes = $class->_api_request($scfg, 'POST', '/lsvdisk', {});
         $volumes = [] if ref($volumes) ne 'ARRAY';
+
+        $class->_log('debug', "Searching for snapshot volumes",
+            scfg => $scfg,
+            storeid => $storeid,
+            volname => $volname,
+            total_volumes => scalar(@$volumes),
+        );
 
         for my $volume (@$volumes) {
             my $snap_volname = $volume->{name} || '';
@@ -1335,6 +1342,7 @@ sub free_image {
                         scfg => $scfg,
                         storeid => $storeid,
                         snap_volname => $snap_volname,
+                        volume_keys => join(',', keys %$volume),
                     );
                     next;
                 }
