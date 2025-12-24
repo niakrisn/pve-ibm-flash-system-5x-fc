@@ -789,10 +789,19 @@ sub free_image {
         return;
     }
 
-    # Get the vdisk ID by name for regular volumes
+    # Get the vdisk ID and UID by name for regular volumes
+    # IMPORTANT: Get UID before unmapping - we need it for local device cleanup
     my $vdisk_id = $class->_get_vdisk_id($scfg, $volname);
+    my $vdisk_uid = eval { $class->_get_vdisk_uid($scfg, $volname) };
 
-    # Step 1: Remove all FlashCopy mappings for this volume
+    # Step 1: Remove local multipath and SCSI devices before unmapping
+    # This prevents stale devices from remaining after volume deletion
+    if ($vdisk_uid) {
+        $class->_remove_multipath_device($vdisk_uid);
+        $class->_remove_scsi_devices($vdisk_uid);
+    }
+
+    # Step 2: Remove all FlashCopy mappings for this volume
     eval {
         my $fcmaps = $class->_api_request($scfg, 'POST', '/lsfcmap', {});
         $fcmaps = [] if ref($fcmaps) ne 'ARRAY';
@@ -815,7 +824,7 @@ sub free_image {
         }
     };
 
-    # Step 1.5: For base volumes, check if there are dependent volumes
+    # Step 3: For base volumes, check if there are dependent volumes
     # If this is a template volume, check if there are any mappings where this is the source
     if ($isBase) {
         eval {
@@ -832,7 +841,7 @@ sub free_image {
         };
     }
 
-    # Step 2: Get hostname and remove host mappings
+    # Step 4: Remove host mapping via storage API
     my $hostname = eval { $class->_ensure_host_exists($scfg) };
     if ($hostname) {
         # Remove volume mapping from host (ignore error if not mapped)
@@ -841,7 +850,7 @@ sub free_image {
         };
     }
 
-    # Step 3: Delete the volume
+    # Step 5: Delete the volume
     $class->_api_request($scfg, 'POST', "/rmvdisk/$vdisk_id");
 
     return;
