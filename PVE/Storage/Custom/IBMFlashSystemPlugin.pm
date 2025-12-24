@@ -1084,6 +1084,7 @@ sub qemu_blockdev_options {
 }
 
 # Parse capacity string (like "10.00GB", "1.00TB", "128.00KB") to GB
+# Returns floating point value for accurate size calculation
 sub _parse_capacity_to_gb {
     my ($class, $capacity_str) = @_;
 
@@ -1094,20 +1095,20 @@ sub _parse_capacity_to_gb {
         my $unit = uc($2);
 
         if ($unit eq 'TB') {
-            return int($value * 1024);
+            return $value * 1024;
         } elsif ($unit eq 'GB') {
-            return int($value);
+            return $value;
         } elsif ($unit eq 'MB') {
-            return int($value / 1024);
+            return $value / 1024;
         } elsif ($unit eq 'KB') {
-            return int($value / 1024 / 1024);  # KB to GB
+            return $value / 1024 / 1024;  # KB to GB
         } elsif ($unit eq 'BYTES') {
-            return int($value / 1024 / 1024 / 1024);  # Bytes to GB
+            return $value / 1024 / 1024 / 1024;  # Bytes to GB
         }
     }
 
     # If no unit or unknown, assume GB
-    return int($capacity_str);
+    return $capacity_str;
 }
 
 # Get volume size information
@@ -1187,6 +1188,9 @@ sub list_images {
         # Parse capacity string like "10.00GB" to bytes (Proxmox expects bytes)
         my $size_gb = $class->_parse_capacity_to_gb($capacity_str);
         my $size_bytes = int($size_gb * 1024 * 1024 * 1024);
+
+        # Ensure minimum size of 1KB to avoid "size=0T" in display
+        $size_bytes = 1024 if $size_bytes < 1024;
 
         push @$volumes, {
             volid => $volid,
