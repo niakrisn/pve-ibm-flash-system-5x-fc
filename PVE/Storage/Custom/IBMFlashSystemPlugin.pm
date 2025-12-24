@@ -50,8 +50,17 @@ sub _log {
     my ($class, $level, $message, %context) = @_;
 
     # Check debug level from config
-    my $level_num = $context{scfg} ? ($context{scfg}->{debug} || 0) : 0;
-    return if $level_num == 0;
+    # If scfg is not provided or empty, assume level 2 (verbose) for debug logs
+    my $scfg = $context{scfg};
+    my $level_num = 0;
+    if ($scfg && ref($scfg) eq 'HASH' && %$scfg) {
+        $level_num = $scfg->{debug} || 0;
+    } else {
+        # No config provided - only show debug logs if explicitly requested
+        # For internal methods without scfg, always show debug at level 2
+        $level_num = ($level eq 'debug') ? 2 : 0;
+    }
+    return if $level_num == 0 && $level !~ /^(error|warn)$/;
 
     # Map level names to priority numbers
     my %level_priority = (
@@ -357,6 +366,10 @@ sub _build_url {
 sub _authenticate {
     my ($class, $scfg) = @_;
 
+    $class->_log('debug', "ENTER _authenticate",
+        scfg => $scfg,
+    );
+
     my $start_time = time;
 
     $class->_log('info', "Authenticating with IBM FlashSystem API",
@@ -412,6 +425,10 @@ sub _authenticate {
         scfg => $scfg,
         endpoint => '/auth',
         duration => int($duration),
+    );
+
+    $class->_log('debug', "EXIT _authenticate successfully",
+        scfg => $scfg,
     );
 
     return $token;
@@ -541,6 +558,11 @@ sub _api_request {
 sub status {
     my ($class, $storeid, $scfg, $cache) = @_;
 
+    $class->_log('debug', "ENTER status",
+        scfg => $scfg,
+        storeid => $storeid,
+    );
+
     # Get pool info (includes Volume Protection check)
     my $pool_info = $class->_get_pool_info($scfg);
 
@@ -548,6 +570,14 @@ sub status {
     my $total = $class->_parse_capacity($pool_info->{capacity} || '0');
     my $free = $class->_parse_capacity($pool_info->{free_capacity} || '0');
     my $used = $total - $free;
+
+    $class->_log('debug', "EXIT status successfully",
+        scfg => $scfg,
+        storeid => $storeid,
+        total_bytes => $total,
+        free_bytes => $free,
+        used_bytes => $used,
+    );
 
     return ($total, $free, $used, 1);
 }
@@ -661,6 +691,15 @@ sub volume_is_base {
 sub alloc_image {
     my ($class, $storeid, $scfg, $vmid, $fmt, $name, $size) = @_;
 
+    $class->_log('debug', "ENTER alloc_image",
+        scfg => $scfg,
+        storeid => $storeid,
+        vmid => $vmid,
+        fmt => $fmt,
+        name => $name,
+        size => $size,
+    );
+
     $fmt = 'raw' if !defined($fmt);
 
     # Reject state/vmstate volumes - RAM snapshots not supported on block storage
@@ -712,12 +751,27 @@ sub alloc_image {
         vdisk_id => $vol_id,
     );
 
+    $class->_log('debug', "EXIT alloc_image successfully",
+        scfg => $scfg,
+        storeid => $storeid,
+        vmid => $vmid,
+        volname => $name,
+    );
+
     return $name;
 }
 
 # Clone an image (linked clone from base template or full clone)
 sub clone_image {
     my ($class, $scfg, $storeid, $volname, $vmid, $snapname) = @_;
+
+    $class->_log('debug', "ENTER clone_image",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+        vmid => $vmid,
+        snapname => $snapname,
+    );
 
     # Check if source is a template by two methods:
     # 1. Check if volume name starts with "base-"
@@ -898,6 +952,14 @@ sub clone_image {
         # For now we return immediately and let the copy complete in background
     }
 
+    $class->_log('debug', "EXIT clone_image successfully",
+        scfg => $scfg,
+        storeid => $storeid,
+        source_volname => $volname,
+        target_volname => $new_name,
+        target_vmid => $vmid,
+    );
+
     return $new_name;
 }
 
@@ -907,6 +969,18 @@ sub clone_image {
 sub create_base {
     my ($class, $storeid, $scfg, $volname) = @_;
 
+    $class->_log('debug', "ENTER create_base",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+    );
+
+    $class->_log('info', "Creating base template",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+    );
+
     # Parse volname to validate
     my ($vtype, $name, $vmid, $basename, $basevmid, $isBase, $format) =
         $class->parse_volname($volname);
@@ -915,13 +989,34 @@ sub create_base {
     die "create_base not possible with base image\n" if $isBase;
 
     # Delegate to template_image which handles the rename via IBM API
-    return $class->template_image($scfg, $storeid, $volname);
+    my $result = $class->template_image($scfg, $storeid, $volname);
+
+    $class->_log('debug', "EXIT create_base successfully",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+        base_name => $result,
+    );
+
+    return $result;
 }
 
 # Convert a regular volume to a base template (immutable)
 # Called by create_base or directly for template operations
 sub template_image {
     my ($class, $scfg, $storeid, $volname) = @_;
+
+    $class->_log('debug', "ENTER template_image",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+    );
+
+    $class->_log('info', "Converting volume to template",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+    );
 
     # Only convert vm- volumes to base- volumes
     if ($volname !~ m/^vm-(\d+)-disk-(\d+)$/) {
@@ -943,6 +1038,19 @@ sub template_image {
     $class->_api_request($scfg, 'POST', "/chvdisk/$vdisk_id", {
         name => $base_name,
     });
+
+    $class->_log('info', "Volume converted to template successfully",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+        base_name => $base_name,
+    );
+
+    $class->_log('debug', "EXIT template_image successfully",
+        scfg => $scfg,
+        storeid => $storeid,
+        base_name => $base_name,
+    );
 
     return $base_name;
 }
@@ -1018,6 +1126,12 @@ sub volume_size_info {
 sub list_images {
     my ($class, $storeid, $scfg, $vmid, $vollist, $cache) = @_;
 
+    $class->_log('debug', "ENTER list_images",
+        scfg => $scfg,
+        storeid => $storeid,
+        vmid => $vmid,
+    );
+
     my $pool_name = $scfg->{pool} or die "Pool not configured\n";
 
     my $result = $class->_api_request($scfg, 'POST', '/lsvdisk', {});
@@ -1070,12 +1184,25 @@ sub list_images {
         };
     }
 
+    $class->_log('debug', "EXIT list_images successfully",
+        scfg => $scfg,
+        storeid => $storeid,
+        volume_count => scalar(@$volumes),
+    );
+
     return $volumes;
 }
 
 # Free (delete) a volume
 sub free_image {
     my ($class, $storeid, $scfg, $volname, $isBase) = @_;
+
+    $class->_log('debug', "ENTER free_image",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+        is_base => $isBase,
+    );
 
     $class->_log('info', "Deleting volume",
         scfg => $scfg,
@@ -1180,6 +1307,76 @@ sub free_image {
         };
     }
 
+    # Step 3.5: Remove snapshot volumes for this disk
+    # When deleting a VM, we need to also delete any snapshot volumes
+    # that were created for this disk (e.g., vm-100-disk-0-snap-snap1)
+    eval {
+        my $volumes = $class->_api_request($scfg, 'POST', '/lsvdisk', {});
+        $volumes = [] if ref($volumes) ne 'ARRAY';
+
+        for my $volume (@$volumes) {
+            my $snap_volname = $volume->{name} || '';
+            # Check if this is a snapshot volume for the disk we're deleting
+            if ($snap_volname =~ /^${volname}-snap-/) {
+                $class->_log('info', "Deleting snapshot volume",
+                    scfg => $scfg,
+                    storeid => $storeid,
+                    volname => $volname,
+                    snap_volname => $snap_volname,
+                );
+
+                my $snap_vdisk_id = $volume->{vdisk_id};
+                eval {
+                    # Remove FlashCopy mappings for the snapshot volume
+                    my $snap_fcmaps = $class->_api_request($scfg, 'POST', '/lsfcmap', {});
+                    $snap_fcmaps = [] if ref($snap_fcmaps) ne 'ARRAY';
+
+                    for my $fcmap (@$snap_fcmaps) {
+                        my $source = $fcmap->{source_vdisk_name} || '';
+                        my $target = $fcmap->{target_vdisk_name} || '';
+                        if ($source eq $snap_volname || $target eq $snap_volname) {
+                            my $fcmap_id = $fcmap->{id};
+                            eval { $class->_api_request($scfg, 'POST', "/stopfcmap/$fcmap_id", {}); };
+                            eval { $class->_api_request($scfg, 'POST', "/rmfcmap/$fcmap_id", { force => JSON::true }); };
+                        }
+                    }
+
+                    # Remove host mapping
+                    my $hostname = eval { $class->_ensure_host_exists($scfg) };
+                    if ($hostname) {
+                        eval { $class->_api_request($scfg, 'POST', "/rmvdiskhostmap/$snap_vdisk_id", {host => $hostname}); };
+                    }
+
+                    # Delete the snapshot volume
+                    $class->_api_request($scfg, 'POST', "/rmvdisk/$snap_vdisk_id");
+
+                    $class->_log('info', "Snapshot volume deleted",
+                        scfg => $scfg,
+                        storeid => $storeid,
+                        snap_volname => $snap_volname,
+                    );
+                };
+                if ($@) {
+                    $class->_log('warn', "Failed to delete snapshot volume",
+                        scfg => $scfg,
+                        storeid => $storeid,
+                        snap_volname => $snap_volname,
+                        error => $@,
+                    );
+                }
+            }
+        }
+    };
+    if ($@) {
+        $class->_log('warn', "Error while cleaning up snapshot volumes",
+            scfg => $scfg,
+            storeid => $storeid,
+            volname => $volname,
+            error => $@,
+        );
+    }
+
+
     # Step 4: Remove host mapping via storage API
     my $hostname = eval { $class->_ensure_host_exists($scfg) };
     if ($hostname) {
@@ -1199,6 +1396,12 @@ sub free_image {
     $class->_api_request($scfg, 'POST', "/rmvdisk/$vdisk_id");
 
     $class->_log('info', "Volume deleted successfully",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+    );
+
+    $class->_log('debug', "EXIT free_image successfully",
         scfg => $scfg,
         storeid => $storeid,
         volname => $volname,
@@ -1254,7 +1457,9 @@ sub _get_local_wwpns {
 sub _scan_fc_hosts {
     my ($class) = @_;
 
-    $class->_log('debug', "Scanning Fibre Channel hosts", scfg => {});
+    $class->_log('debug', "ENTER _scan_fc_hosts", scfg => {});
+
+    my $hosts_scanned = 0;
 
     # Find FC hosts by checking /sys/class/fc_host/
     if (-d '/sys/class/fc_host') {
@@ -1263,7 +1468,6 @@ sub _scan_fc_hosts {
             return;
         };
 
-        my $hosts_scanned = 0;
         while (my $host = readdir($dh)) {
             next if $host =~ /^\./;
             next if $host eq '..';
@@ -1298,6 +1502,11 @@ sub _scan_fc_hosts {
             hosts_scanned => $hosts_scanned,
         );
     }
+
+    $class->_log('debug', "EXIT _scan_fc_hosts successfully",
+        scfg => {},
+        hosts_scanned => $hosts_scanned,
+    );
 
     return;
 }
@@ -1396,6 +1605,10 @@ sub _get_hostname {
 sub _ensure_host_exists {
     my ($class, $scfg) = @_;
 
+    $class->_log('debug', "ENTER _ensure_host_exists",
+        scfg => $scfg,
+    );
+
     my $hostname = $class->_get_hostname();
     my $host_cluster = $scfg->{hostcluster} or die "host_cluster not configured\n";
 
@@ -1440,6 +1653,11 @@ sub _ensure_host_exists {
             hostname => $hostname,
         );
     }
+
+    $class->_log('debug', "EXIT _ensure_host_exists successfully",
+        scfg => $scfg,
+        hostname => $hostname,
+    );
 
     return $hostname;
 }
@@ -1496,6 +1714,12 @@ sub _get_vdisk_id {
 sub activate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
 
+    $class->_log('debug', "ENTER activate_volume",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+    );
+
     $class->_log('info', "Activating volume",
         scfg => $scfg,
         storeid => $storeid,
@@ -1533,12 +1757,24 @@ sub activate_volume {
         hostname => $hostname,
     );
 
+    $class->_log('debug', "EXIT activate_volume successfully",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+    );
+
     return 1;
 }
 
 # Deactivate volume (unmap from host)
 sub deactivate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
+
+    $class->_log('debug', "ENTER deactivate_volume",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+    );
 
     $class->_log('info', "Deactivating volume",
         scfg => $scfg,
@@ -1585,6 +1821,12 @@ sub deactivate_volume {
     }
 
     $class->_log('info', "Volume deactivated successfully",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+    );
+
+    $class->_log('debug', "EXIT deactivate_volume successfully",
         scfg => $scfg,
         storeid => $storeid,
         volname => $volname,
@@ -1727,6 +1969,20 @@ sub volume_has_snapshot {
 sub volume_snapshot {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
 
+    $class->_log('debug', "ENTER volume_snapshot",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+        snapname => $snapname,
+    );
+
+    $class->_log('info', "Creating snapshot",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+        snapname => $snapname,
+    );
+
     my $snapshot_name = $class->_snapshot_name($storeid, $scfg, $volname, $snapname);
     my $pool_name = $scfg->{pool} or die "Pool not configured\n";
 
@@ -1790,12 +2046,41 @@ sub volume_snapshot {
     # Step 4: Start FlashCopy
     $class->_api_request($scfg, 'POST', "/startfcmap/$fcmap_id", {});
 
+    $class->_log('info', "Snapshot created successfully",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+        snapname => $snapname,
+        snapshot_name => $snapshot_name,
+    );
+
+    $class->_log('debug', "EXIT volume_snapshot successfully",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+        snapname => $snapname,
+    );
+
     return $snapshot_name;
 }
 
 # Rollback to a snapshot
 sub volume_snapshot_rollback {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+
+    $class->_log('debug', "ENTER volume_snapshot_rollback",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+        snapname => $snapname,
+    );
+
+    $class->_log('info', "Rolling back to snapshot",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+        snapname => $snapname,
+    );
 
     my $snapshot_name = $class->_snapshot_name($storeid, $scfg, $volname, $snapname);
 
@@ -1856,12 +2141,40 @@ sub volume_snapshot_rollback {
     # Note: For now we don't wait - restore happens in background
     # The reverse mapping will be cleaned up when snapshot is deleted
 
+    $class->_log('info', "Rollback completed",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+        snapname => $snapname,
+    );
+
+    $class->_log('debug', "EXIT volume_snapshot_rollback successfully",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+        snapname => $snapname,
+    );
+
     return;
 }
 
 # Delete a snapshot
 sub volume_snapshot_delete {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+
+    $class->_log('debug', "ENTER volume_snapshot_delete",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+        snapname => $snapname,
+    );
+
+    $class->_log('info', "Deleting snapshot",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+        snapname => $snapname,
+    );
 
     my $snapshot_name = $class->_snapshot_name($storeid, $scfg, $volname, $snapname);
 
@@ -1913,12 +2226,36 @@ sub volume_snapshot_delete {
         die "Failed to delete snapshot volume: $@\n";
     }
 
+    $class->_log('info', "Snapshot deleted successfully",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+        snapname => $snapname,
+    );
+
+    $class->_log('debug', "EXIT volume_snapshot_delete successfully",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+        snapname => $snapname,
+    );
+
     return;
 }
 
 # Activate storage - validates configuration
 sub activate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
+
+    $class->_log('debug', "ENTER activate_storage",
+        scfg => $scfg,
+        storeid => $storeid,
+    );
+
+    $class->_log('info', "Activating storage configuration",
+        scfg => $scfg,
+        storeid => $storeid,
+    );
 
     # Check 1: Verify host cluster exists
     my $host_cluster = $scfg->{hostcluster} or die "hostcluster not configured\n";
@@ -1934,6 +2271,16 @@ sub activate_storage {
     # Check 2: Verify pool exists and Volume Protection is disabled
     # This prevents storage initialization if protection is enabled
     $class->_get_pool_info($scfg);
+
+    $class->_log('info', "Storage activated successfully",
+        scfg => $scfg,
+        storeid => $storeid,
+    );
+
+    $class->_log('debug', "EXIT activate_storage successfully",
+        scfg => $scfg,
+        storeid => $storeid,
+    );
 
     return 1;
 }
