@@ -90,6 +90,14 @@ sub _log {
         push @ctx_parts, "endpoint=$context{endpoint}" if $context{endpoint};
         push @ctx_parts, "duration=$context{duration}ms" if defined $context{duration};
         push @ctx_parts, "status=$context{status}" if $context{status};
+        # Additional context for debugging
+        push @ctx_parts, "total_volumes=$context{total_volumes}" if defined $context{total_volumes};
+        push @ctx_parts, "snap_volname=$context{snap_volname}" if $context{snap_volname};
+        push @ctx_parts, "snap_vdisk_id=$context{snap_vdisk_id}" if defined $context{snap_vdisk_id};
+        push @ctx_parts, "volume_keys=$context{volume_keys}" if $context{volume_keys};
+        push @ctx_parts, "is_base=$context{is_base}" if defined $context{is_base};
+        push @ctx_parts, "count=$context{count}" if defined $context{count};
+        push @ctx_parts, "scfg=$context{scfg}" if $context{scfg} && ref($context{scfg}) ne 'HASH';  # Avoid dumping full scfg
         $ctx_str = ' [' . join(', ', @ctx_parts) . ']' if @ctx_parts;
     }
 
