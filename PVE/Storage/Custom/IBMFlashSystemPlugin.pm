@@ -781,7 +781,7 @@ sub free_image {
             # Remove host mapping if present
             my $hostname = eval { $class->_ensure_host_exists($scfg) };
             if ($hostname) {
-                $class->_api_request($scfg, 'POST', "/rmvdiskhostmap/$vdisk_id/$hostname", {});
+                $class->_api_request($scfg, 'POST', "/rmvdiskhostmap/$vdisk_id", {host => $hostname});
             }
         };
         # Delete the state volume
@@ -837,7 +837,7 @@ sub free_image {
     if ($hostname) {
         # Remove volume mapping from host (ignore error if not mapped)
         eval {
-            $class->_api_request($scfg, 'POST', "/rmvdiskhostmap/$vdisk_id/$hostname", {});
+            $class->_api_request($scfg, 'POST', "/rmvdiskhostmap/$vdisk_id", {host => $hostname});
         };
     }
 
@@ -1119,15 +1119,8 @@ sub activate_volume {
         die "Failed to map volume: $@\n";
     }
 
-    # Rescan SCSI bus to discover new device
-    eval {
-        run_command(['/usr/bin/rescan-scsi-bus.sh', '-l']);
-    };
-    if ($@) {
-        warn "SCSI rescan failed: $@\n";
-    }
-
-    # Additionally, scan FC hosts directly (rescan-scsi-bus may not scan all hosts)
+    # Scan FC hosts directly to discover new device
+    # This uses "- - -" which scans all channels, all targets, all LUNs
     $class->_scan_fc_hosts();
 
     return 1;
@@ -1476,7 +1469,7 @@ sub volume_snapshot_delete {
         my $hostname = $class->_ensure_host_exists($scfg);
 
         # Remove volume mapping from host
-        $class->_api_request($scfg, 'POST', "/rmvdiskhostmap/$vdisk_id/$hostname", {});
+        $class->_api_request($scfg, 'POST', "/rmvdiskhostmap/$vdisk_id", {host => $hostname});
     };
 
     # Delete snapshot volume
