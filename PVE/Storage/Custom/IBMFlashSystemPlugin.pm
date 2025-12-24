@@ -1620,6 +1620,43 @@ sub _remove_scsi_devices {
     return 1;
 }
 
+# Wait for multipath device to appear after mapping
+# Returns the device path if found, undef if timeout
+sub _wait_for_multipath_device {
+    my ($class, $vdisk_uid, $timeout_secs) = @_;
+    $timeout_secs //= 10;
+
+    my $wwn = lc($vdisk_uid);
+    my $start_time = time();
+
+    while (time() - $start_time < $timeout_secs) {
+        # Check if device exists in /dev/mapper
+        # Format: /dev/mapper/3600<uid> or /dev/mapper/3<uid>
+        my @possible_names = (
+            "/dev/mapper/3600${wwn}",
+            "/dev/mapper/3${wwn}",
+        );
+
+        for my $dev (@possible_names) {
+            return $dev if -e $dev;
+        }
+
+        # Also check for multipath WWN format
+        my $output = `multipath -ll 2>/dev/null`;
+        if ($output =~ /(3600${wwn}|3${wwn})/m) {
+            # Device exists in multipath, find the actual path
+            if ($output =~ /mpath(\w+)\s+\((3600${wwn}|3${wwn})\)/m) {
+                my $mpath = "/dev/mapper/mpath$1";
+                return $mpath if -e $mpath;
+            }
+        }
+
+        select(undef, undef, undef, 0.2);  # Wait 200ms before retry
+    }
+
+    return undef;  # Timeout
+}
+
 # Get hostname for this node
 sub _get_hostname {
     my ($class) = @_;
@@ -1780,6 +1817,21 @@ sub activate_volume {
     # This uses "- - -" which scans all channels, all targets, all LUNs
     $class->_scan_fc_hosts();
 
+    # Wait for multipath device to appear
+    # After mapping and scanning, the device needs time to be created by multipathd
+    my $vdisk_uid = eval { $class->_get_vdisk_uid($scfg, $volname) };
+    if ($vdisk_uid) {
+        my $mpath = $class->_wait_for_multipath_device($vdisk_uid, 30);
+        if (!$mpath) {
+            $class->_log('warn', "Multipath device not ready after activation",
+                scfg => $scfg,
+                storeid => $storeid,
+                volname => $volname,
+                vdisk_uid => $vdisk_uid,
+            );
+        }
+    }
+
     $class->_log('info', "Volume activated successfully",
         scfg => $scfg,
         storeid => $storeid,
@@ -1872,23 +1924,34 @@ sub _resolve_device_path {
     my ($class, $vdisk_uid, $allow_missing) = @_;
 
     my $uid_lc = lc($vdisk_uid);
-    my $mapper_path = "/dev/mapper/3" . $uid_lc;
-    my $by_id_path = "/dev/disk/by-id/scsi-3" . $uid_lc;
 
-    # Prefer /dev/mapper (user_friendly_names no) - Enterprise standard
-    if (-e $mapper_path) {
-        return $mapper_path;
+    # Try multiple possible device paths
+    # IBM FlashSystem WWID format: naa.60050763808185cfd000000000000030
+    # Multipath device can be: /dev/mapper/3600<uid> or /dev/mapper/3<uid>
+
+    my @possible_paths = (
+        "/dev/mapper/3600${uid_lc}",          # Standard WWN format (most common)
+        "/dev/mapper/3${uid_lc}",             # Short WWN format
+        "/dev/disk/by-id/scsi-3600${uid_lc}", # by-id with full WWN
+        "/dev/disk/by-id/scsi-3${uid_lc}",    # by-id with short WWN
+        "/dev/disk/by-id/wwn-0x${uid_lc}",    # wwn symlink format
+    );
+
+    # Also try multipath user_friendly_names format (mpathX)
+    my $mpath_output = `multipath -ll 2>/dev/null`;
+    if ($mpath_output =~ /mpath(\w+)\s+\((3600${uid_lc}|3${uid_lc})\)/m) {
+        my $mpath_path = "/dev/mapper/mpath$1";
+        push @possible_paths, $mpath_path if -e $mpath_path;
     }
 
-    # Fallback to /dev/disk/by-id (works with any multipath config)
-    if (-e $by_id_path) {
-        return $by_id_path;
+    for my $path (@possible_paths) {
+        return $path if -e $path;
     }
 
     # Device not found - return undef if allowed, otherwise die
     return undef if $allow_missing;
 
-    die "Multipath device not found for UID '$vdisk_uid' (tried: $mapper_path, $by_id_path)\n";
+    die "Multipath device not found for UID '$vdisk_uid' (tried: " . join(', ', @possible_paths) . ")\n";
 }
 
 # Get device path for volume
