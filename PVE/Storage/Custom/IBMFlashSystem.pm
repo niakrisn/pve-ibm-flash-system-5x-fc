@@ -1,4 +1,4 @@
-package PVE::Storage::Custom::IBMFlashSystemPlugin;
+package PVE::Storage::Custom::IBMFlashSystem;
 
 use strict;
 use warnings;
@@ -21,6 +21,10 @@ use base qw(PVE::Storage::Plugin);
 # Log file path
 my $LOGFILE = "/var/log/pve-storage-ibm.log";
 my $logfh;
+
+# vdisk UID cache for path() optimization (60s TTL)
+# Structure: { volname => { uid => "...", timestamp => ... } }
+my %vdisk_uid_cache;
 
 # Initialize log file handle
 sub _init_log {
@@ -98,6 +102,16 @@ sub _log {
         push @ctx_parts, "is_base=$context{is_base}" if defined $context{is_base};
         push @ctx_parts, "count=$context{count}" if defined $context{count};
         push @ctx_parts, "scfg=$context{scfg}" if $context{scfg} && ref($context{scfg}) ne 'HASH';  # Avoid dumping full scfg
+        # Device and volume UID debugging info
+        push @ctx_parts, "vdisk_uid=$context{vdisk_uid}" if $context{vdisk_uid};
+        push @ctx_parts, "expected_path_3600=$context{expected_path_3600}" if $context{expected_path_3600};
+        push @ctx_parts, "expected_path_3=$context{expected_path_3}" if $context{expected_path_3};
+        push @ctx_parts, "mpath=$context{mpath}" if $context{mpath};
+        push @ctx_parts, "vname=$context{vname}" if $context{vname};
+        push @ctx_parts, "pool=$context{pool}" if $context{pool};
+        push @ctx_parts, "size_bytes=$context{size_bytes}" if $context{size_bytes};
+        push @ctx_parts, "fcmap_id=$context{fcmap_id}" if $context{fcmap_id};
+        push @ctx_parts, "hostname=$context{hostname}" if $context{hostname};
         $ctx_str = ' [' . join(', ', @ctx_parts) . ']' if @ctx_parts;
     }
 
@@ -326,6 +340,61 @@ sub _clear_cached_token {
 
     if (-f $token_path) {
         unlink $token_path or warn "Failed to delete token cache: $!\n";
+    }
+
+    return;
+}
+
+# ============================================================================
+# Rollback State Management (Transaction Safety)
+# ============================================================================
+
+# Get rollback state file path for a volume
+sub _get_rollback_state_path {
+    my ($class, $volname) = @_;
+    return "/run/pve-ibm-rollback-$volname.json";
+}
+
+# Save rollback state to file
+sub _save_rollback_state {
+    my ($class, $volname, $state) = @_;
+
+    my $path = $class->_get_rollback_state_path($volname);
+    eval { file_set_contents($path, encode_json($state), 0600) };
+    if ($@) {
+        $class->_log('warn', "Failed to save rollback state",
+            volname => $volname,
+            error => $@,
+        );
+    }
+
+    return;
+}
+
+# Load rollback state from file
+sub _load_rollback_state {
+    my ($class, $volname) = @_;
+
+    my $path = $class->_get_rollback_state_path($volname);
+    return unless -f $path;
+
+    my $content = eval { file_get_contents($path) };
+    return unless $content;
+
+    my $state = eval { decode_json($content) };
+    return $state;
+}
+
+# Clear rollback state file
+sub _clear_rollback_state {
+    my ($class, $volname) = @_;
+
+    my $path = $class->_get_rollback_state_path($volname);
+    if (-f $path) {
+        unlink($path) or $class->_log('warn', "Failed to clear rollback state",
+            volname => $volname,
+            error => $!,
+        );
     }
 
     return;
@@ -743,14 +812,15 @@ sub alloc_image {
         size_bytes => $size_bytes,
     );
 
-    my $result = $class->_api_request($scfg, 'POST', '/mkvdisk', {
+    my $result = $class->_api_request($scfg, 'POST', '/mkvolume', {
         name => $name,
-        mdiskgrp => $pool_name,
+        pool => $pool_name,
         size => $size_bytes,
         unit => 'b',
+        thin => JSON::true,
     });
 
-    my $vol_id = $result->{id} or die "No volume ID returned from mkvdisk\n";
+    my $vol_id = $result->{id} or die "No volume ID returned from mkvolume\n";
 
     $class->_log('info', "Volume allocated successfully",
         scfg => $scfg,
@@ -831,15 +901,16 @@ sub clone_image {
         $vdisk_info = $vdisk_info->[0] if ref($vdisk_info) eq 'ARRAY';
         my $size_bytes = $class->_parse_capacity_to_bytes($vdisk_info->{capacity} || '0');
 
-        # Create target volume as regular vdisk (not thin volume)
-        # Using mkvdisk instead of mkvolume for better compatibility
+        # Create target volume using mkvolume with thin provisioning
+        # This ensures Data Reduction support and consistency with snapshots
         my $pool_name = $scfg->{pool} or die "Pool not configured\n";
         eval {
-            $class->_api_request($scfg, 'POST', '/mkvdisk', {
+            $class->_api_request($scfg, 'POST', '/mkvolume', {
                 name => $new_name,
-                mdiskgrp => $pool_name,
+                pool => $pool_name,
                 size => $size_bytes,
                 unit => 'b',
+                thin => JSON::true,
             });
         };
         if ($@) {
@@ -929,13 +1000,14 @@ sub clone_image {
         $vdisk_info = $vdisk_info->[0] if ref($vdisk_info) eq 'ARRAY';
         my $size_bytes = $class->_parse_capacity_to_bytes($vdisk_info->{capacity} || '0');
 
-        # Create target volume with same size
+        # Create target volume with same size using mkvolume
         my $pool_name = $scfg->{pool} or die "Pool not configured\n";
-        $class->_api_request($scfg, 'POST', '/mkvdisk', {
+        $class->_api_request($scfg, 'POST', '/mkvolume', {
             name => $new_name,
-            mdiskgrp => $pool_name,
+            pool => $pool_name,
             size => $size_bytes,
             unit => 'b',
+            thin => JSON::true,
         });
 
         # Create FlashCopy mapping with copyrate 100 (full copy)
@@ -1070,7 +1142,7 @@ sub template_image {
 sub qemu_blockdev_options {
     my ($class, $scfg, $storeid, $volname, $machine_version, $options) = @_;
 
-    # Get the device path - activation is handled separately by PVE
+    # Get the device path
     my ($path) = $class->path($scfg, $volname, $storeid, $options->{'snapshot-name'});
 
     # Return QEMU blockdev configuration for block device
@@ -1165,7 +1237,290 @@ sub _error_code_matches {
     return 0;
 }
 
+# Get FlashCopy mapping status from storage array
+# Returns hashref with: { id, status, progress, state, source_vdisk_name, target_vdisk_name }
+sub _get_fcmap_status {
+    my ($class, $scfg, $fcmap_id) = @_;
+
+    # Query specific mapping: POST /lsfcmap/{id}
+    my $result = $class->_api_request($scfg, 'POST', "/lsfcmap/$fcmap_id", {});
+
+    my $fcmap_info;
+    if (ref($result) eq 'ARRAY') {
+        $fcmap_info = $result->[0];
+    } else {
+        $fcmap_info = $result;
+    }
+
+    die "FlashCopy mapping '$fcmap_id' not found\n" unless $fcmap_info;
+
+    return $fcmap_info;
+}
+
+# Poll FlashCopy mapping until it reaches one of the expected states
+# Dies with timeout if expected states not reached within timeout period
+sub _wait_for_fcmap_state {
+    my ($class, $scfg, $fcmap_id, $expected_states, $timeout_secs) = @_;
+
+    $class->_log('debug', "Waiting for fcmap state",
+        scfg => $scfg,
+        fcmap_id => $fcmap_id,
+        expected_states => $expected_states,
+        timeout => $timeout_secs,
+    );
+
+    my $start_time = time();
+    while (time() - $start_time < $timeout_secs) {
+        my $fcmap = $class->_get_fcmap_status($scfg, $fcmap_id);
+        my $status = $fcmap->{status};
+
+        if (grep { $status eq $_ } @$expected_states) {
+            $class->_log('debug', "fcmap reached expected state",
+                scfg => $scfg,
+                fcmap_id => $fcmap_id,
+                status => $status,
+                expected => $expected_states,
+            );
+            return $fcmap;
+        }
+
+        $class->_log('debug', "fcmap not yet in expected state",
+            scfg => $scfg,
+            fcmap_id => $fcmap_id,
+            status => $status,
+            expected => $expected_states,
+        );
+
+        sleep(1);
+    }
+
+    die "Timeout waiting for fcmap $fcmap_id to reach states: "
+        . join(', ', @$expected_states) . " (waited " . (time() - $start_time) . "s)\n";
+}
+
+# Wait for a resource to be completely deleted from the storage array
+# This is used instead of static sleep() to ensure proper cleanup
+# Parameters: resource_type ('fcmap'|'vdisk'), resource_id, timeout_secs
+sub _wait_for_resource_cleanup {
+    my ($class, $scfg, $resource_type, $resource_id, $timeout_secs) = @_;
+
+    $class->_log('debug', "Waiting for resource cleanup",
+        scfg => $scfg,
+        resource_type => $resource_type,
+        resource_id => $resource_id,
+        timeout => $timeout_secs,
+    );
+
+    my $start_time = time();
+
+    while (time() - $start_time < $timeout_secs) {
+        eval {
+            if ($resource_type eq 'fcmap') {
+                $class->_get_fcmap_status($scfg, $resource_id);
+            } elsif ($resource_type eq 'vdisk') {
+                $class->_api_request($scfg, 'POST', "/lsvdisk/$resource_id", {});
+            } else {
+                die "Unknown resource type: $resource_type\n";
+            }
+        };
+
+        # Error means resource not found = cleanup complete
+        if ($@) {
+            if ($@ =~ /not found|404|CMMVC5750E/i) {
+                $class->_log('debug', "Resource cleanup confirmed",
+                    scfg => $scfg,
+                    resource_type => $resource_type,
+                    resource_id => $resource_id,
+                    waited => sprintf("%.1f", time() - $start_time) . "s",
+                );
+                return 1;
+            }
+            # Some other error - re-throw
+            die $@;
+        }
+
+        # Resource still exists, wait a bit and retry
+        select(undef, undef, undef, 0.5);  # 500ms poll interval
+    }
+
+    die "Timeout waiting for $resource_type '$resource_id' cleanup (waited " . (time() - $start_time) . "s)\n";
+}
+
+# Get comprehensive fabric state for a volume
+# Returns hashref with:
+#   is_source: bool (is this volume a FlashCopy source?)
+#   is_target: bool (is this volume a FlashCopy target?)
+#   fcmap_count: int (number of FlashCopy mappings)
+#   host_mapped: bool (is volume mapped to a host?)
+#   active_mappings: arrayref of {id, status, progress}
+sub _get_volume_fabric_state {
+    my ($class, $scfg, $volname) = @_;
+
+    $class->_log('debug', "Getting fabric state for volume",
+        scfg => $scfg,
+        volname => $volname,
+    );
+
+    # Get all FlashCopy mappings
+    my $fcmaps = $class->_api_request($scfg, 'POST', '/lsfcmap', {});
+    $fcmaps = [] if ref($fcmaps) ne 'ARRAY';
+
+    my @source_mappings;
+    my @target_mappings;
+    my $host_mapped = 0;
+
+    for my $fcmap (@$fcmaps) {
+        if ($fcmap->{source_vdisk_name} eq $volname) {
+            push @source_mappings, {
+                id => $fcmap->{id},
+                status => $fcmap->{status},
+                progress => $fcmap->{progress} || 0,
+            };
+        }
+        if ($fcmap->{target_vdisk_name} eq $volname) {
+            push @target_mappings, {
+                id => $fcmap->{id},
+                status => $fcmap->{status},
+                progress => $fcmap->{progress} || 0,
+            };
+        }
+    }
+
+    # Get host mappings
+    eval {
+        my $vdisk_id = $class->_get_vdisk_id($scfg, $volname);
+        my $hostname = $class->_get_hostname();
+        my $hostmaps = $class->_api_request($scfg, 'POST', '/lsvdiskhostmap', {});
+
+        $hostmaps = [] if ref($hostmaps) ne 'ARRAY';
+        for my $hostmap (@$hostmaps) {
+            if ($hostmap->{vdisk_name} eq $volname) {
+                $host_mapped = 1;
+                last;
+            }
+        }
+    };
+
+    return {
+        is_source => scalar(@source_mappings) > 0,
+        is_target => scalar(@target_mappings) > 0,
+        fcmap_count => scalar(@source_mappings) + scalar(@target_mappings),
+        host_mapped => $host_mapped,
+        active_mappings => \@source_mappings,
+    };
+}
+
+# Reconcile volume state - detect and fix anomalies
+# This method cleans up orphaned mappings, stuck states, and orphaned host mappings
+sub _reconcile_volume_state {
+    my ($class, $scfg, $volname) = @_;
+
+    $class->_log('debug', "Reconciling volume state",
+        scfg => $scfg,
+        volname => $volname,
+    );
+
+    # Get current fabric state
+    my $state = $class->_get_volume_fabric_state($scfg, $volname);
+
+    # Fix 1: Remove orphaned reverse mappings (snapshot -> disk) from crashed rollback
+    if ($state->{is_target}) {
+        $class->_log('info', "Found orphaned reverse mapping, cleaning up",
+            scfg => $scfg,
+            volname => $volname,
+        );
+
+        for my $mapping (@{$state->{active_mappings}}) {
+            my $id = $mapping->{id};
+            eval {
+                $class->_api_request($scfg, 'POST', "/stopfcmap/$id", {});
+            };
+            eval {
+                $class->_api_request($scfg, 'POST', "/rmfcmap/$id", { force => JSON::true });
+            };
+            if ($@) {
+                $class->_log('warn', "Failed to cleanup orphaned mapping",
+                    scfg => $scfg,
+                    fcmap_id => $id,
+                    error => $@,
+                );
+            }
+        }
+    }
+
+    # Fix 2: Force-stop any mappings stuck in 'preparing' or 'stopping' state
+    for my $mapping (@{$state->{active_mappings}}) {
+        if ($mapping->{status} eq 'preparing' || $mapping->{status} eq 'stopping') {
+            my $id = $mapping->{id};
+            $class->_log('info', "Forcing stop of stuck mapping",
+                scfg => $scfg,
+                fcmap_id => $id,
+                status => $mapping->{status},
+            );
+            eval {
+                $class->_api_request($scfg, 'POST', "/stopfcmap/$id", {});
+            };
+        }
+    }
+
+    # Fix 3: Remove dangling host mappings from failed qemu-img operations
+    $class->_reconcile_host_mappings($scfg, $volname);
+
+    $class->_log('debug', "Volume state reconciled",
+        scfg => $scfg,
+        volname => $volname,
+    );
+    return;
+}
+
+# Detect and remove dangling host mappings
+# This handles cases where volume was deleted but host mapping remains
+sub _reconcile_host_mappings {
+    my ($class, $scfg, $volname) = @_;
+
+    my $vdisk_id = eval { $class->_get_vdisk_id($scfg, $volname) };
+    return unless $vdisk_id;  # Volume doesn't exist, nothing to reconcile
+
+    my $hostname = $class->_get_hostname();
+
+    # Check if volume is actually mapped to this host
+    eval {
+        $class->_api_request($scfg, 'POST', "/lsvdiskhostmap/$vdisk_id", {});
+    };
+
+    # If volume doesn't exist or error, we may have a dangling mapping
+    if ($@) {
+        # Volume was deleted but mapping might still exist
+        eval {
+            $class->_api_request($scfg, 'POST', "/rmvdiskhostmap/$vdisk_id", {
+                host => $hostname
+            });
+        };
+        if ($@) {
+            # Ignore if mapping doesn't exist (already cleaned)
+            if ($@ !~ /CMMVC5750E|not found/i) {
+                $class->_log('warn', "Failed to remove dangling host mapping",
+                    scfg => $scfg,
+                    volname => $volname,
+                    vdisk_id => $vdisk_id,
+                    error => $@,
+                );
+            }
+        } else {
+            $class->_log('info', "Removed dangling host mapping",
+                scfg => $scfg,
+                volname => $volname,
+                vdisk_id => $vdisk_id,
+            );
+        }
+    }
+
+    return;
+}
+
 # Get volume size information
+# Returns: ($size_bytes, 'raw', $used_bytes, undef)
+# For thin volumes, used_capacity is extracted from API response
 sub volume_size_info {
     my ($class, $scfg, $storeid, $volname, $timeout) = @_;
 
@@ -1185,7 +1540,218 @@ sub volume_size_info {
     my $capacity_str = $vdisk_info->{capacity} || '0';
     my $size_bytes = $class->_parse_capacity_to_bytes($capacity_str);
 
-    return $size_bytes;
+    # Get used capacity for thin volumes
+    my $used_bytes = 0;
+    if (defined $vdisk_info->{used_capacity}) {
+        $used_bytes = $class->_parse_capacity_to_bytes($vdisk_info->{used_capacity});
+    }
+
+    return ($size_bytes, 'raw', $used_bytes, undef);
+}
+
+# Resize a volume with FlashCopy integrity
+# Expands source and ALL target snapshot volumes by the same delta
+sub volume_resize {
+    my ($class, $scfg, $storeid, $volname, $size, $running) = @_;
+
+    $class->_log('debug', "ENTER volume_resize",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+        size => $size,
+        running => $running,
+    );
+
+    # Proxmox passes size in kilobytes, convert to bytes
+    my $new_size_bytes = $size * 1024;
+
+    # Get current size from storage array
+    my $result = $class->_api_request($scfg, 'POST', "/lsvdisk/$volname", {});
+    my $vdisk_info = ref($result) eq 'ARRAY' ? $result->[0] : $result;
+    die "Volume '$volname' not found\n" unless $vdisk_info;
+
+    my $current_capacity_str = $vdisk_info->{capacity} || '0';
+    my $current_size_bytes = $class->_parse_capacity_to_bytes($current_capacity_str);
+
+    # Calculate delta (must be positive for expansion)
+    my $delta_bytes = $new_size_bytes - $current_size_bytes;
+
+    if ($delta_bytes <= 0) {
+        $class->_log('info', "No resize needed (size already $current_size_bytes bytes)",
+            scfg => $scfg,
+            storeid => $storeid,
+            volname => $volname,
+        );
+        return;  # No resize needed or shrink not supported
+    }
+
+    $class->_log('info', "Resizing volume",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+        current_bytes => $current_size_bytes,
+        new_bytes => $new_size_bytes,
+        delta_bytes => $delta_bytes,
+    );
+
+    # Step 1: Find ALL FlashCopy mappings where source is the volume (star topology)
+    my $fcmaps = $class->_api_request($scfg, 'POST', '/lsfcmap', {});
+    $fcmaps = [] if ref($fcmaps) ne 'ARRAY';
+
+    my @source_mappings;
+    my @target_volnames;
+
+    for my $fcmap (@$fcmaps) {
+        if ($fcmap->{source_vdisk_name} eq $volname) {
+            my $id = $fcmap->{id};
+            my $target = $fcmap->{target_vdisk_name};
+            push @source_mappings, $id;
+            push @target_volnames, $target;
+        }
+    }
+
+    $class->_log('debug', "Found dependent snapshots",
+        scfg => $scfg,
+        volname => $volname,
+        target_count => scalar(@target_volnames),
+    );
+
+    # Step 2: Expand volumes
+    # Some storage arrays require stopping mappings before expansion
+    my $needs_stop_for_expand = 0;
+
+    # Get source volume ID for expansion
+    my $source_id = $vdisk_info->{id} || $class->_get_vdisk_id($scfg, $volname);
+
+    # Try direct expansion first
+    eval {
+        $class->_api_request($scfg, 'POST', "/expandvdisksize/$source_id", {
+            size => $delta_bytes,
+            unit => 'b',
+        });
+    };
+    if ($@) {
+        # CMMVC5701E = object in use (mapping active)
+        # CMMVC6448E = cannot expand while mapping active
+        if ($class->_error_code_matches($@, 'CMMVC5701E', 'CMMVC6448E')) {
+            $needs_stop_for_expand = 1;
+        } else {
+            die "Failed to expand source volume: $@\n";
+        }
+    }
+
+    # Step 3: If needed, stop mappings, expand all, then restart
+    if ($needs_stop_for_expand) {
+        $class->_log('info', "Stopping FlashCopy mappings for expansion",
+            scfg => $scfg,
+            volname => $volname,
+        );
+
+        # Stop all mappings
+        for my $id (@source_mappings) {
+            eval {
+                $class->_api_request($scfg, 'POST', "/stopfcmap/$id", {});
+            };
+            if ($@) {
+                # Ignore expected errors
+                if ($@ !~ /already stopped|not active|stopping|CMMVC5897E|CMMVC5951E/i) {
+                    $class->_log('warn', "Failed to stop FlashCopy mapping",
+                        scfg => $scfg,
+                        fcmap_id => $id,
+                        error => $@,
+                    );
+                }
+            }
+        }
+
+        # Expand source volume
+        $class->_api_request($scfg, 'POST', "/expandvdisksize/$source_id", {
+            size => $delta_bytes,
+            unit => 'b',
+        });
+
+        # Expand all target snapshot volumes
+        for my $target_volname (@target_volnames) {
+            my $target_result = $class->_api_request($scfg, 'POST', "/lsvdisk/$target_volname", {});
+            my $target_info = ref($target_result) eq 'ARRAY' ? $target_result->[0] : $target_result;
+            my $target_id = $target_info->{id};
+
+            eval {
+                $class->_api_request($scfg, 'POST', "/expandvdisksize/$target_id", {
+                    size => $delta_bytes,
+                    unit => 'b',
+                });
+                $class->_log('debug', "Expanded snapshot volume",
+                    scfg => $scfg,
+                    target_volname => $target_volname,
+                    delta_bytes => $delta_bytes,
+                );
+            };
+            if ($@) {
+                $class->_log('warn', "Failed to expand snapshot volume",
+                    scfg => $scfg,
+                    target_volname => $target_volname,
+                    error => $@,
+                );
+            }
+        }
+
+        # Restart all mappings
+        for my $id (@source_mappings) {
+            eval {
+                $class->_api_request($scfg, 'POST', "/prestartfcmap/$id", {});
+                $class->_api_request($scfg, 'POST', "/startfcmap/$id", {});
+            };
+            if ($@) {
+                $class->_log('warn', "Failed to restart FlashCopy mapping",
+                    scfg => $scfg,
+                    fcmap_id => $id,
+                    error => $@,
+                );
+            }
+        }
+    } else {
+        # Direct expansion succeeded - now expand targets
+        for my $target_volname (@target_volnames) {
+            my $target_result = $class->_api_request($scfg, 'POST', "/lsvdisk/$target_volname", {});
+            my $target_info = ref($target_result) eq 'ARRAY' ? $target_result->[0] : $target_result;
+            my $target_id = $target_info->{id};
+
+            eval {
+                $class->_api_request($scfg, 'POST', "/expandvdisksize/$target_id", {
+                    size => $delta_bytes,
+                    unit => 'b',
+                });
+                $class->_log('debug', "Expanded snapshot volume",
+                    scfg => $scfg,
+                    target_volname => $target_volname,
+                    delta_bytes => $delta_bytes,
+                );
+            };
+            if ($@) {
+                $class->_log('warn', "Failed to expand snapshot volume",
+                    scfg => $scfg,
+                    target_volname => $target_volname,
+                    error => $@,
+                );
+            }
+        }
+    }
+
+    $class->_log('info', "Volume resized successfully",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+        new_bytes => $new_size_bytes,
+    );
+
+    $class->_log('debug', "EXIT volume_resize successfully",
+        scfg => $scfg,
+        storeid => $storeid,
+        volname => $volname,
+    );
+
+    return;
 }
 
 # List images (VM disks and base templates) in the storage
@@ -1602,21 +2168,57 @@ sub _scan_fc_hosts {
     return;
 }
 
+# ============================================================================
+# UID Format Conversion Helpers
+# ============================================================================
+
+# IBM FlashSystem returns vdisk_UID in NAA format starting with '6'
+# Linux multipath expects format starting with '3'
+# Example conversion:
+#   API format: 60050763808185CFD00000000000010D
+#   Multipath:  360050763808185cfd00000000000010d
+
+# Convert vdisk_UID from API format to multipath format
+# API format: 60050763808185CFD00000000000010F
+# Multipath:  360050763808185cfd00000000000010f
+# The format is: prepend '3' + lowercase (not replace!)
+sub _convert_uid_to_mpath_format {
+    my ($class, $vdisk_uid) = @_;
+
+    return '3' . lc($vdisk_uid);
+}
+
+# ============================================================================
+# Device Management
+# ============================================================================
+
 # Remove multipath device for a given vdisk UID
 # Handles both user_friendly_names (mpathX) and WWN-based naming
 sub _remove_multipath_device {
     my ($class, $vdisk_uid) = @_;
 
-    my $wwn = lc($vdisk_uid);
+    my $wwn = $class->_convert_uid_to_mpath_format($vdisk_uid);
 
-    # Try to find the multipath device by WWN
+    # Try to find the multipath device by WWN in multipath -ll output
+    # Format can be: "mpathX (3600...)" or "3600... dm-X"
     my $mpath_name = eval {
         my $output = `multipath -ll 2>/dev/null`;
+        # Try user_friendly_names format first: mpathX (WWN)
         if ($output =~ /mpath(\w+)\s+\($wwn\)/m) {
             return "mpath$1";
         }
+        # Try direct WWN format: 3600... dm-X
+        if ($output =~ /^($wwn)\s+/m) {
+            return $1;
+        }
         return undef;
     };
+
+    # Also check if device exists directly in /dev/mapper
+    my $dev_path = "/dev/mapper/${wwn}";
+    if (!$mpath_name && -e $dev_path) {
+        $mpath_name = $wwn;
+    }
 
     if ($mpath_name) {
         # Try to flush multipath device with retry (device may be briefly busy after VM shutdown)
@@ -1645,7 +2247,12 @@ sub _remove_multipath_device {
 sub _remove_scsi_devices {
     my ($class, $vdisk_uid) = @_;
 
-    my $wwn = lc($vdisk_uid);
+    # Convert to multipath format: 6005... -> 36005...
+    my $wwn = $class->_convert_uid_to_mpath_format($vdisk_uid);
+
+    # For WWID matching, we need to strip the leading '3' from multipath format
+    # because sysfs WWID is naa.6005... (without the leading '3')
+    my $wwn_for_match = lc($vdisk_uid);  # Just lowercase original UID
     my $sys_path = "/sys/block";
 
     if (opendir(my $dh, $sys_path)) {
@@ -1661,7 +2268,10 @@ sub _remove_scsi_devices {
                 my $wwid = eval { file_get_contents($wwid_file) };
                 chomp $wwid if $wwid;
                 # WWID format is naa.60050763808185cfd000000000000030
-                if ($wwid && $wwid =~ /$wwn/i) {
+                # Strip 'naa.' prefix and compare lowercase
+                my $wwid_clean = $wwid;
+                $wwid_clean =~ s/^naa\.//i;
+                if ($wwid_clean && $wwid_clean eq $wwn_for_match) {
                     # Delete this SCSI device from the bus using sysfs directly
                     my $delete_file = "$sys_path/$clean_dev/device/delete";
                     if (-f $delete_file) {
@@ -1687,26 +2297,24 @@ sub _wait_for_multipath_device {
     my ($class, $vdisk_uid, $timeout_secs) = @_;
     $timeout_secs //= 10;
 
-    my $wwn = lc($vdisk_uid);
+    # Convert vdisk_UID from API to multipath format
+    # _convert_uid_to_mpath_format already returns the full format (3 + lowercase)
+    my $wwn = $class->_convert_uid_to_mpath_format($vdisk_uid);
+
     my $start_time = time();
 
     while (time() - $start_time < $timeout_secs) {
         # Check if device exists in /dev/mapper
-        # Format: /dev/mapper/3600<uid> or /dev/mapper/3<uid>
-        my @possible_names = (
-            "/dev/mapper/3600${wwn}",
-            "/dev/mapper/3${wwn}",
-        );
+        # Format: /dev/mapper/3600<uid> where $wwn is already 36005076...
+        my $dev = "/dev/mapper/${wwn}";
 
-        for my $dev (@possible_names) {
-            return $dev if -e $dev;
-        }
+        return $dev if -e $dev;
 
         # Also check for multipath WWN format
         my $output = `multipath -ll 2>/dev/null`;
-        if ($output =~ /(3600${wwn}|3${wwn})/m) {
+        if ($output =~ /\($wwn\)/m) {
             # Device exists in multipath, find the actual path
-            if ($output =~ /mpath(\w+)\s+\((3600${wwn}|3${wwn})\)/m) {
+            if ($output =~ /mpath(\w+)\s+\(($wwn)\)/m) {
                 my $mpath = "/dev/mapper/mpath$1";
                 return $mpath if -e $mpath;
             }
@@ -1814,6 +2422,31 @@ sub _get_vdisk_uid {
     return $vdisk_uid;
 }
 
+# Get vdisk UID with in-memory caching (60s TTL)
+# This significantly reduces API calls in path() which is called frequently
+sub _get_cached_vdisk_uid {
+    my ($class, $scfg, $volname, $force_refresh) = @_;
+
+    # Check cache first (unless force refresh)
+    if (!$force_refresh && exists $vdisk_uid_cache{$volname}) {
+        my $cached = $vdisk_uid_cache{$volname};
+        if ((time - $cached->{timestamp}) < 60) {
+            return $cached->{uid};
+        }
+    }
+
+    # Cache miss or expired - fetch fresh
+    my $uid = $class->_get_vdisk_uid($scfg, $volname);
+
+    # Update cache
+    $vdisk_uid_cache{$volname} = {
+        uid => $uid,
+        timestamp => time(),
+    };
+
+    return $uid;
+}
+
 # Get volume ID by name
 sub _get_vdisk_id {
     my ($class, $scfg, $volname) = @_;
@@ -1854,6 +2487,26 @@ sub activate_volume {
         volname => $volname,
     );
 
+    # Check if volume is in restoring state (after rollback)
+    # Performance may be degraded during restore, log for admin awareness
+    my $fcmaps = eval { $class->_api_request($scfg, 'POST', '/lsfcmap', {}) };
+    $fcmaps = [] if !$fcmaps || ref($fcmaps) ne 'ARRAY';
+
+    for my $fcmap (@$fcmaps) {
+        if ($fcmap->{target_vdisk_name} eq $volname &&
+            ($fcmap->{status} eq 'restoring' || $fcmap->{status} eq 'copying')) {
+            $class->_log('info', "Volume is in restoring state after rollback, performance may be degraded",
+                scfg => $scfg,
+                storeid => $storeid,
+                volname => $volname,
+                fcmap_id => $fcmap->{id},
+                status => $fcmap->{status},
+                progress => $fcmap->{progress} || 0,
+            );
+            last;
+        }
+    }
+
     my $hostname = $class->_ensure_host_exists($scfg);
     my $vdisk_id = $class->_get_vdisk_id($scfg, $volname);
 
@@ -1889,6 +2542,18 @@ sub activate_volume {
             error => $@,
         );
     } elsif ($vdisk_uid) {
+        # Log UID and expected paths for debugging
+        # Note: vdisk_uid from API is in NAA format (starts with '6'), need to convert to '3' for device
+        my $wwn = $class->_convert_uid_to_mpath_format($vdisk_uid);
+        $class->_log('debug', "Volume UID and expected paths",
+            scfg => $scfg,
+            storeid => $storeid,
+            volname => $volname,
+            vdisk_uid => $vdisk_uid,
+            uid_converted => $wwn,
+            expected_path => "/dev/mapper/${wwn}",
+        );
+
         $class->_log('debug', "Waiting for multipath device",
             scfg => $scfg,
             storeid => $storeid,
@@ -1897,26 +2562,28 @@ sub activate_volume {
         );
         my $mpath = $class->_wait_for_multipath_device($vdisk_uid, 30);
         if (!$mpath) {
-            $class->_log('warn', "Multipath device not ready after activation",
+            $class->_log('error', "Multipath device failed to appear after activation",
                 scfg => $scfg,
                 storeid => $storeid,
                 volname => $volname,
                 vdisk_uid => $vdisk_uid,
             );
-        } else {
-            $class->_log('debug', "Multipath device ready",
-                scfg => $scfg,
-                storeid => $storeid,
-                volname => $volname,
-                mpath => $mpath,
-            );
+            die "Volume activation failed: multipath device did not appear within 30 seconds\n";
         }
+
+        $class->_log('debug', "Multipath device ready",
+            scfg => $scfg,
+            storeid => $storeid,
+            volname => $volname,
+            mpath => $mpath,
+        );
     } else {
-        $class->_log('warn', "No vdisk_uid available - cannot wait for device",
+        $class->_log('error', "No vdisk_uid available - cannot verify device",
             scfg => $scfg,
             storeid => $storeid,
             volname => $volname,
         );
+        die "Volume activation failed: unable to get vdisk UID\n";
     }
 
     $class->_log('info', "Volume activated successfully",
@@ -2010,23 +2677,23 @@ sub deactivate_volume {
 sub _resolve_device_path {
     my ($class, $vdisk_uid, $allow_missing) = @_;
 
-    my $uid_lc = lc($vdisk_uid);
+    # Convert UID from API format to multipath format
+    # _convert_uid_to_mpath_format returns full format: 36005076...
+    my $wwn = $class->_convert_uid_to_mpath_format($vdisk_uid);
 
     # Try multiple possible device paths
     # IBM FlashSystem WWID format: naa.60050763808185cfd000000000000030
-    # Multipath device can be: /dev/mapper/3600<uid> or /dev/mapper/3<uid>
+    # Multipath device: /dev/mapper/36005076... (full WWN)
 
     my @possible_paths = (
-        "/dev/mapper/3600${uid_lc}",          # Standard WWN format (most common)
-        "/dev/mapper/3${uid_lc}",             # Short WWN format
-        "/dev/disk/by-id/scsi-3600${uid_lc}", # by-id with full WWN
-        "/dev/disk/by-id/scsi-3${uid_lc}",    # by-id with short WWN
-        "/dev/disk/by-id/wwn-0x${uid_lc}",    # wwn symlink format
+        "/dev/mapper/${wwn}",                  # Standard WWN format (most common)
+        "/dev/disk/by-id/scsi-${wwn}",         # by-id with WWN
+        "/dev/disk/by-id/wwn-0x${wwn}",        # wwn symlink format
     );
 
     # Also try multipath user_friendly_names format (mpathX)
     my $mpath_output = `multipath -ll 2>/dev/null`;
-    if ($mpath_output =~ /mpath(\w+)\s+\((3600${uid_lc}|3${uid_lc})\)/m) {
+    if ($mpath_output =~ /mpath(\w+)\s+\(($wwn)\)/m) {
         my $mpath_path = "/dev/mapper/mpath$1";
         push @possible_paths, $mpath_path if -e $mpath_path;
     }
@@ -2069,29 +2736,24 @@ sub filesystem_path {
 
 # Get path for volume - overrides base class method
 # Required for block storage to prevent base class from looking for 'path' config
-# Returns the expected device path based on vdisk UID from API, regardless of
-# whether the device is currently activated/mapped to the host
+# Returns the expected device path based on vdisk UID from API
+# NOTE: This method does NOT wait for device - device must be ready via activate_volume first
 sub path {
     my ($class, $scfg, $volname, $storeid, $snapname) = @_;
 
-    # Get vdisk UID from IBM API (works even if volume is not mapped)
-    my $vdisk_uid = eval { $class->_get_vdisk_uid($scfg, $volname) };
+    # Get vdisk UID from cache (60s TTL) to reduce API calls
+    my $vdisk_uid = eval { $class->_get_cached_vdisk_uid($scfg, $volname) };
     if ($@) {
         # Volume doesn't exist in API, return empty result
         my ($vtype, $name, $vmid) = $class->parse_volname($volname);
         return ('', $vmid, $vtype);
     }
 
-    # Wait for multipath device to appear (up to 10 seconds)
-    # This is critical for UEFI VM creation where qemu-img is called immediately
-    my $mpath = $class->_wait_for_multipath_device($vdisk_uid, 10);
-
-    # If device not found, fall back to expected path format
-    # Use /dev/mapper/3600<uid> format (actual device name)
-    if (!$mpath) {
-        my $uid_lc = lc($vdisk_uid);
-        $mpath = "/dev/mapper/3600${uid_lc}";
-    }
+    # Construct expected path - device must exist via activate_volume
+    # _convert_uid_to_mpath_format returns full format: 36005076...
+    # Example: 60050763808185CFD00000000000010D -> 360050763808185cfd00000000000010d
+    my $wwn = $class->_convert_uid_to_mpath_format($vdisk_uid);
+    my $mpath = "/dev/mapper/${wwn}";
 
     # Parse volname to get vmid and vtype
     my ($vtype, $name, $vmid) = $class->parse_volname($volname);
@@ -2135,6 +2797,52 @@ sub _get_fcmap_id {
     return $fcmap_id;
 }
 
+# Remove all FlashCopy mappings where the specified volume is the source
+# This is needed for rollback to prevent CMMVC9055E error:
+# "The command failed because a target volume has dependent FlashCopy mappings"
+sub _remove_all_fcmaps_as_source {
+    my ($class, $scfg, $volname) = @_;
+
+    my $fcmaps = $class->_api_request($scfg, 'POST', '/lsfcmap', {});
+    $fcmaps = [] if ref($fcmaps) ne 'ARRAY';
+
+    my @removed_ids;
+    for my $fcmap (@$fcmaps) {
+        if ($fcmap->{source_vdisk_name} eq $volname) {
+            my $id = $fcmap->{id};
+            eval {
+                # Stop the mapping first
+                $class->_api_request($scfg, 'POST', "/stopfcmap/$id", {});
+            };
+            # Ignore stop errors (may already be stopped)
+
+            eval {
+                # Remove the mapping with force flag
+                $class->_api_request($scfg, 'POST', "/rmfcmap/$id", { force => JSON::true });
+                push @removed_ids, $id;
+            };
+            if ($@) {
+                $class->_log('warn', "Failed to remove FlashCopy mapping",
+                    scfg => $scfg,
+                    fcmap_id => $id,
+                    source => $fcmap->{source_vdisk_name},
+                    target => $fcmap->{target_vdisk_name},
+                    error => $@,
+                );
+            }
+        }
+    }
+
+    $class->_log('info', "Removed all FlashCopy mappings for volume",
+        scfg => $scfg,
+        volname => $volname,
+        count => scalar(@removed_ids),
+        removed_ids => \@removed_ids,
+    ) if @removed_ids;
+
+    return;
+}
+
 # Check if snapshot exists
 sub volume_has_snapshot {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
@@ -2160,6 +2868,9 @@ sub volume_snapshot {
         snapname => $snapname,
     );
 
+    # PRE-OPERATION STATE CHECK: Clean up any orphaned state from previous runs
+    $class->_reconcile_volume_state($scfg, $volname);
+
     $class->_log('info', "Creating snapshot",
         scfg => $scfg,
         storeid => $storeid,
@@ -2169,6 +2880,10 @@ sub volume_snapshot {
 
     my $snapshot_name = $class->_snapshot_name($storeid, $scfg, $volname, $snapname);
     my $pool_name = $scfg->{pool} or die "Pool not configured\n";
+
+    # Sanitize snapshot name for FlashCopy mapping name
+    my $safe_snapname = $snapname;
+    $safe_snapname =~ s/[^a-zA-Z0-9._-]/_/g;
 
     # Get source volume size - query by name and parse to bytes
     my $result = $class->_api_request($scfg, 'POST', "/lsvdisk/$volname", {});
@@ -2199,11 +2914,13 @@ sub volume_snapshot {
     # Step 2: Create FlashCopy mapping using volume names (not IDs)
     # copyrate: 0 = copy-on-write (snapshot mode), data copied only on change
     my $fcmap_id;
+    my $fcmap_name = "map_${volname}_to_${safe_snapname}";
     eval {
         my $fcmap_result = $class->_api_request($scfg, 'POST', '/mkfcmap', {
             source => $volname,
             target => $snapshot_name,
             copyrate => 0,
+            name => $fcmap_name,
         });
 
         # Debug: log the response
@@ -2253,10 +2970,59 @@ sub volume_snapshot {
     die "No FlashCopy mapping ID available\n" unless defined $fcmap_id;
 
     # Step 3: Prepare FlashCopy
-    $class->_api_request($scfg, 'POST', "/prestartfcmap/$fcmap_id", {});
+    eval {
+        $class->_api_request($scfg, 'POST', "/prestartfcmap/$fcmap_id", {});
+    };
+    if ($@) {
+        # Cleanup on error: remove created snapshot volume
+        eval {
+            my $vdisk_id = $class->_get_vdisk_id($scfg, $snapshot_name);
+            $class->_api_request($scfg, 'POST', "/rmvdisk/$vdisk_id");
+        };
+        die "Failed to prepare FlashCopy mapping: $@\n";
+    }
 
-    # Step 4: Start FlashCopy
-    $class->_api_request($scfg, 'POST', "/startfcmap/$fcmap_id", {});
+    # Step 4: Start FlashCopy with retry for CMMVC5906E (preparing state)
+    my $start_attempts = 0;
+    my $max_start_attempts = 5;
+    my $start_success = 0;
+    while ($start_attempts < $max_start_attempts && !$start_success) {
+        eval {
+            $class->_api_request($scfg, 'POST', "/startfcmap/$fcmap_id", {});
+            $start_success = 1;
+        };
+        if ($@) {
+            $start_attempts++;
+            my $error = $@;
+
+            # CMMVC5906E = mapping is in preparing state, wait and retry
+            if ($class->_error_code_matches($error, 'CMMVC5906E') && $start_attempts < $max_start_attempts) {
+                $class->_log('debug', "Mapping in preparing state, waiting",
+                    scfg => $scfg,
+                    fcmap_id => $fcmap_id,
+                    attempt => $start_attempts,
+                );
+                sleep(1);
+                next;
+            }
+
+            # Other errors or max attempts reached - cleanup and die
+            # Cleanup: remove FlashCopy mapping and snapshot volume
+            eval {
+                $class->_api_request($scfg, 'POST', "/rmfcmap/$fcmap_id", { force => JSON::true });
+            };
+            eval {
+                my $vdisk_id = $class->_get_vdisk_id($scfg, $snapshot_name);
+                $class->_api_request($scfg, 'POST', "/rmvdisk/$vdisk_id");
+            };
+
+            die "Failed to start FlashCopy mapping after $start_attempts attempts: $error\n";
+        }
+    }
+
+    # Step 5: Wait for FlashCopy to reach active copying state
+    # Without this, we might return before snapshot is actually ready
+    $class->_wait_for_fcmap_state($scfg, $fcmap_id, ['copying', 'idle_or_copied'], 60);
 
     $class->_log('info', "Snapshot created successfully",
         scfg => $scfg,
@@ -2276,9 +3042,54 @@ sub volume_snapshot {
     return $snapshot_name;
 }
 
-# Rollback to a snapshot
+# Rollback to a snapshot using Manual Reverse-Sync (compatible with all Spectrum Virtualize versions)
+# This preserves other snapshots by removing all mappings, doing reverse copy, and recreating them
+# Algorithm:
+# 1. Deactivate volume (unmap from host)
+# 2. Remove ALL FlashCopy mappings for this disk
+# 3. Create temporary reverse mapping: snapshot -> disk (copyrate=100 for fast restore)
+# 4. Start the reverse mapping (data flows from snapshot to disk)
+# 5. Remove the temporary reverse mapping
+# 6. Recreate all original mappings in correct direction: disk -> snapshots
+# 7. Start all mappings
 sub volume_snapshot_rollback {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+
+    # PRE-OPERATION STATE CHECK: Clean up any orphaned state from previous runs
+    $class->_reconcile_volume_state($scfg, $volname);
+
+    # Check for incomplete rollback from previous run (transaction recovery)
+    my $incomplete_state = $class->_load_rollback_state($volname);
+    if ($incomplete_state) {
+        $class->_log('warn', "Detected incomplete rollback from previous run, attempting recovery...",
+            scfg => $scfg,
+            volname => $volname,
+            phase => $incomplete_state->{phase},
+            timestamp => $incomplete_state->{timestamp},
+        );
+
+        if ($incomplete_state->{phase} eq 'restoring' && $incomplete_state->{reverse_fcmap_id}) {
+            # Reverse mapping was created - need to clean it up
+            eval {
+                $class->_log('info', "Cleaning up orphaned reverse mapping from crashed rollback",
+                    scfg => $scfg,
+                    fcmap_id => $incomplete_state->{reverse_fcmap_id},
+                );
+                $class->_api_request($scfg, 'POST', "/stopfcmap/$incomplete_state->{reverse_fcmap_id}", {});
+                $class->_api_request($scfg, 'POST', "/rmfcmap/$incomplete_state->{reverse_fcmap_id}", { force => JSON::true });
+                $class->_wait_for_resource_cleanup($scfg, 'fcmap', $incomplete_state->{reverse_fcmap_id}, 30);
+            };
+            if ($@) {
+                $class->_log('warn', "Failed to cleanup orphaned reverse mapping, continuing anyway",
+                    scfg => $scfg,
+                    error => $@,
+                );
+            }
+        }
+
+        # Clear the incomplete state - we'll try again
+        $class->_clear_rollback_state($volname);
+    }
 
     $class->_log('debug', "ENTER volume_snapshot_rollback",
         scfg => $scfg,
@@ -2287,7 +3098,7 @@ sub volume_snapshot_rollback {
         snapname => $snapname,
     );
 
-    $class->_log('info', "Rolling back to snapshot",
+    $class->_log('info', "Rolling back to snapshot (manual reverse-sync, preserving other snapshots)",
         scfg => $scfg,
         storeid => $storeid,
         volname => $volname,
@@ -2296,69 +3107,245 @@ sub volume_snapshot_rollback {
 
     my $snapshot_name = $class->_snapshot_name($storeid, $scfg, $volname, $snapname);
 
-    # Get the original FlashCopy mapping ID (source -> snapshot)
-    my $fcmap_id = $class->_get_fcmap_id($scfg, $volname, $snapshot_name);
+    # Step 1: Collect ALL FlashCopy mappings where source is the volume (star topology)
+    # We need to save these for recreation after restore
+    my $fcmaps = $class->_api_request($scfg, 'POST', '/lsfcmap', {});
+    $fcmaps = [] if ref($fcmaps) ne 'ARRAY';
 
-    die "FlashCopy mapping not found for snapshot '$snapname'\n" unless defined $fcmap_id;
+    my @original_mappings;  # Save original mappings for recreation
+    my $target_mapping_exists = 0;
 
-    # For rollback, we need to create a REVERSE mapping (snapshot -> source)
-    # IBM FlashCopy doesn't support restore via REST API, so we:
-    # 1. Stop and REMOVE the original mapping (required before creating reverse)
-    # 2. Create a reverse mapping with high copy rate
-    # 3. Start the reverse mapping to perform restore
-    # 4. Clean up the reverse mapping after restore
-    # 5. Recreate the original mapping for future snapshots
+    for my $fcmap (@$fcmaps) {
+        my $source = $fcmap->{source_vdisk_name};
+        my $target = $fcmap->{target_vdisk_name};
 
-    # Step 1: Stop and remove original mapping
-    eval {
-        $class->_api_request($scfg, 'POST', "/stopfcmap/$fcmap_id", {});
-    };
-    warn "Failed to stop original FlashCopy mapping: $@\n" if $@ && $@ !~ /already stopped|not active|stopping/i;
+        if ($source eq $volname) {
+            push @original_mappings, {
+                source => $source,
+                target => $target,
+            };
 
-    $class->_api_request($scfg, 'POST', "/rmfcmap/$fcmap_id", { force => JSON::true });
-
-    # Step 2: Create reverse mapping for restore (snapshot -> source, fast copy)
-    my $reverse_fcmap_id;
-    eval {
-        my $reverse_fcmap_result = $class->_api_request($scfg, 'POST', '/mkfcmap', {
-            source => $snapshot_name,
-            target => $volname,
-            copyrate => 100,  # Fast copy for restore
-        });
-
-        # Response may be hashref or need decoding
-        if (ref($reverse_fcmap_result) eq 'HASH') {
-            $reverse_fcmap_id = $reverse_fcmap_result->{id};
-        } else {
-            require JSON;
-            my $decoded = decode_json($reverse_fcmap_result);
-            $reverse_fcmap_id = $decoded->{id} if ref($decoded) eq 'HASH';
-        }
-    };
-
-    # If reverse mapping already exists, get its ID
-    # CMMVC6035E = object already exists
-    # CMMVC6374E = identical mapping (source and target are the same)
-    # CMMVC5902E = mapping already prepared
-    if ($@) {
-        if ($class->_error_code_matches($@, 'CMMVC6035E', 'CMMVC6374E', 'CMMVC5902E')) {
-            $reverse_fcmap_id = $class->_get_fcmap_id($scfg, $snapshot_name, $volname);
-        } else {
-            die "Failed to create reverse FlashCopy mapping: $@\n";
+            if ($target eq $snapshot_name) {
+                $target_mapping_exists = 1;
+            }
         }
     }
 
-    die "No reverse FlashCopy mapping ID available\n" unless defined $reverse_fcmap_id;
+    die "FlashCopy mapping not found for snapshot '$snapname'\n" unless $target_mapping_exists;
 
-    # Step 3: Prepare and start reverse mapping
+    $class->_log('debug', "Found original mappings for rollback",
+        scfg => $scfg,
+        volname => $volname,
+        snapshot_name => $snapshot_name,
+        total_mappings => scalar(@original_mappings),
+    );
+
+    # Save rollback state for transaction recovery
+    $class->_save_rollback_state($volname, {
+        phase => 'removing_mappings',
+        volname => $volname,
+        snapname => $snapname,
+        original_mappings => \@original_mappings,
+        timestamp => time(),
+    });
+
+    # Step 2: Remove ALL FlashCopy mappings for this volume
+    # Note: FlashCopy works at storage array level, no need to deactivate/activate volume
+    $class->_log('info', "Removing all FlashCopy mappings",
+        scfg => $scfg,
+        volname => $volname,
+    );
+
+    my @mapping_ids_to_remove;
+    $fcmaps = $class->_api_request($scfg, 'POST', '/lsfcmap', {});
+    $fcmaps = [] if ref($fcmaps) ne 'ARRAY';
+
+    for my $fcmap (@$fcmaps) {
+        if ($fcmap->{source_vdisk_name} eq $volname) {
+            my $id = $fcmap->{id};
+            push @mapping_ids_to_remove, $id;
+
+            # Stop the mapping first
+            eval {
+                $class->_api_request($scfg, 'POST', "/stopfcmap/$id", {});
+            };
+            if ($@) {
+                # Ignore errors if already stopped
+                1;
+            }
+        }
+    }
+
+    # Remove all mappings
+    for my $id (@mapping_ids_to_remove) {
+        eval {
+            $class->_api_request($scfg, 'POST', "/rmfcmap/$id", { force => JSON::true });
+        };
+        if ($@) {
+            $class->_log('warn', "Failed to remove FlashCopy mapping",
+                scfg => $scfg,
+                fcmap_id => $id,
+                error => $@,
+            );
+        }
+    }
+
+    # Update rollback state - mappings removed, proceeding to reverse mapping
+    $class->_save_rollback_state($volname, {
+        phase => 'creating_reverse',
+        volname => $volname,
+        snapname => $snapname,
+        original_mappings => \@original_mappings,
+        timestamp => time(),
+    });
+
+    # Step 3: Create temporary REVERSE mapping for restore (snapshot -> disk)
+    # copyrate: 100 = fast copy for restore
+    $class->_log('info', "Creating temporary reverse mapping for restore",
+        scfg => $scfg,
+        source => $snapshot_name,
+        target => $volname,
+    );
+
+    my $reverse_fcmap_result = $class->_api_request($scfg, 'POST', '/mkfcmap', {
+        source => $snapshot_name,
+        target => $volname,
+        copyrate => 100,
+    });
+
+    my $reverse_fcmap_id;
+    if (ref($reverse_fcmap_result) eq 'HASH') {
+        $reverse_fcmap_id = $reverse_fcmap_result->{id};
+    } elsif (!ref($reverse_fcmap_result) && $reverse_fcmap_result =~ /^\d+$/) {
+        $reverse_fcmap_id = $reverse_fcmap_result;
+    }
+
+    die "Failed to create reverse FlashCopy mapping\n" unless defined $reverse_fcmap_id;
+
+    # Update rollback state - reverse mapping created, starting restore
+    $class->_save_rollback_state($volname, {
+        phase => 'restoring',
+        volname => $volname,
+        snapname => $snapname,
+        original_mappings => \@original_mappings,
+        reverse_fcmap_id => $reverse_fcmap_id,
+        timestamp => time(),
+    });
+
+    # Step 4: Start the reverse mapping (data flows from snapshot to disk)
+    $class->_log('info', "Starting reverse restore",
+        scfg => $scfg,
+        fcmap_id => $reverse_fcmap_id,
+    );
+
     $class->_api_request($scfg, 'POST', "/prestartfcmap/$reverse_fcmap_id", {});
     $class->_api_request($scfg, 'POST', "/startfcmap/$reverse_fcmap_id", {});
 
-    # Step 4: Wait for restore to complete and clean up
-    # Note: For now we don't wait - restore happens in background
-    # The reverse mapping will be cleaned up when snapshot is deleted
+    # Step 5: Remove the temporary reverse mapping
+    # After start is accepted, the data restore has begun
+    # We can remove the mapping - data continues to copy in background
+    $class->_log('info', "Removing temporary reverse mapping",
+        scfg => $scfg,
+        fcmap_id => $reverse_fcmap_id,
+    );
 
-    $class->_log('info', "Rollback completed",
+    eval {
+        $class->_api_request($scfg, 'POST', "/stopfcmap/$reverse_fcmap_id", {});
+    };
+    eval {
+        $class->_api_request($scfg, 'POST', "/rmfcmap/$reverse_fcmap_id", { force => JSON::true });
+    };
+
+    # Step 5: Wait for reverse mapping to be completely removed from storage array
+    # Using proper polling method instead of static sleep
+    $class->_wait_for_resource_cleanup($scfg, 'fcmap', $reverse_fcmap_id, 30);
+
+    # Update rollback state - restore complete, recreating mappings
+    $class->_save_rollback_state($volname, {
+        phase => 'recreating_mappings',
+        volname => $volname,
+        snapname => $snapname,
+        original_mappings => \@original_mappings,
+        timestamp => time(),
+    });
+
+    # Step 6: Recreate ALL original mappings in correct direction (disk -> snapshots)
+    $class->_log('info', "Recreating original FlashCopy mappings",
+        scfg => $scfg,
+        volname => $volname,
+        count => scalar(@original_mappings),
+    );
+
+    for my $mapping (@original_mappings) {
+        my $source = $mapping->{source};
+        my $target = $mapping->{target};
+
+        # Retry logic for CMMVC6470E (target volume still in use)
+        my $recreate_attempts = 0;
+        my $max_recreate_attempts = 5;
+        my $recreate_success = 0;
+
+        while ($recreate_attempts < $max_recreate_attempts && !$recreate_success) {
+            eval {
+                my $new_fcmap_result = $class->_api_request($scfg, 'POST', '/mkfcmap', {
+                    source => $source,
+                    target => $target,
+                    copyrate => 0,
+                });
+
+                my $new_fcmap_id;
+                if (ref($new_fcmap_result) eq 'HASH') {
+                    $new_fcmap_id = $new_fcmap_result->{id};
+                } elsif (!ref($new_fcmap_result) && $new_fcmap_result =~ /^\d+$/) {
+                    $new_fcmap_id = $new_fcmap_result;
+                }
+
+                if (defined $new_fcmap_id) {
+                    # Prepare and start the new mapping
+                    $class->_api_request($scfg, 'POST', "/prestartfcmap/$new_fcmap_id", {});
+                    $class->_api_request($scfg, 'POST', "/startfcmap/$new_fcmap_id", {});
+
+                    $class->_log('debug', "Recreated FlashCopy mapping",
+                        scfg => $scfg,
+                        source => $source,
+                        target => $target,
+                        fcmap_id => $new_fcmap_id,
+                    );
+                    $recreate_success = 1;
+                }
+            };
+            if ($@) {
+                $recreate_attempts++;
+                my $error = $@;
+
+                # CMMVC6470E = target volume still in use, wait and retry
+                if ($class->_error_code_matches($error, 'CMMVC6470E') && $recreate_attempts < $max_recreate_attempts) {
+                    $class->_log('debug', "Target volume busy, waiting before retry",
+                        scfg => $scfg,
+                        source => $source,
+                        target => $target,
+                        attempt => $recreate_attempts,
+                    );
+                    sleep(1);
+                    next;
+                }
+
+                # Other errors - log and continue with next mapping
+                $class->_log('warn', "Failed to recreate FlashCopy mapping",
+                    scfg => $scfg,
+                    source => $source,
+                    target => $target,
+                    error => $error,
+                );
+                last;
+            }
+        }
+    }
+
+    # Clear rollback state on successful completion
+    $class->_clear_rollback_state($volname);
+
+    $class->_log('info', "Rollback completed (other snapshots preserved)",
         scfg => $scfg,
         storeid => $storeid,
         volname => $volname,
@@ -2375,7 +3362,7 @@ sub volume_snapshot_rollback {
     return;
 }
 
-# Delete a snapshot
+# Delete a snapshot with idempotency (success if already deleted)
 sub volume_snapshot_delete {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
 
@@ -2386,6 +3373,9 @@ sub volume_snapshot_delete {
         snapname => $snapname,
     );
 
+    # PRE-OPERATION STATE CHECK: Clean up any orphaned state from previous runs
+    $class->_reconcile_volume_state($scfg, $volname);
+
     $class->_log('info', "Deleting snapshot",
         scfg => $scfg,
         storeid => $storeid,
@@ -2395,52 +3385,169 @@ sub volume_snapshot_delete {
 
     my $snapshot_name = $class->_snapshot_name($storeid, $scfg, $volname, $snapname);
 
-    # After rollback, there may be a reverse mapping (snapshot -> source)
-    # We need to clean up BOTH directions
-    my @mappings_to_delete = (
-        [$volname, $snapshot_name],      # Original: source -> snapshot
-        [$snapshot_name, $volname],      # Reverse: snapshot -> source (from rollback)
-    );
+    # Find ALL FlashCopy mappings involving this snapshot (in either direction)
+    my $fcmaps = $class->_api_request($scfg, 'POST', '/lsfcmap', {});
+    $fcmaps = [] if ref($fcmaps) ne 'ARRAY';
 
-    for my $pair (@mappings_to_delete) {
-        my ($source, $target) = @$pair;
+    my @fcmap_ids_to_delete;
+    for my $fcmap (@$fcmaps) {
+        my $src = $fcmap->{source_vdisk_name} || '';
+        my $tgt = $fcmap->{target_vdisk_name} || '';
 
-        my $fcmap_id = $class->_get_fcmap_id($scfg, $source, $target);
-        next unless defined $fcmap_id;
-
-        # Stop FlashCopy mapping if active
-        eval {
-            $class->_api_request($scfg, 'POST', "/stopfcmap/$fcmap_id", {});
-        };
-        if ($@ && $@ !~ /already stopped|not active|not found|in the stopped state/i) {
-            warn "Failed to stop FlashCopy mapping: $@\n";
-        }
-
-        # Remove FlashCopy mapping (force required for stopped mappings)
-        eval {
-            $class->_api_request($scfg, 'POST', "/rmfcmap/$fcmap_id", { force => JSON::true });
-        };
-        if ($@ && $@ !~ /not found/i) {
-            warn "Failed to remove FlashCopy mapping: $@\n";
+        if ($src eq $snapshot_name || $tgt eq $snapshot_name) {
+            push @fcmap_ids_to_delete, $fcmap->{id};
         }
     }
 
-    # Remove host mapping from snapshot volume before deletion
+    # Stop and remove all mappings
+    for my $fcmap_id (@fcmap_ids_to_delete) {
+        # Stop the mapping
+        eval {
+            $class->_api_request($scfg, 'POST', "/stopfcmap/$fcmap_id", {});
+        };
+        if ($@ && $@ !~ /already stopped|not active|not found|in the stopped state|stopping|CMMVC5897E|CMMVC5951E/i) {
+            $class->_log('warn', "Failed to stop FlashCopy mapping",
+                scfg => $scfg,
+                fcmap_id => $fcmap_id,
+                error => $@,
+            );
+        }
+
+        # Wait for stop to complete by polling the mapping state
+        # This replaces the fixed 200ms delay with state-based verification
+        my $stop_attempts = 0;
+        my $max_stop_attempts = 10;
+        my $stop_confirmed = 0;
+
+        while ($stop_attempts < $max_stop_attempts && !$stop_confirmed) {
+            eval {
+                my $fcmap = $class->_get_fcmap_status($scfg, $fcmap_id);
+                my $status = $fcmap->{status};
+
+                # Confirm stopped if status is 'stopped' or 'idle'
+                if ($status eq 'stopped' || $status eq 'idle') {
+                    $stop_confirmed = 1;
+                } elsif ($status eq 'stopping') {
+                    # Still stopping, wait and retry
+                    $stop_attempts++;
+                    sleep(1);
+                } else {
+                    # Unexpected state, proceed with removal
+                    $stop_confirmed = 1;
+                }
+            };
+            if ($@) {
+                # Error checking status - assume removed if 404
+                if ($@ !~ /not found|404|CMMVC5750E/i) {
+                    $stop_confirmed = 1;
+                }
+                $stop_attempts++;
+                if ($stop_attempts < $max_stop_attempts) {
+                    sleep(1);
+                }
+            }
+        }
+
+        # Remove the mapping
+        eval {
+            $class->_api_request($scfg, 'POST', "/rmfcmap/$fcmap_id", { force => JSON::true });
+        };
+        if ($@ && $@ !~ /not found|CMMVC5750E|CMMVC5897E/i) {
+            $class->_log('warn', "Failed to remove FlashCopy mapping",
+                scfg => $scfg,
+                fcmap_id => $fcmap_id,
+                error => $@,
+            );
+        }
+    }
+
+    # Remove host mapping from snapshot volume before deletion (idempotent)
     eval {
         my $vdisk_id = $class->_get_vdisk_id($scfg, $snapshot_name);
-        my $hostname = $class->_ensure_host_exists($scfg);
-
-        # Remove volume mapping from host
+        my $hostname = $class->_get_hostname();
         $class->_api_request($scfg, 'POST', "/rmvdiskhostmap/$vdisk_id", {host => $hostname});
     };
-
-    # Delete snapshot volume
-    eval {
-        my $vdisk_id = $class->_get_vdisk_id($scfg, $snapshot_name);
-        $class->_api_request($scfg, 'POST', "/rmvdisk/$vdisk_id");
-    };
     if ($@) {
-        die "Failed to delete snapshot volume: $@\n";
+        # Ignore if snapshot volume not found (already deleted)
+        if ($@ !~ /not found|CMMVC5750E|object does not exist/i) {
+            $class->_log('warn', "Failed to remove host mapping",
+                scfg => $scfg,
+                snapshot_name => $snapshot_name,
+                error => $@,
+            );
+        }
+    }
+
+    # Delete snapshot volume (idempotent - success if already deleted)
+    # Handle CMMVC5840E (mapped to host or part of FlashCopy) with retry
+    my $delete_attempts = 0;
+    my $max_delete_attempts = 3;
+    my $volume_deleted = 0;
+
+    while ($delete_attempts < $max_delete_attempts && !$volume_deleted) {
+        eval {
+            my $vdisk_id = $class->_get_vdisk_id($scfg, $snapshot_name);
+            $class->_api_request($scfg, 'POST', "/rmvdisk/$vdisk_id");
+            $volume_deleted = 1;
+        };
+        if ($@) {
+            $delete_attempts++;
+            my $error = $@;
+
+            # CMMVC5750E = object not found (already deleted is OK)
+            if ($class->_error_code_matches($error, 'CMMVC5750E')) {
+                $class->_log('info', "Snapshot volume already deleted",
+                    scfg => $scfg,
+                    storeid => $storeid,
+                    volname => $volname,
+                    snapname => $snapname,
+                );
+                $volume_deleted = 1;
+                last;
+            }
+
+            # CMMVC5840E = volume is mapped or part of FlashCopy - retry with cleanup
+            if ($class->_error_code_matches($error, 'CMMVC5840E') && $delete_attempts < $max_delete_attempts) {
+                $class->_log('info', "Volume has mappings, cleaning up (attempt $delete_attempts)",
+                    scfg => $scfg,
+                    snapshot_name => $snapshot_name,
+                );
+
+                # Force stop ALL FlashCopy mappings involving this snapshot
+                my $fcmaps = $class->_api_request($scfg, 'POST', '/lsfcmap', {});
+                $fcmaps = [] if ref($fcmaps) ne 'ARRAY';
+
+                for my $fcmap (@$fcmaps) {
+                    my $src = $fcmap->{source_vdisk_name} || '';
+                    my $tgt = $fcmap->{target_vdisk_name} || '';
+
+                    if ($src eq $snapshot_name || $tgt eq $snapshot_name) {
+                        my $id = $fcmap->{id};
+                        eval {
+                            $class->_api_request($scfg, 'POST', "/stopfcmap/$id", {});
+                        };
+                        eval {
+                            $class->_api_request($scfg, 'POST', "/rmfcmap/$id", { force => JSON::true });
+                        };
+                    }
+                }
+
+                # Force remove host mapping
+                eval {
+                    my $vdisk_id = $class->_get_vdisk_id($scfg, $snapshot_name);
+                    my $hostname = $class->_get_hostname();
+                    $class->_api_request($scfg, 'POST', "/rmvdiskhostmap/$vdisk_id", {host => $hostname});
+                };
+
+                sleep(1);  # Brief delay before retry
+                next;
+            }
+
+            # Other errors or max attempts reached
+            if (!$volume_deleted) {
+                die "Failed to delete snapshot volume after $delete_attempts attempts: $error\n";
+            }
+        }
     }
 
     $class->_log('info', "Snapshot deleted successfully",
