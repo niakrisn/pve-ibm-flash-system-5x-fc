@@ -538,6 +538,7 @@ sub _api_request {
             endpoint => $endpoint,
             method => $method,
             status => $status,
+            content => $content,
             duration => int($duration),
         );
         die "API request failed: $status - $content\n";
@@ -828,7 +829,7 @@ sub clone_image {
         # Get source volume size
         my $vdisk_info = $class->_api_request($scfg, 'POST', "/lsvdisk/$volname", {});
         $vdisk_info = $vdisk_info->[0] if ref($vdisk_info) eq 'ARRAY';
-        my $size_gb = $class->_parse_capacity_to_gb($vdisk_info->{capacity} || '0');
+        my $size_bytes = $class->_parse_capacity_to_bytes($vdisk_info->{capacity} || '0');
 
         # Create target volume as regular vdisk (not thin volume)
         # Using mkvdisk instead of mkvolume for better compatibility
@@ -837,8 +838,8 @@ sub clone_image {
             $class->_api_request($scfg, 'POST', '/mkvdisk', {
                 name => $new_name,
                 mdiskgrp => $pool_name,
-                size => $size_gb,
-                unit => 'gb',
+                size => $size_bytes,
+                unit => 'b',
             });
         };
         if ($@) {
@@ -926,15 +927,15 @@ sub clone_image {
         # Get source volume size
         my $vdisk_info = $class->_api_request($scfg, 'POST', "/lsvdisk/$volname", {});
         $vdisk_info = $vdisk_info->[0] if ref($vdisk_info) eq 'ARRAY';
-        my $size_gb = $class->_parse_capacity_to_gb($vdisk_info->{capacity} || '0');
+        my $size_bytes = $class->_parse_capacity_to_bytes($vdisk_info->{capacity} || '0');
 
         # Create target volume with same size
         my $pool_name = $scfg->{pool} or die "Pool not configured\n";
         $class->_api_request($scfg, 'POST', '/mkvdisk', {
             name => $new_name,
             mdiskgrp => $pool_name,
-            size => $size_gb,
-            unit => 'gb',
+            size => $size_bytes,
+            unit => 'b',
         });
 
         # Create FlashCopy mapping with copyrate 100 (full copy)
@@ -1111,6 +1112,59 @@ sub _parse_capacity_to_gb {
     return $capacity_str;
 }
 
+# Parse capacity string to bytes (always returns numeric bytes)
+# Handles: "1024" (bytes), "1.00GB", "512MB", "1TB", "128.00KB", etc.
+sub _parse_capacity_to_bytes {
+    my ($class, $capacity_str) = @_;
+
+    return 0 if !$capacity_str || $capacity_str eq '0';
+
+    # If already a plain number, assume bytes
+    if ($capacity_str =~ /^\d+$/) {
+        return $capacity_str + 0;  # Return as number
+    }
+
+    # Parse format: "1.00GB", "512.5MB", "1024KB", etc.
+    if ($capacity_str =~ /^([\d.]+)(\w+)$/) {
+        my $value = $1;
+        my $unit = uc($2);
+
+        if ($unit eq 'TB') {
+            return $value * 1024 * 1024 * 1024 * 1024;  # TB to bytes
+        } elsif ($unit eq 'GB') {
+            return $value * 1024 * 1024 * 1024;  # GB to bytes
+        } elsif ($unit eq 'MB') {
+            return $value * 1024 * 1024;  # MB to bytes
+        } elsif ($unit eq 'KB' || $unit eq 'K') {
+            return $value * 1024;  # KB to bytes
+        } elsif ($unit eq 'BYTES' || $unit eq 'B') {
+            return $value;  # Already bytes
+        }
+    }
+
+    # Fallback: try to use as-is (assume bytes)
+    return $capacity_str + 0;
+}
+
+# Check if error string contains specific CMMVC error code
+# IBM FlashSystem returns errors like "CMMVC6035E The action failed..."
+# Reference: https://www.ibm.com/docs/en/flashsystem-5x00/8.4.0?topic=messages-cli-message-reference
+sub _error_code_matches {
+    my ($class, $error_string, @codes) = @_;
+
+    return 0 unless $error_string;
+
+    # Extract CMMVC code from error string
+    # Format: "CMMVC5897E The FlashCopy mapping was not deleted..."
+    if ($error_string =~ /CMMVC(\d+[A-Z])/) {
+        my $code = "CMMVC$1";
+        foreach my $check_code (@codes) {
+            return 1 if $code eq $check_code;
+        }
+    }
+    return 0;
+}
+
 # Get volume size information
 sub volume_size_info {
     my ($class, $scfg, $storeid, $volname, $timeout) = @_;
@@ -1129,8 +1183,7 @@ sub volume_size_info {
     die "Volume '$volname' not found\n" unless $vdisk_info;
 
     my $capacity_str = $vdisk_info->{capacity} || '0';
-    my $size_gb = $class->_parse_capacity_to_gb($capacity_str);
-    my $size_bytes = int($size_gb * 1024 * 1024 * 1024);
+    my $size_bytes = $class->_parse_capacity_to_bytes($capacity_str);
 
     return $size_bytes;
 }
@@ -2117,11 +2170,11 @@ sub volume_snapshot {
     my $snapshot_name = $class->_snapshot_name($storeid, $scfg, $volname, $snapname);
     my $pool_name = $scfg->{pool} or die "Pool not configured\n";
 
-    # Get source volume size - query by name and parse to GB
+    # Get source volume size - query by name and parse to bytes
     my $result = $class->_api_request($scfg, 'POST', "/lsvdisk/$volname", {});
     my $source_info = ref($result) eq 'ARRAY' ? $result->[0] : $result;
     my $capacity_str = $source_info->{capacity} || '0';
-    my $size_gb = $class->_parse_capacity_to_gb($capacity_str) + 0;  # Force numeric
+    my $size_bytes = $class->_parse_capacity_to_bytes($capacity_str);
 
     # Step 1: Create target volume (snapshot) if not exists
     # thin: true (boolean) - critical for snapshots, no immediate space allocation
@@ -2129,13 +2182,18 @@ sub volume_snapshot {
         $class->_api_request($scfg, 'POST', '/mkvolume', {
             name => $snapshot_name,
             pool => $pool_name,
-            size => $size_gb,
-            unit => 'gb',
+            size => $size_bytes,
+            unit => 'b',
             thin => JSON::true,
         });
     };
-    if ($@ && $@ !~ /already exists/i) {
-        die "Failed to create snapshot volume: $@\n";
+    if ($@) {
+        # CMMVC6035E = object already exists (OK, volume exists from previous attempt)
+        # Other errors = fail
+        unless ($class->_error_code_matches($@, 'CMMVC6035E')) {
+            die "Failed to create snapshot volume: $@\n";
+        }
+        # Volume exists, continue with FlashCopy mapping
     }
 
     # Step 2: Create FlashCopy mapping using volume names (not IDs)
@@ -2147,9 +2205,23 @@ sub volume_snapshot {
             target => $snapshot_name,
             copyrate => 0,
         });
-        # Handle response: may be hashref or string that needs decoding
+
+        # Debug: log the response
+        $class->_log('debug', "FlashCopy mapping created",
+            scfg => $scfg,
+            storeid => $storeid,
+            volname => $volname,
+            snapshot_name => $snapshot_name,
+            result_type => ref($fcmap_result) || 'scalar',
+            result_value => ref($fcmap_result) ? '' : $fcmap_result,
+        );
+
+        # Handle response: may be hashref with id field, or string that needs decoding
         if (ref($fcmap_result) eq 'HASH') {
             $fcmap_id = $fcmap_result->{id};
+        } elsif (!ref($fcmap_result) && $fcmap_result =~ /^\d+$/) {
+            # Direct numeric string response
+            $fcmap_id = $fcmap_result;
         } else {
             # Try to decode if it's a string
             eval {
@@ -2158,10 +2230,19 @@ sub volume_snapshot {
                 $fcmap_id = $decoded->{id} if ref($decoded) eq 'HASH';
             };
         }
+
+        $class->_log('debug', "FlashCopy mapping ID extracted",
+            scfg => $scfg,
+            storeid => $storeid,
+            fcmap_id => $fcmap_id // 'undef',
+        );
     };
     if ($@) {
         # If mapping already exists, get its ID
-        if ($@ =~ /already exists|identical map/i) {
+        # CMMVC6035E = object already exists
+        # CMMVC6374E = identical mapping (source and target are the same)
+        # CMMVC5902E = mapping already prepared
+        if ($class->_error_code_matches($@, 'CMMVC6035E', 'CMMVC6374E', 'CMMVC5902E')) {
             $fcmap_id = $class->_get_fcmap_id($scfg, $volname, $snapshot_name);
             die "FlashCopy mapping exists but ID not found\n" unless defined $fcmap_id;
         } else {
@@ -2256,10 +2337,15 @@ sub volume_snapshot_rollback {
     };
 
     # If reverse mapping already exists, get its ID
-    if ($@ && $@ =~ /already exists|identical map/i) {
-        $reverse_fcmap_id = $class->_get_fcmap_id($scfg, $snapshot_name, $volname);
-    } elsif ($@) {
-        die "Failed to create reverse FlashCopy mapping: $@\n";
+    # CMMVC6035E = object already exists
+    # CMMVC6374E = identical mapping (source and target are the same)
+    # CMMVC5902E = mapping already prepared
+    if ($@) {
+        if ($class->_error_code_matches($@, 'CMMVC6035E', 'CMMVC6374E', 'CMMVC5902E')) {
+            $reverse_fcmap_id = $class->_get_fcmap_id($scfg, $snapshot_name, $volname);
+        } else {
+            die "Failed to create reverse FlashCopy mapping: $@\n";
+        }
     }
 
     die "No reverse FlashCopy mapping ID available\n" unless defined $reverse_fcmap_id;
