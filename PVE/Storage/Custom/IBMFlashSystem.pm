@@ -1239,16 +1239,25 @@ sub _error_code_matches {
 
 # Get FlashCopy mapping status from storage array
 # Returns hashref with: { id, status, progress, state, source_vdisk_name, target_vdisk_name }
+# Dies with "not found" if mapping doesn't exist
 sub _get_fcmap_status {
     my ($class, $scfg, $fcmap_id) = @_;
 
     # Query specific mapping: POST /lsfcmap/{id}
     my $result = $class->_api_request($scfg, 'POST', "/lsfcmap/$fcmap_id", {});
 
+    # Empty result means mapping not found (API returns empty hash/array/string for non-existent fcmap)
+    if (!$result ||
+        (ref($result) eq 'ARRAY' && !@$result) ||
+        (ref($result) eq 'HASH' && !%$result) ||
+        (ref($result) eq '' && $result eq '')) {
+        die "FlashCopy mapping '$fcmap_id' not found\n";
+    }
+
     my $fcmap_info;
     if (ref($result) eq 'ARRAY') {
         $fcmap_info = $result->[0];
-    } else {
+    } elsif (ref($result) eq 'HASH') {
         $fcmap_info = $result;
     }
 
@@ -1466,6 +1475,10 @@ sub _reconcile_volume_state {
     # Fix 3: Remove dangling host mappings from failed qemu-img operations
     $class->_reconcile_host_mappings($scfg, $volname);
 
+    # Fix 4: Auto-recover missing snapshot mappings (star topology restoration)
+    # Discover snapshot volumes by name pattern and recreate missing mappings
+    $class->_recover_snapshot_mappings($scfg, $volname);
+
     $class->_log('debug', "Volume state reconciled",
         scfg => $scfg,
         volname => $volname,
@@ -1513,6 +1526,89 @@ sub _reconcile_host_mappings {
                 vdisk_id => $vdisk_id,
             );
         }
+    }
+
+    return;
+}
+
+# Auto-recover snapshot mappings by discovering snapshot volumes and recreating mappings
+# This restores the star topology when mappings are missing (e.g., after cleanup failures)
+sub _recover_snapshot_mappings {
+    my ($class, $scfg, $volname) = @_;
+
+    $class->_log('debug', "Checking for missing snapshot mappings",
+        scfg => $scfg,
+        volname => $volname,
+    );
+
+    # Get current FlashCopy mappings where volname is the source
+    my $fcmaps = $class->_api_request($scfg, 'POST', '/lsfcmap', {});
+    $fcmaps = [] if ref($fcmaps) ne 'ARRAY';
+
+    my %mapped_targets;
+    for my $fcmap (@$fcmaps) {
+        if ($fcmap->{source_vdisk_name} eq $volname) {
+            $mapped_targets{$fcmap->{target_vdisk_name}} = 1;
+        }
+    }
+
+    # Discover snapshot volumes by name pattern
+    my $snapshot_volumes = $class->_discover_snapshot_volumes($scfg, $volname);
+
+    # Find and recreate missing mappings
+    my $recovered_count = 0;
+    for my $snapshot_vol (@$snapshot_volumes) {
+        unless ($mapped_targets{$snapshot_vol}) {
+            $class->_log('info', "Recreating missing snapshot mapping",
+                scfg => $scfg,
+                source => $volname,
+                target => $snapshot_vol,
+            );
+
+            eval {
+                my $fcmap_result = $class->_api_request($scfg, 'POST', '/mkfcmap', {
+                    source => $volname,
+                    target => $snapshot_vol,
+                    copyrate => 0,
+                });
+
+                my $fcmap_id;
+                if (ref($fcmap_result) eq 'HASH') {
+                    $fcmap_id = $fcmap_result->{id};
+                } elsif (!ref($fcmap_result) && $fcmap_result =~ /^\d+$/) {
+                    $fcmap_id = $fcmap_result;
+                }
+
+                if (defined $fcmap_id) {
+                    # Start the mapping
+                    $class->_api_request($scfg, 'POST', "/prestartfcmap/$fcmap_id", {});
+                    $class->_api_request($scfg, 'POST', "/startfcmap/$fcmap_id", {});
+
+                    $class->_log('info', "Successfully recovered snapshot mapping",
+                        scfg => $scfg,
+                        fcmap_id => $fcmap_id,
+                    );
+                    $recovered_count++;
+                }
+            };
+
+            if ($@) {
+                $class->_log('warn', "Failed to recover snapshot mapping",
+                    scfg => $scfg,
+                    source => $volname,
+                    target => $snapshot_vol,
+                    error => $@,
+                );
+            }
+        }
+    }
+
+    if ($recovered_count > 0) {
+        $class->_log('info', "Snapshot mapping recovery completed",
+            scfg => $scfg,
+            volname => $volname,
+            recovered_count => $recovered_count,
+        );
     }
 
     return;
@@ -2777,6 +2873,41 @@ sub _snapshot_name {
     return "snap-${volname}-${safe_snapname}";
 }
 
+# Discover all snapshot volumes for a given base volume by name pattern
+# This is used for recovery when mappings exist but snapshot listing is not available
+# Returns array of snapshot volume names matching pattern "snap-{volname}-*"
+sub _discover_snapshot_volumes {
+    my ($class, $scfg, $volname) = @_;
+
+    $class->_log('debug', "Discovering snapshot volumes by name pattern",
+        scfg => $scfg,
+        volname => $volname,
+    );
+
+    my $result = $class->_api_request($scfg, 'POST', '/lsvdisk', {});
+    my $vdisks = ref($result) eq 'ARRAY' ? $result : [];
+
+    # Pattern: snap-{volname}-*
+    my $pattern = qr/^snap-\Q${volname}\E-/;
+
+    my @snapshot_volumes;
+    for my $vdisk (@$vdisks) {
+        my $vdisk_name = $vdisk->{name};
+        if ($vdisk_name =~ $pattern) {
+            push @snapshot_volumes, $vdisk_name;
+        }
+    }
+
+    $class->_log('debug', "Discovered snapshot volumes",
+        scfg => $scfg,
+        volname => $volname,
+        count => scalar(@snapshot_volumes),
+        snapshots => \@snapshot_volumes,
+    );
+
+    return \@snapshot_volumes;
+}
+
 # Get FlashCopy mapping ID
 sub _get_fcmap_id {
     my ($class, $scfg, $source_vol, $target_vol) = @_;
@@ -3210,8 +3341,17 @@ sub volume_snapshot_rollback {
     my $reverse_fcmap_result = $class->_api_request($scfg, 'POST', '/mkfcmap', {
         source => $snapshot_name,
         target => $volname,
-        copyrate => 100,
+        copyrate => 150,
     });
+
+    # Debug: log the response
+    $class->_log('debug', "FlashCopy reverse mapping created",
+        scfg => $scfg,
+        source => $snapshot_name,
+        target => $volname,
+        result_type => ref($reverse_fcmap_result) || 'scalar',
+        result_value => ref($reverse_fcmap_result) ? '' : $reverse_fcmap_result,
+    );
 
     my $reverse_fcmap_id;
     if (ref($reverse_fcmap_result) eq 'HASH') {
@@ -3220,7 +3360,14 @@ sub volume_snapshot_rollback {
         $reverse_fcmap_id = $reverse_fcmap_result;
     }
 
-    die "Failed to create reverse FlashCopy mapping\n" unless defined $reverse_fcmap_id;
+    die "Failed to create reverse FlashCopy mapping - unexpected response format\n"
+        unless defined $reverse_fcmap_id && length($reverse_fcmap_id) > 0;
+
+    # Debug: log extracted ID
+    $class->_log('debug', "FlashCopy reverse mapping ID extracted",
+        scfg => $scfg,
+        fcmap_id => $reverse_fcmap_id,
+    );
 
     # Update rollback state - reverse mapping created, starting restore
     $class->_save_rollback_state($volname, {
@@ -3241,9 +3388,18 @@ sub volume_snapshot_rollback {
     $class->_api_request($scfg, 'POST', "/prestartfcmap/$reverse_fcmap_id", {});
     $class->_api_request($scfg, 'POST', "/startfcmap/$reverse_fcmap_id", {});
 
-    # Step 5: Remove the temporary reverse mapping
-    # After start is accepted, the data restore has begun
-    # We can remove the mapping - data continues to copy in background
+    # Step 5: Wait for restore to start copying before removing the mapping
+    # With copyrate=150, the restore starts immediately and can be removed once active/copying
+    # This is much faster than waiting for full completion
+    $class->_log('info', "Waiting for restore to become active",
+        scfg => $scfg,
+        fcmap_id => $reverse_fcmap_id,
+    );
+
+    $class->_wait_for_fcmap_state($scfg, $reverse_fcmap_id, ['active', 'copying'], 60);
+
+    # Step 6: Remove the temporary reverse mapping
+    # Now that copying has started, we can remove the mapping - data continues to copy in background
     $class->_log('info', "Removing temporary reverse mapping",
         scfg => $scfg,
         fcmap_id => $reverse_fcmap_id,
@@ -3256,9 +3412,8 @@ sub volume_snapshot_rollback {
         $class->_api_request($scfg, 'POST', "/rmfcmap/$reverse_fcmap_id", { force => JSON::true });
     };
 
-    # Step 5: Wait for reverse mapping to be completely removed from storage array
-    # Using proper polling method instead of static sleep
-    $class->_wait_for_resource_cleanup($scfg, 'fcmap', $reverse_fcmap_id, 30);
+    # Step 7: Wait for reverse mapping to be completely removed from storage array
+    $class->_wait_for_resource_cleanup($scfg, 'fcmap', $reverse_fcmap_id, 60);
 
     # Update rollback state - restore complete, recreating mappings
     $class->_save_rollback_state($volname, {
@@ -3269,7 +3424,7 @@ sub volume_snapshot_rollback {
         timestamp => time(),
     });
 
-    # Step 6: Recreate ALL original mappings in correct direction (disk -> snapshots)
+    # Step 8: Recreate ALL original mappings in correct direction (disk -> snapshots)
     $class->_log('info', "Recreating original FlashCopy mappings",
         scfg => $scfg,
         volname => $volname,
