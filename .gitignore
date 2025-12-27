@@ -1,2 +1,5 @@
 output/
 .DS_Store
+*.swp
+*.txt
+.DS_Store
