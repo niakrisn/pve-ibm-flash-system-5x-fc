@@ -112,6 +112,13 @@ sub _log {
         push @ctx_parts, "size_bytes=$context{size_bytes}" if $context{size_bytes};
         push @ctx_parts, "fcmap_id=$context{fcmap_id}" if $context{fcmap_id};
         push @ctx_parts, "hostname=$context{hostname}" if $context{hostname};
+        # Generic: output any other context keys
+        my %known = map { $_ => 1 } qw(storeid vmid volname endpoint duration status total_volumes
+            snap_volname snap_vdisk_id volume_keys is_base count scfg vdisk_uid expected_path_3600
+            expected_path_3 mpath vname pool size_bytes fcmap_id hostname);
+        for my $k (keys %context) {
+            push @ctx_parts, "$k=$context{$k}" if !$known{$k};
+        }
         $ctx_str = ' [' . join(', ', @ctx_parts) . ']' if @ctx_parts;
     }
 
@@ -207,7 +214,7 @@ sub options {
         pool => { fixed => 1 },
         hostcluster => { fixed => 1 },
         username => { fixed => 1 },
-        password => { fixed => 1 },
+        password => { optional => 1 },
         timeout => { optional => 1 },
         verify_ssl => { optional => 1 },
         max_retries => { optional => 1 },
@@ -232,6 +239,7 @@ sub plugindata {
     return {
         content => [{ images => 1, rootdir => 1 }],
         format => [{ raw => 1 }, 'raw'],
+        'sensitive-properties' => { password => 1 },
     };
 }
 
@@ -295,16 +303,18 @@ sub properties {
 # REST Client & Token Management
 # ============================================================================
 
-# Get token cache file path
+# Get token cache file path (storage-specific to avoid conflicts)
 sub _get_token_path {
-    return '/run/pve-storage-ibm.token';
+    my ($class, $storeid) = @_;
+    die "No storeid for token path\n" unless $storeid;
+    return "/run/pve-storage-ibm-${storeid}.token";
 }
 
 # Read cached token
 sub _get_cached_token {
-    my ($class) = @_;
+    my ($class, $storeid) = @_;
 
-    my $token_path = $class->_get_token_path();
+    my $token_path = $class->_get_token_path($storeid);
 
     return unless -f $token_path;
 
@@ -320,9 +330,9 @@ sub _get_cached_token {
 
 # Write token to cache with secure permissions
 sub _set_cached_token {
-    my ($class, $token) = @_;
+    my ($class, $storeid, $token) = @_;
 
-    my $token_path = $class->_get_token_path();
+    my $token_path = $class->_get_token_path($storeid);
 
     eval { file_set_contents($token_path, $token, 0600) };
     if ($@) {
@@ -334,9 +344,9 @@ sub _set_cached_token {
 
 # Clear cached token
 sub _clear_cached_token {
-    my ($class) = @_;
+    my ($class, $storeid) = @_;
 
-    my $token_path = $class->_get_token_path();
+    my $token_path = $class->_get_token_path($storeid);
 
     if (-f $token_path) {
         unlink $token_path or warn "Failed to delete token cache: $!\n";
@@ -439,9 +449,94 @@ sub _build_url {
     return $url->as_string;
 }
 
+# Password helpers (following PBSPlugin pattern)
+sub password_file_name {
+    my ($scfg, $storeid) = @_;
+    return "/etc/pve/priv/storage/${storeid}.pw";
+}
+
+sub set_password {
+    my ($scfg, $storeid, $password) = @_;
+    my $pwfile = password_file_name($scfg, $storeid);
+    mkdir "/etc/pve/priv/storage";
+    PVE::Tools::file_set_contents($pwfile, "$password\n", 0600, 1);
+}
+
+sub delete_password {
+    my ($scfg, $storeid) = @_;
+    my $pwfile = password_file_name($scfg, $storeid);
+    unlink $pwfile;
+}
+
+sub get_password {
+    my ($scfg, $storeid) = @_;
+    my $pwfile = password_file_name($scfg, $storeid);
+    return unless -f $pwfile;
+    my $contents = PVE::Tools::file_read_firstline($pwfile);
+    chomp $contents;
+    return $contents;
+}
+
+# Hooks for password management
+sub on_add_hook {
+    my ($class, $storeid, $scfg, %param) = @_;
+
+    if (defined(my $password = $param{password})) {
+        set_password($scfg, $storeid, $password);
+    }
+
+    return;
+}
+
+sub on_update_hook {
+    my ($class, $storeid, $scfg, %param) = @_;
+
+    $class->_log('info', "on_update_hook called",
+        storeid => $storeid,
+        password_exists => exists($param{password}) ? 1 : 0,
+    );
+
+    # Clear token if password, username or portal changes (requires re-auth)
+    my $clear_token = 0;
+
+    if (exists($param{password})) {
+        $clear_token = 1;
+        if (defined($param{password})) {
+            set_password($scfg, $storeid, $param{password});
+            $class->_log('info', "Password updated", storeid => $storeid);
+        } else {
+            delete_password($scfg, $storeid);
+            $class->_log('info', "Password deleted", storeid => $storeid);
+        }
+    }
+
+    if (exists($param{username}) || exists($param{portal})) {
+        $clear_token = 1;
+    }
+
+    if ($clear_token) {
+        $class->_clear_cached_token($storeid);
+        $class->_log('info', "Token cleared due to credential changes", storeid => $storeid);
+    }
+
+    return;
+}
+
+sub on_delete_hook {
+    my ($class, $storeid, $scfg) = @_;
+
+    delete_password($scfg, $storeid);
+    $class->_clear_cached_token($storeid);
+
+    return;
+}
+
 # Authenticate and get token
 sub _authenticate {
     my ($class, $scfg) = @_;
+
+    # Get storeid from scfg (Proxmox always adds it)
+    my $storeid = $scfg->{storage} || die "No storage ID in config\n";
 
     $class->_log('debug', "ENTER _authenticate",
         scfg => $scfg,
@@ -459,7 +554,8 @@ sub _authenticate {
 
     my $request = HTTP::Request->new(POST => $url);
     $request->header('X-Auth-Username' => $scfg->{username});
-    $request->header('X-Auth-Password' => $scfg->{password});
+    my $password = get_password($scfg, $storeid) || die "Password not found. Please set password using configuration update.\n";
+    $request->header('X-Auth-Password' => $password);
 
     my $response = $ua->request($request);
 
@@ -495,7 +591,7 @@ sub _authenticate {
     }
 
     # Cache the token
-    $class->_set_cached_token($token);
+    $class->_set_cached_token($storeid, $token);
 
     my $duration = (time - $start_time) * 1000;
     $class->_log('info', "Authentication successful",
@@ -532,13 +628,14 @@ sub _api_request {
     my $ua = $class->_init_ua($scfg);
     my $url = $class->_build_url($scfg, $endpoint);
 
+    my $storeid = $scfg->{storage} || die "No storage ID in config\n";
     my $max_retries = $scfg->{max_retries} || 3;
     my $retry_delay = $scfg->{retry_delay} || 1;
     my $attempts = 0;
     my $response;
 
     while ($attempts <= $max_retries) {
-        my $token = $class->_get_cached_token();
+        my $token = $class->_get_cached_token($storeid);
 
         # If no token, authenticate first
         unless ($token) {
@@ -573,7 +670,7 @@ sub _api_request {
             );
 
             # Clear cache and re-authenticate
-            $class->_clear_cached_token();
+            $class->_clear_cached_token($storeid);
             $token = $class->_authenticate($scfg);
 
             $attempts++;
@@ -3785,6 +3882,9 @@ sub _check_multipath_runtime_config {
 # Activate storage - validates configuration
 sub activate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
+
+    # Ensure storeid is in scfg for _api_request
+    $scfg->{storage} = $storeid;
 
     $class->_log('debug', "ENTER activate_storage",
         scfg => $scfg,

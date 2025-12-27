@@ -11,7 +11,7 @@ PATCH_DIR="/usr/share/${PACKAGE_NAME}/patches"
 QEMU_TARGET="/usr/share/perl5/PVE/API2/Qemu.pm"
 GUI_PATCH_SOURCE="/usr/share/${PACKAGE_NAME}/patches/pve-manager-index-html-gui.patch"
 GUI_JS_SOURCE="/usr/share/${PACKAGE_NAME}/ibmflash-gui.js"
-GUI_JS_TARGET="/usr/share/javascript/proxmox-widget-toolkit/pve-storage-ibmflash.js"
+GUI_JS_TARGET="/usr/share/pve-manager/js/pve-storage-ibmflash.js"
 GUI_TEMPLATE="/usr/share/pve-manager/index.html.tpl"
 MARKER_PREFIX="# IBM FlashSystem Patch"
 GUI_MARKER="pve-storage-ibmflash.js"
@@ -58,6 +58,7 @@ ensure_gui() {
     if [ ! -f "$GUI_JS_TARGET" ]; then
         mkdir -p "$(dirname "$GUI_JS_TARGET")"
         cp "$GUI_JS_SOURCE" "$GUI_JS_TARGET"
+        chmod 644 "$GUI_JS_TARGET"
         log "  ✓ JS file copied"
     fi
 }
@@ -125,7 +126,7 @@ case "$1" in
         ensure_gui
 
         # Restart services
-        systemctl try-reload-or-restart pvedaemon pveproxy 2>/dev/null || true
+        systemctl try-reload-or-restart pvedaemon pveproxy pvestatd 2>/dev/null || true
         ;;
 
     remove)
@@ -150,7 +151,8 @@ case "$1" in
 
             # Remove marker if we removed any patches
             if [ $_removed_count -gt 0 ]; then
-                # Remove our marker line
+                # Remove our marker line and the empty line before it
+                sed -i ":a;/${MARKER_PREFIX}/{x;1x;1d;x;d};/^\n*$/{$d;N;ba" "$QEMU_TARGET" 2>/dev/null || \
                 sed -i "/${MARKER_PREFIX}/d" "$QEMU_TARGET"
                 log "Removed $_removed_count patch(es)"
             fi
@@ -177,7 +179,7 @@ case "$1" in
         fi
 
         # Restart services
-        systemctl try-reload-or-restart pvedaemon pveproxy 2>/dev/null || true
+        systemctl try-reload-or-restart pvedaemon pveproxy pvestatd 2>/dev/null || true
         ;;
 
     *)
