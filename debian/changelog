@@ -1,0 +1,10 @@
+pve-ibm-fs5x-fc-plugin (@VERSION@) unstable; urgency=medium
+
+  * Renamed package to pve-ibm-fs5x-fc-plugin
+  * Unified storage plugin and PVE patches in single package
+  * Add APT hook for automatic patch re-application after PVE upgrades
+  * Add efidisk deactivation patch
+  * Add clone activation/deactivation patch
+  * Add storage plugin: PVE::Storage::Custom::IBMFlashSystem
+
+ -- Nikita Kozlov <niakrisn@gmail.com>  Fri, 26 Dec 2025 16:00:00 +0300

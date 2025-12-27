@@ -1,0 +1,24 @@
+#!/bin/bash
+set -e
+
+PATCH_MANAGER="/usr/share/pve-ibm-fs5x-fc-plugin/scripts/patch-manager.sh"
+
+case "$1" in
+    remove|deconfigure)
+        # Remove patches via patch manager
+        if [ -x "$PATCH_MANAGER" ]; then
+            "$PATCH_MANAGER" remove
+        fi
+        ;;
+
+    upgrade|failed-upgrade)
+        # Keep patches applied during upgrade
+        ;;
+
+    *)
+        echo "prerm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

@@ -1,0 +1,12 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	# Nothing to build
+
+override_dh_auto_install:
+	# Install patches to /usr/share
+	install -d debian/pve-ibm-flashsystem-patches/usr/share/pve-ibm-flashsystem-patches/patches
+	install -m 644 debian/patches/*.patch debian/pve-ibm-flashsystem-patches/usr/share/pve-ibm-flashsystem-patches/patches/

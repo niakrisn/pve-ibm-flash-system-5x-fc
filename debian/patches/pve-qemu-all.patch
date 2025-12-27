@@ -1,0 +1,69 @@
+--- /usr/share/perl5/PVE/API2/Qemu.pm   2025-12-27 12:01:59.178141354 +0300
++++ /usr/share/perl5/PVE/API2/Qemu.pm   2025-12-27 12:41:48.415404165 +0300
+@@ -626,6 +626,13 @@
+                     ($volid, $size) = PVE::QemuServer::OVMF::create_efidisk(
+                         $storecfg, $storeid, $vmid, $fmt, $arch, $disk, $smm, $cvm_type,
+                     );
++
++                    # Deactivate efidisk after OVMF_VARS is written
++                    # Block storage volumes remain mapped if not explicitly deactivated
++                    eval {
++                        PVE::Storage::deactivate_volumes($storecfg, [$volid]);
++                    };
++                    log_warn($@) if $@;
+                 } elsif ($ds eq 'tpmstate0') {
+                     # A fixed size is used for TPM state volumes
+                     $size = PVE::Tools::convert_size(
+@@ -4520,7 +4527,17 @@
+                 local $SIG{INT} = local $SIG{TERM} = local $SIG{QUIT} = local $SIG{HUP} =
+                     sub { die "interrupted by signal\n"; };
+ 
+-                PVE::Storage::activate_volumes($storecfg, $vollist, $snapname);
++                # Only activate source volumes if storage doesn't support storage-level cloning
++                # (i.e., needs host-based copying via qemu-img)
++                my $need_source_activation = 0;
++                foreach my $volid (@$vollist) {
++                    if (!PVE::Storage::volume_has_feature($storecfg, 'clone', $volid, $snapname, $running)) {
++                        $need_source_activation = 1;
++                        last;
++                    }
++                }
++                PVE::Storage::activate_volumes($storecfg, $vollist, $snapname)
++                    if $need_source_activation;
+ 
+                 my $bwlimit = extract_param($param, 'bwlimit');
+ 
+@@ -4587,18 +4604,24 @@
+ 
+                 PVE::QemuServer::Network::create_ifaces_ipams_ips($newconf, $newid);
+ 
+-                if ($target) {
+-                    if (!$running) {
+-                        # always deactivate volumes - avoids that LVM LVs are active on several nodes
+-                        eval {
+-                            PVE::Storage::deactivate_volumes($storecfg, $vollist, $snapname);
+-                        };
+-                        # but only warn when that fails (e.g., parallel clones keeping them active)
+-                        log_warn($@) if $@;
+-                    }
++                # Deactivate volumes after cloning to prevent orphan mappings
++                # Skip only if source VM is running (volumes needed for running VM)
++                if (!$running) {
++                    eval {
++                        PVE::Storage::deactivate_volumes($storecfg, $vollist, $snapname);
++                    };
++                    # Warn but don't fail - parallel clones may keep volumes active
++                    log_warn($@) if $@;
++                }
+ 
++                # Always deactivate new volumes - cloned VM is not running yet
++                eval {
+                     PVE::Storage::deactivate_volumes($storecfg, $newvollist);
++                };
++                log_warn($@) if $@;
+ 
++                if ($target) {
++                    # Move config to target node for cross-node clone
+                     my $newconffile = PVE::QemuConfig->config_file($newid, $target);
+                     die "Failed to move config to node '$target' - rename failed: $!\n"
+                         if !rename($conffile, $newconffile);

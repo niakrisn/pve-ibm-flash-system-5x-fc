@@ -1,0 +1,40 @@
+#!/bin/bash
+set -e
+
+APT_HOOK="/etc/apt/apt.conf.d/90-pve-ibm-fs5x-fc-plugin-hook"
+STORAGE_PLUGIN="/usr/share/perl5/PVE/Storage/Custom/IBMFlashSystem.pm"
+
+case "$1" in
+    purge)
+        # Remove APT hook
+        if [ -f "$APT_HOOK" ]; then
+            rm -f "$APT_HOOK"
+            echo "Removed APT hook: $APT_HOOK"
+        fi
+
+        # Remove storage plugin
+        if [ -f "$STORAGE_PLUGIN" ]; then
+            rm -f "$STORAGE_PLUGIN"
+            echo "Removed storage plugin: $STORAGE_PLUGIN"
+            systemctl try-reload-or-restart pvedaemon pveproxy 2>/dev/null || true
+        fi
+
+        # Note: Patches should already be removed by prerm
+        # If marker still exists, try to remove it
+        if [ -f "/usr/share/perl5/PVE/API2/Qemu.pm" ] && \
+           grep -q "# IBM FlashSystem Patch" "/usr/share/perl5/PVE/API2/Qemu.pm"; then
+            sed -i '/# IBM FlashSystem Patch/d' "/usr/share/perl5/PVE/API2/Qemu.pm"
+            systemctl try-reload-or-restart pvedaemon pveproxy 2>/dev/null || true
+        fi
+        ;;
+
+    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+
+    *)
+        echo "postrm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

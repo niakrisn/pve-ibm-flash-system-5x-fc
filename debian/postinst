@@ -1,0 +1,31 @@
+#!/bin/bash
+set -e
+
+PATCH_MANAGER="/usr/share/pve-ibm-fs5x-fc-plugin/scripts/patch-manager.sh"
+
+case "$1" in
+    configure)
+        # Make patch manager executable
+        if [ -f "$PATCH_MANAGER" ]; then
+            chmod +x "$PATCH_MANAGER"
+        fi
+
+        # Apply patches via patch manager
+        if [ -x "$PATCH_MANAGER" ]; then
+            "$PATCH_MANAGER" apply
+        else
+            echo "WARNING: Patch manager not found or not executable"
+            echo "Patches will be applied by APT hook after installation."
+        fi
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

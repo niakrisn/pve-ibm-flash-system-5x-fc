@@ -1,0 +1,17 @@
+# Install patches
+debian/patches/*.patch usr/share/pve-ibm-fs5x-fc-plugin/patches/
+
+# Install patch manager script
+scripts/patch-manager.sh usr/share/pve-ibm-fs5x-fc-plugin/scripts/
+
+# Install GUI integration
+configs/ibmflash-gui.js usr/share/pve-ibm-fs5x-fc-plugin/
+
+# Install multipath configuration
+configs/99-pve-ibm-flashsystem.conf etc/multipath/conf.d/
+
+# Install APT hook
+configs/90-pve-ibm-fs5x-fc-plugin-hook etc/apt/apt.conf.d/
+
+# Install storage plugin
+PVE/Storage/Custom/IBMFlashSystem.pm usr/share/perl5/PVE/Storage/Custom/

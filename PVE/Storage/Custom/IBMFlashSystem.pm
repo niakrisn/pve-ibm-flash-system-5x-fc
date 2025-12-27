@@ -3722,6 +3722,66 @@ sub volume_snapshot_delete {
     return;
 }
 
+# Check multipathd runtime configuration
+# Uses 'multipathd show config' to get the actual running configuration
+# This is more reliable than parsing /etc/multipath.conf
+sub _check_multipath_runtime_config {
+    my ($class) = @_;
+
+    my $config_output = "";
+
+    # Get current active configuration from multipathd
+    eval {
+        PVE::Tools::run_command(['/usr/sbin/multipathd', 'show', 'config'],
+            logfunc => sub { $config_output .= shift . "\n"; },
+            timeout => 5);
+    };
+
+    if ($@ || !$config_output) {
+        # multipathd is not responding - may not be installed or not running
+        die "multipathd is not running or not responding. " .
+            "Please install multipath-tools and start the service:\n" .
+            "  apt-get install multipath-tools\n" .
+            "  systemctl start multipathd\n";
+    }
+
+    # Parse the output to find user_friendly_names setting
+    # The output format is like: "user_friendly_names "yes""
+    my ($user_friendly_names) = $config_output =~ /user_friendly_names\s+"?([yes|no]+)"?/i;
+    my ($find_multipaths) = $config_output =~ /find_multipaths\s+"?([yes|no|off|on|smart|greedy]+)"?/i;
+
+    # Validate user_friendly_names - must be 'no' for WWID-based device identification
+    if (defined($user_friendly_names) && lc($user_friendly_names) eq 'yes') {
+        die "CRITICAL: multipathd is configured with 'user_friendly_names yes'. " .
+            "The IBM FlashSystem plugin requires 'user_friendly_names no' " .
+            "to identify devices by WWID.\n" .
+            "Please update /etc/multipath.conf and reload:\n" .
+            "  defaults {\n" .
+            "    user_friendly_names no\n" .
+            "  }\n" .
+            "  systemctl reload multipathd\n";
+    }
+
+    # Validate find_multipaths - must be 'no' or 'off' for reliable SAN volume activation
+    if (defined($find_multipaths) && (lc($find_multipaths) eq 'yes' || lc($find_multipaths) eq 'on')) {
+        die "CRITICAL: multipathd has 'find_multipaths $find_multipaths' enabled. " .
+            "The IBM FlashSystem plugin requires 'find_multipaths no' " .
+            "for volumes to activate properly.\n" .
+            "Please update /etc/multipath.conf and reload:\n" .
+            "  defaults {\n" .
+            "    find_multipaths no\n" .
+            "  }\n" .
+            "  systemctl reload multipathd\n";
+    }
+
+    $class->_log('info', "multipathd runtime configuration validated",
+        user_friendly_names => $user_friendly_names || 'default (no)',
+        find_multipaths => $find_multipaths || 'default',
+    );
+
+    return 1;
+}
+
 # Activate storage - validates configuration
 sub activate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
@@ -3735,6 +3795,9 @@ sub activate_storage {
         scfg => $scfg,
         storeid => $storeid,
     );
+
+    # Check 0: Verify multipathd configuration
+    $class->_check_multipath_runtime_config();
 
     # Check 1: Verify host cluster exists
     my $host_cluster = $scfg->{hostcluster} or die "hostcluster not configured\n";
