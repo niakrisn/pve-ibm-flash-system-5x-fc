@@ -23,15 +23,16 @@ Fibre Channel SAN → Host Clusters → Volumes
 - Token cached in `/run/pve-storage-ibm.token` (mode 0600)
 - On `401`, `403`, or JSON response containing `InvalidToken`:
   1. Delete cached token file
-  2. Re-authenticate via `POST /auth`
+  2. Re-authenticate via `POST /rest/auth`
   3. Retry original request (max `max_retries` times)
 
 ### Testing Environment
 
-- Remote server: `root@10.4.0.122`
+- Remote server: `root@10.4.0.122` use key `~/.ssh/id_ed25519`
 - Deploy: Copy `.pm` file to `/usr/share/perl5/PVE/Storage/Custom/`
 - Restart: `systemctl restart pvedaemon`
 - Register: `pvesm add <storage-id> --type <plugin-name> --portal <ip> ...`
+- Storage API: `10.0.0.222` endpoints `/rest/<cmd>`
 
 ---
 
@@ -47,7 +48,7 @@ Fibre Channel SAN → Host Clusters → Volumes
    - Execute request with `X-Auth-Token` header
    - On `401`, `403`, or `InvalidToken` in JSON response: delete cache, re-auth, retry
 3. **`_authenticate` method:**
-   - `POST /auth` with `X-Auth-Username` and `X-Auth-Password` headers
+   - `POST /rest/auth` with `X-Auth-Username` and `X-Auth-Password` headers
    - Save token to `/run/pve-storage-ibm.token` with mode `0600`
 
 ### Stage 2: Proxmox API v13 Integration
@@ -61,27 +62,26 @@ Fibre Channel SAN → Host Clusters → Volumes
 ### Stage 3: Pool Management
 
 **Volume Operations (bound to configured pool):**
-- `status()`: `POST /lsmdiskgrp` filtered by pool name
-- `alloc_image()`: `POST /mkvdisk` with `mdiskgrp`, `size`, `unit => 'b'`, `name`
-- `volume_size_info()`: `POST /lsvdisk` for size and vdisk_UID
+- `status()`: `POST /rest/lsmdiskgrp` filtered by pool name
+- `alloc_image()`: `POST /rest/mkvdisk` with `mdiskgrp`, `size`, `unit => 'b'`, `name`
+- `volume_size_info()`: `POST /rest/lsvdisk` for size and vdisk_UID
 
 ### Stage 4: Host Cluster Logic
 
 **Dynamic Host Creation for SAN Connectivity:**
 - `activate_volume()`:
   - Get local initiator (WWPN for FC)
-  - `POST /lshost` to check if host exists
-  - If not found: `POST /mkhost` with `hostcluster => $scfg->{host_cluster}` (critical!)
-  - `POST /mkvdiskhostmap/{vol_id}` to map volume
-  - Run `rescan-scsi-bus.sh` and wait for device
+  - `POST /rest/lshost` to check if host exists
+  - If not found: `POST /rest/mkhost` with `hostcluster => $scfg->{host_cluster}` (critical!)
+  - `POST /rest/mkvdiskhostmap/{vol_id}` to map volume
 - `path()`: Return `/dev/disk/by-id/scsi-3<vdisk_UID>`
 
 ### Stage 5: FlashCopy Snapshots
 
 **Snapshot Operations:**
-- `volume_snapshot()`: `/mkvdisk` → `/mkfcmap` → `/prestartfcmap/{id}` → `/startfcmap/{id}`
+- `volume_snapshot()`: `/rest/mkvdisk` → `/rest/mkfcmap` → `/rest/prestartfcmap/{id}` → `/rest/startfcmap/{id}`
 - `volume_snapshot_rollback()`: `/restorefcmap`
-- `volume_snapshot_delete()`: `/stopfcmap` → `/rmfcmap` → `/rmvdisk`
+- `volume_snapshot_delete()`: `/rest/stopfcmap` → `/rest/rmfcmap` → `/rest/rmvdisk`
 
 ### Stage 6: Validation Testing
 
@@ -128,5 +128,5 @@ sub api_request {
 
 ### Starting Point
 
-Begin by creating the directory structure locally and implementing `_authenticate` method. Verify with a simple system info query (`POST /lssystem`).
+Begin by creating the directory structure locally and implementing `_authenticate` method. Verify with a simple system info query (`POST /rest/lssystem`).
 

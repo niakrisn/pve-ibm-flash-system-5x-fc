@@ -1,0 +1,7 @@
+--- /usr/share/pve-manager/index.html.tpl
++++ /usr/share/pve-manager/index.html.tpl
+@@ -50,7 +50,8 @@
+     </script>
+     <script type="text/javascript" src="/pve2/js/pvemanagerlib.js?ver=[% version %]"></script>
++    <script type="text/javascript" src="/pve2/js/pve-storage-ibmflash.js"></script>
+     [%- END %]

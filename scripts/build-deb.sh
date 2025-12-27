@@ -56,10 +56,16 @@ else
     echo "WARNING: GUI file not found, skipping..."
 fi
 
-# Copy storage plugin
+# Copy storage plugin and sub-modules
 if [ -f "PVE/Storage/Custom/IBMFlashSystem.pm" ]; then
     cp PVE/Storage/Custom/IBMFlashSystem.pm "$PKG_DIR/usr/share/perl5/PVE/Storage/Custom/"
     echo "Copied storage plugin"
+
+    # Copy sub-modules directory
+    if [ -d "PVE/Storage/Custom/IBMFlashSystem" ]; then
+        cp -r PVE/Storage/Custom/IBMFlashSystem "$PKG_DIR/usr/share/perl5/PVE/Storage/Custom/"
+        echo "Copied sub-modules"
+    fi
 else
     echo "WARNING: Storage plugin not found, skipping..."
 fi
