@@ -71,7 +71,27 @@ sub on_add_hook {
     my ($class, $storeid, $scfg, %param) = @_;
 
     if (defined(my $password = $param{password})) {
+        # Set password first
         _set_password($class, $scfg, $storeid, $password);
+
+        # Verify credentials immediately
+        eval {
+            $scfg->{storage} = $storeid;  # Ensure storeid is set for authenticate
+            PVE::Storage::Custom::IBMFlashSystem::Client::authenticate($class, $scfg);
+        };
+        if ($@) {
+            # Password is invalid, remove it
+            _delete_password($class, $scfg, $storeid);
+            my $error = $@;
+            if ($error =~ /Invalid username or password/) {
+                die "[IBM FlashSystem] ERROR: Authentication failed - Invalid username or password.\n" .
+                    "Storage '$storeid' was NOT created. Please check credentials and try again.\n";
+            } elsif ($error =~ /Portal not configured/) {
+                die "[IBM FlashSystem] ERROR: Portal address not configured.\n";
+            } else {
+                die "[IBM FlashSystem] ERROR: Authentication failed - $error";
+            }
+        }
     }
 
     return;
@@ -85,27 +105,62 @@ sub on_update_hook {
         password_exists => exists($param{password}) ? 1 : 0,
     );
 
-    # Clear token if password, username or portal changes (requires re-auth)
-    my $clear_token = 0;
+    # Load full storage config if needed for validation
+    if (exists($param{password}) || exists($param{username}) || exists($param{portal})) {
+        my $cfg = PVE::Storage::config();
+        my $full_scfg = $cfg->{ids}->{$storeid};
+        die "Storage '$storeid' not found in config\n" unless $full_scfg;
 
-    if (exists($param{password})) {
-        $clear_token = 1;
-        if (defined($param{password})) {
-            _set_password($class, $scfg, $storeid, $param{password});
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_info("Password updated", storeid => $storeid);
-        } else {
-            _delete_password($class, $scfg, $storeid);
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_info("Password deleted", storeid => $storeid);
+        # Merge new params into full config
+        foreach my $key (keys %param) {
+            $full_scfg->{$key} = $param{$key};
         }
-    }
 
-    if (exists($param{username}) || exists($param{portal})) {
-        $clear_token = 1;
-    }
+        # Clear token if password, username or portal changes (requires re-auth)
+        my $clear_token = 0;
 
-    if ($clear_token) {
-        _clear_cached_token($class, $storeid);
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_info("Token cleared due to credential changes", storeid => $storeid);
+        if (exists($param{password})) {
+            $clear_token = 1;
+            if (defined($param{password})) {
+                # Save new password
+                _set_password($class, $full_scfg, $storeid, $param{password});
+
+                # Verify new password
+                eval {
+                    $full_scfg->{storage} = $storeid;
+                    PVE::Storage::Custom::IBMFlashSystem::Client::authenticate($class, $full_scfg);
+                };
+                if ($@) {
+                    # Verification failed - remove password
+                    _delete_password($class, $full_scfg, $storeid);
+
+                    my $error = $@;
+                    if ($error =~ /Invalid username or password/) {
+                        die "[IBM FlashSystem] ERROR: Authentication failed - Invalid username or password.\n" .
+                            "Password was NOT updated.\n";
+                    } elsif ($error =~ /Portal not configured/) {
+                        die "[IBM FlashSystem] ERROR: Portal address not configured.\n";
+                    } else {
+                        die "[IBM FlashSystem] ERROR: Authentication failed - $error\n" .
+                            "Password was NOT updated.\n";
+                    }
+                }
+
+                PVE::Storage::Custom::IBMFlashSystem::Logger::log_info("Password updated and verified", storeid => $storeid);
+            } else {
+                _delete_password($class, $full_scfg, $storeid);
+                PVE::Storage::Custom::IBMFlashSystem::Logger::log_info("Password deleted", storeid => $storeid);
+            }
+        }
+
+        if (exists($param{username}) || exists($param{portal})) {
+            $clear_token = 1;
+        }
+
+        if ($clear_token) {
+            _clear_cached_token($class, $storeid);
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_info("Token cleared due to credential changes", storeid => $storeid);
+        }
     }
 
     return;
@@ -251,7 +306,7 @@ sub _init_ua {
 sub _build_url {
     my ($class, $scfg, $endpoint) = @_;
 
-    my $portal = $scfg->{portal};
+    my $portal = $scfg->{portal} || die "Portal not configured\n";
     $portal =~ s/^https?:\/\///;  # Remove protocol if present
 
     my $port = $scfg->{port};
@@ -268,26 +323,26 @@ sub _build_url {
 
 # Password helpers (following PBSPlugin pattern)
 sub _password_file_name {
-    my ($scfg, $storeid) = @_;
+    my ($class, $scfg, $storeid) = @_;
     return "/etc/pve/priv/storage/${storeid}.pw";
 }
 
 sub _set_password {
     my ($class, $scfg, $storeid, $password) = @_;
-    my $pwfile = _password_file_name($scfg, $storeid);
+    my $pwfile = _password_file_name($class, $scfg, $storeid);
     mkdir "/etc/pve/priv/storage";
     PVE::Tools::file_set_contents($pwfile, "$password\n", 0600, 1);
 }
 
 sub _delete_password {
     my ($class, $scfg, $storeid) = @_;
-    my $pwfile = _password_file_name($scfg, $storeid);
+    my $pwfile = _password_file_name($class, $scfg, $storeid);
     unlink $pwfile;
 }
 
 sub _get_password {
     my ($class, $scfg, $storeid) = @_;
-    my $pwfile = _password_file_name($scfg, $storeid);
+    my $pwfile = _password_file_name($class, $scfg, $storeid);
     return unless -f $pwfile;
     my $contents = file_read_firstline($pwfile);
     chomp $contents;
@@ -323,14 +378,25 @@ sub _authenticate {
     my $response = $ua->request($request);
 
     unless ($response->is_success) {
+        my $content = $response->decoded_content || '';
         my $duration = (time - $start_time) * 1000;
+
+        # Parse IBM FlashSystem specific error messages
+        my $error_msg = $response->status_line;
+        if ($content =~ /ClusterCrendentialsInvalid/) {
+            $error_msg = "Invalid username or password for IBM FlashSystem";
+        } elsif ($content =~ /InvalidTokenHeaders/) {
+            $error_msg = "Authentication headers missing or invalid (plugin bug)";
+        }
+
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_error("Authentication failed",
             scfg => $scfg,
             endpoint => '/auth',
             status => $response->status_line,
+            content => $content,
             duration => int($duration),
         );
-        die "Authentication failed: " . $response->status_line . "\n";
+        die "Authentication failed: $error_msg\n";
     }
 
     my $token = $response->header('X-Auth-Token');

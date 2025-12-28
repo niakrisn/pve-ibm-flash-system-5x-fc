@@ -219,6 +219,7 @@ sub template_image {
 
 sub volume_size_info {
     my ($class, $scfg, $storeid, $volname, $timeout) = @_;
+    $scfg->{storage} = $storeid;  # Set before calling Volume method
     return PVE::Storage::Custom::IBMFlashSystem::Volume::get_volume_size(
         $class, $scfg, $volname
     );
@@ -260,14 +261,15 @@ sub deactivate_volume {
 }
 
 sub filesystem_path {
-    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+    my ($class, $scfg, $volname, $snapname) = @_;
     return PVE::Storage::Custom::IBMFlashSystem::Volume::get_filesystem_path(
-        $class, $scfg, $storeid, $volname, $snapname
+        $class, $scfg, undef, $volname, $snapname
     );
 }
 
 sub path {
-    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+    my ($class, $scfg, $volname, $storeid, $snapname) = @_;
+    $scfg->{storage} = $storeid;  # Ensure storeid is set
     return PVE::Storage::Custom::IBMFlashSystem::Volume::get_volume_path(
         $class, $scfg, $storeid, $volname, $snapname
     );

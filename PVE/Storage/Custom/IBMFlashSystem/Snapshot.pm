@@ -42,7 +42,7 @@ sub has_snapshot {
 # Get snapshot vdisk name
 # Uses snap- prefix for easy identification in IBM storage GUI
 sub _snapshot_name {
-    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
+    my ($class, $volname, $snapname) = @_;
 
     # Sanitize snapshot name: replace special chars with underscore
     my $safe_snapname = $snapname;
@@ -156,7 +156,7 @@ sub _remove_all_fcmaps_as_source {
 sub _volume_has_snapshot {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
 
-    my $snapshot_name = _snapshot_name($class, $storeid, $scfg, $volname, $snapname);
+    my $snapshot_name = _snapshot_name($class, $volname, $snapname);
 
     eval {
         # Query specific snapshot by name: POST /lsvdisk/{snapshot_name}
@@ -169,6 +169,9 @@ sub _volume_has_snapshot {
 # Create a snapshot using FlashCopy
 sub _volume_snapshot {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+
+    # Ensure storeid is in scfg for api_request
+    $scfg->{storage} = $storeid;
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug("ENTER volume_snapshot",
         scfg => $scfg,
@@ -187,7 +190,7 @@ sub _volume_snapshot {
         snapname => $snapname,
     );
 
-    my $snapshot_name = _snapshot_name($class, $storeid, $scfg, $volname, $snapname);
+    my $snapshot_name = _snapshot_name($class, $volname, $snapname);
     my $pool_name = $scfg->{pool} or die "Pool not configured\n";
 
     # Sanitize snapshot name for FlashCopy mapping name
@@ -364,6 +367,9 @@ sub _volume_snapshot {
 sub _volume_snapshot_rollback {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
 
+    # Ensure storeid is in scfg for api_request
+    $scfg->{storage} = $storeid;
+
     # PRE-OPERATION STATE CHECK: Clean up any orphaned state from previous runs
     _reconcile_volume_state($class, $scfg, $volname);
 
@@ -414,7 +420,7 @@ sub _volume_snapshot_rollback {
         snapname => $snapname,
     );
 
-    my $snapshot_name = _snapshot_name($class, $storeid, $scfg, $volname, $snapname);
+    my $snapshot_name = _snapshot_name($class, $volname, $snapname);
 
     # Step 1: Collect ALL FlashCopy mappings where source is the volume (star topology)
     # We need to save these for recreation after restore
@@ -699,6 +705,9 @@ sub _volume_snapshot_rollback {
 sub _volume_snapshot_delete {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
 
+    # Ensure storeid is in scfg for api_request
+    $scfg->{storage} = $storeid;
+
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug("ENTER volume_snapshot_delete",
         scfg => $scfg,
         storeid => $storeid,
@@ -716,7 +725,7 @@ sub _volume_snapshot_delete {
         snapname => $snapname,
     );
 
-    my $snapshot_name = _snapshot_name($class, $storeid, $scfg, $volname, $snapname);
+    my $snapshot_name = _snapshot_name($class, $volname, $snapname);
 
     # Find ALL FlashCopy mappings involving this snapshot (in either direction)
     my $fcmaps = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, 'POST', '/lsfcmap', {});

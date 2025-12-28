@@ -27,21 +27,25 @@ sub log {
 }
 
 sub log_debug {
+    no warnings 'misc';  # Suppress "odd number of elements" warning (must be before my)
     my ($class, $message, %context) = @_;
     return _log($class, 'debug', $message, %context);
 }
 
 sub log_info {
+    no warnings 'misc';  # Suppress "odd number of elements" warning (must be before my)
     my ($class, $message, %context) = @_;
     return _log($class, 'info', $message, %context);
 }
 
 sub log_warn {
+    no warnings 'misc';  # Suppress "odd number of elements" warning (must be before my)
     my ($class, $message, %context) = @_;
     return _log($class, 'warn', $message, %context);
 }
 
 sub log_error {
+    no warnings 'misc';  # Suppress "odd number of elements" warning (must be before my)
     my ($class, $message, %context) = @_;
     return _log($class, 'error', $message, %context);
 }
@@ -85,6 +89,7 @@ sub _init_log {
 # Levels: error, warn, info, debug
 # Context: scfg, storeid, vmid, volname, endpoint, duration, status
 sub _log {
+    no warnings 'misc';  # Suppress "odd number of elements" warning (must be before my)
     my ($class, $level, $message, %context) = @_;
 
     # Check debug level from config
@@ -151,7 +156,7 @@ sub _log {
             snap_volname snap_vdisk_id volume_keys is_base count scfg vdisk_uid expected_path_3600
             expected_path_3 mpath vname pool size_bytes fcmap_id hostname);
         for my $k (keys %context) {
-            push @ctx_parts, "$k=$context{$k}" if !$known{$k};
+            push @ctx_parts, "$k=$context{$k}" if !$known{$k} && defined $context{$k};
         }
         $ctx_str = ' [' . join(', ', @ctx_parts) . ']' if @ctx_parts;
     }

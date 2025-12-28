@@ -104,8 +104,12 @@ sub deactivate_storage {
 # ============================================================================
 
 # Get storage status (total/free space)
+# Note: Proxmox API calls with ($class, $storeid, $scfg, $cache) order
 sub status {
     my ($class, $storeid, $scfg, $cache) = @_;
+
+    # Ensure storeid is in scfg for api_request
+    $scfg->{storage} = $storeid;
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug("ENTER status",
         scfg => $scfg,
@@ -193,6 +197,9 @@ sub _get_pool_info {
 sub _alloc_volume {
     my ($class, $scfg, $storeid, $vmid, $name, $size_bytes) = @_;
 
+    # Ensure storeid is in scfg for api_request
+    $scfg->{storage} = $storeid;
+
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug("ENTER alloc_image",
         scfg => $scfg,
         storeid => $storeid,
@@ -255,6 +262,9 @@ sub _alloc_volume {
 # Clone an image (linked clone from base template or full clone)
 sub _clone_volume {
     my ($class, $scfg, $storeid, $source_volname, $target_vmid) = @_;
+
+    # Ensure storeid is in scfg for api_request
+    $scfg->{storage} = $storeid;
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug("ENTER clone_image",
         scfg => $scfg,
@@ -451,6 +461,9 @@ sub _clone_volume {
 sub _create_base {
     my ($class, $scfg, $storeid, $volname) = @_;
 
+    # Ensure storeid is in scfg for api_request
+    $scfg->{storage} = $storeid;
+
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info("Creating base template",
         scfg => $scfg,
         storeid => $storeid,
@@ -472,6 +485,9 @@ sub _create_base {
 # Mark a volume as a template (immutable)
 sub _template_image {
     my ($class, $scfg, $storeid, $volname) = @_;
+
+    # Ensure storeid is in scfg for api_request
+    $scfg->{storage} = $storeid;
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info("Marking volume as template",
         scfg => $scfg,
@@ -515,6 +531,9 @@ sub _volume_size_info {
 # Resize a volume
 sub _volume_resize {
     my ($class, $scfg, $storeid, $volname, $size_kb) = @_;
+
+    # Ensure storeid is in scfg for api_request
+    $scfg->{storage} = $storeid;
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug("ENTER volume_resize",
         scfg => $scfg,
@@ -577,6 +596,9 @@ sub _volume_resize {
 # List images (VM disks and base templates)
 sub _list_images {
     my ($class, $scfg, $storeid, $vmid, $vollist) = @_;
+
+    # Ensure storeid is in scfg for api_request
+    $scfg->{storage} = $storeid;
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug("ENTER list_images",
         scfg => $scfg,
@@ -648,6 +670,9 @@ sub _list_images {
 sub _free_image {
     my ($class, $scfg, $storeid, $volname, $isBase) = @_;
 
+    # Ensure storeid is in scfg for api_request
+    $scfg->{storage} = $storeid;
+
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug("ENTER free_image",
         scfg => $scfg,
         storeid => $storeid,
@@ -710,6 +735,9 @@ sub _free_image {
 sub _activate_volume {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
 
+    # Ensure storeid is in scfg for api_request
+    $scfg->{storage} = $storeid;
+
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug("ENTER activate_volume",
         scfg => $scfg,
         storeid => $storeid,
@@ -756,6 +784,9 @@ sub _activate_volume {
 # Deactivate volume (unmap from host)
 sub _deactivate_volume {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+
+    # Ensure storeid is in scfg for api_request
+    $scfg->{storage} = $storeid;
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug("ENTER deactivate_volume",
         scfg => $scfg,
@@ -811,6 +842,9 @@ sub _deactivate_volume {
 sub _filesystem_path {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
 
+    # Ensure storeid is in scfg for api_request
+    $scfg->{storage} = $storeid;
+
     my $path = _path($class, $scfg, $storeid, $volname, $snapname);
 
     # Activate volume first to ensure device is available
@@ -826,6 +860,9 @@ sub _filesystem_path {
 # Get the device path for a volume
 sub _path {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+
+    # Ensure storeid is in scfg for api_request
+    $scfg->{storage} = $storeid;
 
     # Get vdisk UID for path construction
     my $vdisk_uid = _get_vdisk_uid($class, $scfg, $volname);
@@ -1021,6 +1058,9 @@ sub _get_hostname {
 # Ensure host exists on storage array, create if not
 sub _ensure_host_exists {
     my ($class, $scfg) = @_;
+
+    # Note: This function is called from other functions that should already set $scfg->{storage}
+    # But we also need it for logging purposes
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug("ENTER _ensure_host_exists",
         scfg => $scfg,
@@ -1269,7 +1309,26 @@ sub _activate_storage {
         storeid => $storeid,
     );
 
-    # Check 0: Verify multipathd configuration
+    # Check 0: Verify credentials by attempting authentication
+    eval {
+        PVE::Storage::Custom::IBMFlashSystem::Client::authenticate($class, $scfg);
+    };
+    if ($@) {
+        my $error = $@;
+        # Parse common authentication errors
+        if ($error =~ /Invalid username or password/) {
+            die "[IBM FlashSystem] ERROR: Authentication failed - Invalid username or password.\n" .
+                "Please check the storage credentials and update the password:\n" .
+                "  pvesm set $storeid --password <your-password>\n";
+        } elsif ($error =~ /Connection refused|Timeout|Can't connect/) {
+            die "[IBM FlashSystem] ERROR: Cannot connect to IBM FlashSystem at $scfg->{portal}.\n" .
+                "Please check the portal address and network connectivity.\n";
+        } else {
+            die "[IBM FlashSystem] ERROR: Authentication failed - $error";
+        }
+    }
+
+    # Check 1: Verify multipathd configuration
     _check_multipath_runtime_config($class);
 
     # Check 1: Verify host cluster exists
