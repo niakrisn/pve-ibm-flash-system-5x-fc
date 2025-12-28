@@ -7,7 +7,7 @@ use warnings;
 use Test::More;
 use Test::Exception;
 use Test::MockModule;
-use lib 'lib';
+use lib qw(lib t/unit/lib);
 
 # Load test helpers
 use lib 't/unit/lib';
@@ -52,11 +52,12 @@ subtest 'clone_volume - linked clone from base template' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk/$source_base$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
             json => [{
                 id       => '123',
                 name     => $source_base,
-                capacity => '10.00GB',
+                capacity => 10 * 1024 * 1024 * 1024,
             }]
         },
     );
@@ -145,11 +146,12 @@ subtest 'clone_volume - full clone from regular volume' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk/$source_volname$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
             json => [{
                 id       => '123',
                 name     => $source_volname,
-                capacity => '20.00GB',
+                capacity => 20 * 1024 * 1024 * 1024,
             }]
         },
     );
@@ -238,8 +240,9 @@ subtest 'clone_volume - base detection by name' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk/$source_base$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
-            json => [{ capacity => '5.00GB' }]
+            json => [{ capacity => 5 * 1024 * 1024 * 1024 }]
         },
     );
 
@@ -305,8 +308,9 @@ subtest 'clone_volume - cleanup on FlashCopy failure' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk/$source_base$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
-            json => [{ capacity => '10.00GB' }]
+            json => [{ capacity => 10 * 1024 * 1024 * 1024 }]
         },
     );
 
@@ -370,8 +374,9 @@ subtest 'clone_volume - FlashCopy returns numeric ID' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk/$source_base$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
-            json => [{ capacity => '10.00GB' }]
+            json => [{ capacity => 10 * 1024 * 1024 * 1024 }]
         },
     );
 

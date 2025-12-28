@@ -6,7 +6,7 @@ use strict;
 use warnings;
 use Test::More;
 use Test::Exception;
-use lib 'lib';
+use lib qw(lib t/unit/lib);
 
 # Load test helpers
 use lib 't/unit/lib';
@@ -43,12 +43,13 @@ subtest 'get_volume_size - success with capacity and used' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk/$test_volname$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
             json => {
                 id            => '123',
                 name          => $test_volname,
-                capacity      => '10.00GB',
-                used_capacity => '2.50GB',
+                capacity      => 10 * 1024 * 1024 * 1024,
+                used_capacity => 2.5 * 1024 * 1024 * 1024,
             }
         },
     );
@@ -80,12 +81,13 @@ subtest 'get_volume_size - parses GB format' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk/$test_volname$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
             json => {
                 id            => '123',
                 name          => $test_volname,
-                capacity      => '512.00GB',
-                used_capacity => '100.00GB',
+                capacity      => 512 * 1024 * 1024 * 1024,
+                used_capacity => 100 * 1024 * 1024 * 1024,
             }
         },
     );
@@ -116,12 +118,13 @@ subtest 'get_volume_size - parses TB format' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk/$test_volname$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
             json => {
                 id            => '123',
                 name          => $test_volname,
-                capacity      => '1.00TB',
-                used_capacity => '200.00GB',
+                capacity      => 1 * 1024 * 1024 * 1024 * 1024,
+                used_capacity => 200 * 1024 * 1024 * 1024,
             }
         },
     );
@@ -153,12 +156,13 @@ subtest 'get_volume_size - handles plain bytes' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk/$test_volname$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
             json => {
                 id            => '123',
                 name          => $test_volname,
                 capacity      => $expected_bytes,
-                used_capacity => '2.50GB',
+                used_capacity => 2.5 * 1024 * 1024 * 1024,
             }
         },
     );
@@ -218,11 +222,12 @@ subtest 'get_volume_size - returns raw format' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk/$test_volname$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
             json => {
                 id       => '123',
                 name     => $test_volname,
-                capacity => '10.00GB',
+                capacity => 10 * 1024 * 1024 * 1024,
             }
         },
     );
@@ -252,11 +257,12 @@ subtest 'get_volume_size - missing used_capacity returns 0' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk/$test_volname$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
             json => {
                 id       => '123',
                 name     => $test_volname,
-                capacity => '10.00GB',
+                capacity => 10 * 1024 * 1024 * 1024,
                 # No used_capacity field
             }
         },

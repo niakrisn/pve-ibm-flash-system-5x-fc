@@ -89,8 +89,11 @@ sub setup_lwp_mock {
             if ($@) {
                 die "Failed to decode request body: $@\n";
             }
+            # Normalize boolean values for comparison (JSON::true vs JSON::PP::Boolean)
+            my $normalized_expected = normalize_booleans($expected->{body});
+            my $normalized_actual = normalize_booleans($actual_body);
             require Data::Compare;
-            unless (Data::Compare::Compare($actual_body, $expected->{body})) {
+            unless (Data::Compare::Compare($normalized_actual, $normalized_expected)) {
                 die "Request body mismatch.\nExpected: " . Data::Dumper::Dumper($expected->{body}) .
                     "Got: " . Data::Dumper::Dumper($actual_body);
             }
@@ -169,6 +172,30 @@ sub build_response {
 # Get actual requests made (for debugging)
 sub get_actual_requests {
     return @actual_requests;
+}
+
+# Normalize boolean values for comparison
+# Converts JSON::true/JSON::false and JSON::PP::Boolean objects to plain 1/0
+sub normalize_booleans {
+    my ($data) = @_;
+
+    return if !defined($data);
+
+    if (ref($data) eq 'HASH') {
+        my %result;
+        while (my ($key, $value) = each %$data) {
+            $result{$key} = normalize_booleans($value);
+        }
+        return \%result;
+    } elsif (ref($data) eq 'ARRAY') {
+        return [ map { normalize_booleans($_) } @$data ];
+    } else {
+        # Check if it's a boolean object (JSON::true/false or JSON::PP::Boolean)
+        if (ref($data) && ref($data) =~ /^JSON::(PP::)?Boolean/) {
+            return $data ? 1 : 0;
+        }
+        return $data;
+    }
 }
 
 1;

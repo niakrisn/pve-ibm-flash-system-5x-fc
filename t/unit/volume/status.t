@@ -6,7 +6,7 @@ use strict;
 use warnings;
 use Test::More;
 use Test::Exception;
-use lib 'lib';
+use lib qw(lib t/unit/lib);
 
 # Load test helpers
 use TestHelpers qw(setup_test_env restore_env);
@@ -41,11 +41,11 @@ subtest 'status - successful pool query' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsmdiskgrp/pool-pvc-01$},
         token       => $test_token,
-        has_body    => 0,
+        body        => { bytes => 1 },
         response    => {
             json => {
-                capacity       => '1099511627776',    # 1TB in bytes
-                free_capacity => '549755813888',     # 512GB in bytes
+                capacity       => 1 * 1024 * 1024 * 1024 * 1024,    # 1TB in bytes
+                free_capacity => 512 * 1024 * 1024 * 1024,          # 512GB in bytes
                 vdisk_protection_status => 'inactive',
             }
         },
@@ -61,9 +61,9 @@ subtest 'status - successful pool query' => sub {
         );
 
     # Verify results in bytes
-    is($total, 1099511627776, 'Total capacity in bytes (1TB)');
-    is($free, 549755813888, 'Free capacity in bytes (512GB)');
-    is($used, 549755813888, 'Used capacity in bytes (512GB)');
+    is($total, 1 * 1024 * 1024 * 1024 * 1024, 'Total capacity in bytes (1TB)');
+    is($free, 512 * 1024 * 1024 * 1024, 'Free capacity in bytes (512GB)');
+    is($used, 512 * 1024 * 1024 * 1024, 'Used capacity in bytes (512GB)');
     is($active, 1, 'Storage is active');
 
     MockLWP::verify_all_requests('status() made HTTP POST to pool endpoint');
@@ -116,10 +116,11 @@ subtest 'status - capacity in GB format' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsmdiskgrp/pool-pvc-01$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
             json => {
-                capacity       => '1.00TB',
-                free_capacity => '512.00GB',
+                capacity       => 1 * 1024 * 1024 * 1024 * 1024,
+                free_capacity => 512 * 1024 * 1024 * 1024,
                 vdisk_protection_status => 'inactive',
             }
         },

@@ -7,7 +7,7 @@ use warnings;
 use Test::More;
 use Test::Exception;
 use Test::MockModule;
-use lib 'lib';
+use lib qw(lib t/unit/lib);
 
 # Load test helpers
 use lib 't/unit/lib';

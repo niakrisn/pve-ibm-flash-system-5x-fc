@@ -6,7 +6,7 @@ use strict;
 use warnings;
 use Test::More;
 use Test::Exception;
-use lib 'lib';
+use lib qw(lib t/unit/lib);
 
 # Load test helpers
 use lib 't/unit/lib';
@@ -50,6 +50,7 @@ subtest 'resize_volume - successful expansion' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk/$test_volname$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
             json => {
                 id       => '123',
@@ -103,6 +104,7 @@ subtest 'resize_volume - no change needed' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk/$test_volname$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
             json => {
                 id       => '123',
@@ -144,6 +146,7 @@ subtest 'resize_volume - shrink rejected' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk/$test_volname$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
             json => {
                 id       => '123',
@@ -181,11 +184,12 @@ subtest 'resize_volume - parses GB format' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk/$test_volname$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
             json => {
                 id       => '123',
                 name     => $test_volname,
-                capacity => '10.00GB',
+                capacity => 10 * 1024 * 1024 * 1024,
             }
         },
     );
@@ -258,11 +262,12 @@ subtest 'resize_volume - API error during expand' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk/$test_volname$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
             json => {
                 id       => '123',
                 name     => $test_volname,
-                capacity => '10.00GB',
+                capacity => 10 * 1024 * 1024 * 1024,
             }
         },
     );

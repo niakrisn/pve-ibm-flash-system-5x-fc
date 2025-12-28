@@ -59,7 +59,7 @@ sub _discover_snapshot_volumes {
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "Discovering snapshot volumes by name pattern (volname=%s)", $volname);
 
-    my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, 'POST', '/lsvdisk', {});
+    my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, 'POST', '/lsvdisk', { bytes => JSON::true });
     my $vdisks = ref($result) eq 'ARRAY' ? $result : [];
 
     # Pattern: snap-{volname}-*
@@ -141,7 +141,7 @@ sub _volume_has_snapshot {
 
     eval {
         # Query specific snapshot by name: POST /lsvdisk/{snapshot_name}
-        PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, 'POST', "/lsvdisk/$snapshot_name", {});
+        PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, 'POST', "/lsvdisk/$snapshot_name", { bytes => JSON::true });
     };
 
     return $@ ? 0 : 1;
@@ -168,11 +168,10 @@ sub _volume_snapshot {
     my $safe_snapname = $snapname;
     $safe_snapname =~ s/[^a-zA-Z0-9._-]/_/g;
 
-    # Get source volume size - query by name and parse to bytes
-    my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, 'POST', "/lsvdisk/$volname", {});
+    # Get source volume size - query by name, capacity is in bytes from API
+    my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, 'POST', "/lsvdisk/$volname", { bytes => JSON::true });
     my $source_info = ref($result) eq 'ARRAY' ? $result->[0] : $result;
-    my $capacity_str = $source_info->{capacity} || '0';
-    my $size_bytes = _parse_capacity_to_bytes($class, $capacity_str);
+    my $size_bytes = $source_info->{capacity} || 0;
 
     # Step 1: Create target volume (snapshot) if not exists
     # thin: true (boolean) - critical for snapshots, no immediate space allocation
@@ -728,40 +727,6 @@ sub _volume_snapshot_delete {
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT volume_snapshot_delete successfully (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname);
 
     return;
-}
-
-# Parse capacity string to bytes (always returns numeric bytes)
-# Handles: "1024" (bytes), "1.00GB", "512MB", "1TB", "128.00KB", etc.
-sub _parse_capacity_to_bytes {
-    my ($class, $capacity_str) = @_;
-
-    return 0 if !$capacity_str || $capacity_str eq '0';
-
-    # If already a plain number, assume bytes
-    if ($capacity_str =~ /^\d+$/) {
-        return $capacity_str + 0;  # Return as number
-    }
-
-    # Parse format: "1.00GB", "512.5MB", "1024KB", etc.
-    if ($capacity_str =~ /^([\d.]+)(\w+)$/) {
-        my $value = $1;
-        my $unit = uc($2);
-
-        if ($unit eq 'TB') {
-            return $value * 1024 * 1024 * 1024 * 1024;  # TB to bytes
-        } elsif ($unit eq 'GB') {
-            return $value * 1024 * 1024 * 1024;  # GB to bytes
-        } elsif ($unit eq 'MB') {
-            return $value * 1024 * 1024;  # MB to bytes
-        } elsif ($unit eq 'KB' || $unit eq 'K') {
-            return $value * 1024;  # KB to bytes
-        } elsif ($unit eq 'BYTES' || $unit eq 'B') {
-            return $value;  # Already bytes
-        }
-    }
-
-    # Fallback: try to use as-is (assume bytes)
-    return $capacity_str + 0;
 }
 
 # Check if error string contains specific CMMVC error code

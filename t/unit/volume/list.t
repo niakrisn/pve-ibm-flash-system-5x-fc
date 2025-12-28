@@ -6,7 +6,7 @@ use strict;
 use warnings;
 use Test::More;
 use Test::Exception;
-use lib 'lib';
+use lib qw(lib t/unit/lib);
 
 # Load test helpers
 use lib 't/unit/lib';
@@ -42,13 +42,14 @@ subtest 'list_volumes - returns all VM volumes in pool' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
             json => [
-                { name => 'vm-100-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => '10.00GB' },
-                { name => 'vm-100-disk-1', mdisk_grp_name => 'pool-pvc-01', capacity => '20.00GB' },
-                { name => 'vm-101-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => '15.00GB' },
-                { name => 'other-volume',    mdisk_grp_name => 'pool-pvc-01', capacity => '5.00GB' },
-                { name => 'vm-100-disk-0',   mdisk_grp_name => 'other-pool',  capacity => '10.00GB' },
+                { name => 'vm-100-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => 10 * 1024 * 1024 * 1024 },
+                { name => 'vm-100-disk-1', mdisk_grp_name => 'pool-pvc-01', capacity => 20 * 1024 * 1024 * 1024 },
+                { name => 'vm-101-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => 15 * 1024 * 1024 * 1024 },
+                { name => 'other-volume',    mdisk_grp_name => 'pool-pvc-01', capacity => 5 * 1024 * 1024 * 1024 },
+                { name => 'vm-100-disk-0',   mdisk_grp_name => 'other-pool',  capacity => 10 * 1024 * 1024 * 1024 },
             ]
         },
     );
@@ -81,11 +82,12 @@ subtest 'list_volumes - filters by vmid' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
             json => [
-                { name => 'vm-100-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => '10.00GB' },
-                { name => 'vm-100-disk-1', mdisk_grp_name => 'pool-pvc-01', capacity => '20.00GB' },
-                { name => 'vm-101-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => '15.00GB' },
+                { name => 'vm-100-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => 10 * 1024 * 1024 * 1024 },
+                { name => 'vm-100-disk-1', mdisk_grp_name => 'pool-pvc-01', capacity => 20 * 1024 * 1024 * 1024 },
+                { name => 'vm-101-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => 15 * 1024 * 1024 * 1024 },
             ]
         },
     );
@@ -117,11 +119,12 @@ subtest 'list_volumes - filters by vollist' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
             json => [
-                { name => 'vm-100-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => '10.00GB' },
-                { name => 'vm-100-disk-1', mdisk_grp_name => 'pool-pvc-01', capacity => '20.00GB' },
-                { name => 'vm-101-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => '15.00GB' },
+                { name => 'vm-100-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => 10 * 1024 * 1024 * 1024 },
+                { name => 'vm-100-disk-1', mdisk_grp_name => 'pool-pvc-01', capacity => 20 * 1024 * 1024 * 1024 },
+                { name => 'vm-101-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => 15 * 1024 * 1024 * 1024 },
             ]
         },
     );
@@ -157,8 +160,8 @@ subtest 'list_volumes - includes base templates' => sub {
         token       => $test_token,
         response    => {
             json => [
-                { name => 'vm-100-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => '10.00GB' },
-                { name => 'base-100-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => '10.00GB' },
+                { name => 'vm-100-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => 10 * 1024 * 1024 * 1024 },
+                { name => 'base-100-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => 10 * 1024 * 1024 * 1024 },
             ]
         },
     );
@@ -192,8 +195,8 @@ subtest 'list_volumes - excludes other pools' => sub {
         token       => $test_token,
         response    => {
             json => [
-                { name => 'vm-100-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => '10.00GB' },
-                { name => 'vm-101-disk-0', mdisk_grp_name => 'other-pool',  capacity => '15.00GB' },
+                { name => 'vm-100-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => 10 * 1024 * 1024 * 1024 },
+                { name => 'vm-101-disk-0', mdisk_grp_name => 'other-pool',  capacity => 15 * 1024 * 1024 * 1024 },
             ]
         },
     );
@@ -224,10 +227,11 @@ subtest 'list_volumes - parses size correctly' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
             json => [
-                { name => 'vm-100-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => '10.00GB' },
-                { name => 'vm-100-disk-1', mdisk_grp_name => 'pool-pvc-01', capacity => '1.00TB' },
+                { name => 'vm-100-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => 10 * 1024 * 1024 * 1024 },
+                { name => 'vm-100-disk-1', mdisk_grp_name => 'pool-pvc-01', capacity => 1 * 1024 * 1024 * 1024 * 1024 },
             ]
         },
     );
@@ -290,11 +294,12 @@ subtest 'list_volumes - excludes non-VM volumes' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
             json => [
-                { name => 'vm-100-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => '10.00GB' },
-                { name => 'data-volume',   mdisk_grp_name => 'pool-pvc-01', capacity => '5.00GB' },
-                { name => 'backup-tmp',    mdisk_grp_name => 'pool-pvc-01', capacity => '50.00GB' },
+                { name => 'vm-100-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => 10 * 1024 * 1024 * 1024 },
+                { name => 'data-volume',   mdisk_grp_name => 'pool-pvc-01', capacity => 5 * 1024 * 1024 * 1024 },
+                { name => 'backup-tmp',    mdisk_grp_name => 'pool-pvc-01', capacity => 50 * 1024 * 1024 * 1024 },
             ]
         },
     );
@@ -325,9 +330,10 @@ subtest 'list_volumes - returns raw format' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
             json => [
-                { name => 'vm-100-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => '10.00GB' },
+                { name => 'vm-100-disk-0', mdisk_grp_name => 'pool-pvc-01', capacity => 10 * 1024 * 1024 * 1024 },
             ]
         },
     );

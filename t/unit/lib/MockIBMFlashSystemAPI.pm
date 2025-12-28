@@ -27,6 +27,7 @@ sub reset {
 
 # Mock a single response for an endpoint
 sub mock_response {
+    my $class = shift;
     my (%responses) = @_;
 
     while (my ($endpoint, $response) = each %responses) {
@@ -37,6 +38,7 @@ sub mock_response {
 # Mock a sequence of responses (for complex multi-call scenarios)
 # Format: [ METHOD => endpoint => response, ... ]
 sub mock_sequence {
+    my $class = shift;
     my (@sequence) = @_;
 
     @response_sequence = @sequence;

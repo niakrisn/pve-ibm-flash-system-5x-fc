@@ -7,7 +7,7 @@ use warnings;
 use Test::More;
 use Test::Exception;
 use Test::MockModule;
-use lib 'lib';
+use lib qw(lib t/unit/lib);
 
 # Load test helpers
 use lib 't/unit/lib';
@@ -51,11 +51,12 @@ subtest 'create_snapshot - successful creation' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk/$test_volname$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
             json => [{
                 id       => '123',
                 name     => $test_volname,
-                capacity => '10.00GB',
+                capacity => 10 * 1024 * 1024 * 1024,
             }]
         },
     );
@@ -138,8 +139,9 @@ subtest 'create_snapshot - snapshot volume already exists' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk/$test_volname$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
-            json => [{ capacity => '10.00GB' }]
+            json => [{ capacity => 10 * 1024 * 1024 * 1024 }]
         },
     );
 

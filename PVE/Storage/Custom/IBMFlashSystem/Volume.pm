@@ -132,49 +132,14 @@ sub status {
     # Get pool info (includes Volume Protection check)
     my $pool_info = _get_pool_info($class, $scfg);
 
-    # Parse capacity strings like "1.00TB" to bytes
-    my $total = _parse_capacity($class, $pool_info->{capacity} || '0');
-    my $free = _parse_capacity($class, $pool_info->{free_capacity} || '0');
+    # capacity is already in bytes from API
+    my $total = $pool_info->{capacity} || 0;
+    my $free = $pool_info->{free_capacity} || 0;
     my $used = $total - $free;
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT status successfully (storeid=%s, total=%d, free=%d, used=%d)", $storeid, $total, $free, $used);
 
     return ($total, $free, $used, 1);
-}
-
-# Parse capacity string (e.g., "1.00TB", "512GB") to bytes
-# Also handles plain numbers (already in bytes)
-sub _parse_capacity {
-    my ($class, $capacity_str) = @_;
-
-    return 0 unless $capacity_str;
-
-    # If it's just a number, it's already in bytes
-    if ($capacity_str =~ /^\d+$/) {
-        return $capacity_str + 0;
-    }
-
-    # Format: "1.00TB", "512.5GB", "1024MB"
-    my ($value, $unit) = $capacity_str =~ /([\d.]+)(\w+)/;
-
-    return 0 unless defined $value && defined $unit;
-
-    # Convert string to float
-    $value = strtod($value);
-
-    # Convert to bytes
-    my %multipliers = (
-        'TB' => 1024 * 1024 * 1024 * 1024,
-        'GB' => 1024 * 1024 * 1024,
-        'MB' => 1024 * 1024,
-        'KB' => 1024,
-        'B'  => 1,
-    );
-
-    $unit = uc($unit);
-    my $multiplier = $multipliers{$unit} || 1;
-
-    return int($value * $multiplier);
 }
 
 # Get pool info from storage array with Volume Protection check
@@ -186,7 +151,7 @@ sub _get_pool_info {
 
     # Use specific pool endpoint: POST /lsmdiskgrp/<pool_name>
     my $endpoint = "/lsmdiskgrp/$pool_name";
-    my $pool_info = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, 'POST', $endpoint, {});
+    my $pool_info = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, 'POST', $endpoint, { bytes => JSON::true });
 
     die "Pool '$pool_name' not found or API returned unexpected data\n" unless $pool_info;
 
@@ -289,9 +254,9 @@ sub _clone_volume {
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Creating linked clone from template (storeid=%s, source=%s, target_vmid=%s, target=%s)", $storeid, $source_volname, $target_vmid, $new_name);
 
         # Get source volume size
-        my $vdisk_info = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, 'POST', "/lsvdisk/$source_volname", {});
+        my $vdisk_info = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, 'POST', "/lsvdisk/$source_volname", { bytes => JSON::true });
         $vdisk_info = $vdisk_info->[0] if ref($vdisk_info) eq 'ARRAY';
-        my $size_bytes = _parse_capacity_to_bytes($class, $vdisk_info->{capacity} || '0');
+        my $size_bytes = $vdisk_info->{capacity} || 0;
 
         # Create target volume using mkvolume with thin provisioning
         my $pool_name = $scfg->{pool} or die "Pool not configured\n";
@@ -353,9 +318,9 @@ sub _clone_volume {
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Creating full clone (storeid=%s, source=%s, target_vmid=%s, target=%s)", $storeid, $source_volname, $target_vmid, $new_name);
 
         # Get source volume size
-        my $vdisk_info = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, 'POST', "/lsvdisk/$source_volname", {});
+        my $vdisk_info = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, 'POST', "/lsvdisk/$source_volname", { bytes => JSON::true });
         $vdisk_info = $vdisk_info->[0] if ref($vdisk_info) eq 'ARRAY';
-        my $size_bytes = _parse_capacity_to_bytes($class, $vdisk_info->{capacity} || '0');
+        my $size_bytes = $vdisk_info->{capacity} || 0;
 
         # Create target volume with same size using mkvolume
         my $pool_name = $scfg->{pool} or die "Pool not configured\n";
@@ -426,7 +391,7 @@ sub _volume_size_info {
     my ($class, $scfg, $volname) = @_;
 
     # Query specific volume by name: POST /lsvdisk/{volname}
-    my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, 'POST', "/lsvdisk/$volname", {});
+    my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, 'POST', "/lsvdisk/$volname", { bytes => JSON::true });
 
     my $vdisk_info;
     if (ref($result) eq 'ARRAY') {
@@ -437,14 +402,10 @@ sub _volume_size_info {
 
     die "Volume '$volname' not found\n" unless $vdisk_info;
 
-    my $capacity_str = $vdisk_info->{capacity} || '0';
-    my $size_bytes = _parse_capacity_to_bytes($class, $capacity_str);
+    my $size_bytes = $vdisk_info->{capacity} || 0;
 
     # Get used capacity for thin volumes
-    my $used_bytes = 0;
-    if (defined $vdisk_info->{used_capacity}) {
-        $used_bytes = _parse_capacity_to_bytes($class, $vdisk_info->{used_capacity});
-    }
+    my $used_bytes = $vdisk_info->{used_capacity} || 0;
 
     return ($size_bytes, 'raw', $used_bytes, undef);
 }
@@ -462,12 +423,11 @@ sub _volume_resize {
     my $new_size_bytes = $size_kb * 1024;
 
     # Get current size from storage array
-    my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, 'POST', "/lsvdisk/$volname", {});
+    my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, 'POST', "/lsvdisk/$volname", { bytes => JSON::true });
     my $vdisk_info = ref($result) eq 'ARRAY' ? $result->[0] : $result;
     die "Volume '$volname' not found\n" unless $vdisk_info;
 
-    my $current_capacity_str = $vdisk_info->{capacity} || '0';
-    my $current_size_bytes = _parse_capacity_to_bytes($class, $current_capacity_str);
+    my $current_size_bytes = $vdisk_info->{capacity} || 0;
 
     # Calculate delta (must be positive for expansion)
     my $delta_bytes = $new_size_bytes - $current_size_bytes;
@@ -506,7 +466,7 @@ sub _list_images {
 
     my $pool_name = $scfg->{pool} or die "Pool not configured\n";
 
-    my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, 'POST', '/lsvdisk', {});
+    my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, 'POST', '/lsvdisk', { bytes => JSON::true });
 
     # API returns array directly
     my $vdisks = ref($result) eq 'ARRAY' ? $result : [];
@@ -540,9 +500,8 @@ sub _list_images {
             next if defined($vmid) && ($owner ne $vmid);
         }
 
-        my $capacity_str = $vdisk->{capacity} || '0';
-        my $size_gb = _parse_capacity_to_gb($class, $capacity_str);
-        my $size_bytes = int($size_gb * 1024 * 1024 * 1024);
+        # capacity is already in bytes from API
+        my $size_bytes = int($vdisk->{capacity} || 0);
 
         # Ensure minimum size of 1KB
         $size_bytes = 1024 if $size_bytes < 1024;
@@ -1101,58 +1060,6 @@ sub _find_free_diskname {
     # Use PVE::Storage::Plugin's find_free_diskname
     # For block storage, we don't add file extensions
     return PVE::Storage::Plugin->find_free_diskname($class, $storeid, $scfg, $vmid, $fmt);
-}
-
-# Parse capacity string to GB
-sub _parse_capacity_to_gb {
-    my ($class, $capacity_str) = @_;
-
-    return 0 if !$capacity_str || $capacity_str eq '0';
-
-    if ($capacity_str =~ /^([\d.]+)(\w+)$/) {
-        my $value = $1;
-        my $unit = uc($2);
-
-        if ($unit eq 'TB') {
-            return $value * 1024;
-        } elsif ($unit eq 'GB') {
-            return $value;
-        } elsif ($unit eq 'MB') {
-            return $value / 1024;
-        } elsif ($unit eq 'KB' || $unit eq 'K') {
-            return $value / (1024 * 1024);
-        }
-    }
-
-    return $capacity_str;
-}
-
-# Parse capacity string to bytes
-sub _parse_capacity_to_bytes {
-    my ($class, $capacity_str) = @_;
-
-    return 0 if !$capacity_str || $capacity_str eq '0';
-
-    if ($capacity_str =~ /^\d+$/) {
-        return $capacity_str + 0;
-    }
-
-    if ($capacity_str =~ /^([\d.]+)(\w+)$/) {
-        my $value = $1;
-        my $unit = uc($2);
-
-        if ($unit eq 'TB') {
-            return $value * 1024 * 1024 * 1024 * 1024;
-        } elsif ($unit eq 'GB') {
-            return $value * 1024 * 1024 * 1024;
-        } elsif ($unit eq 'MB') {
-            return $value * 1024 * 1024;
-        } elsif ($unit eq 'KB' || $unit eq 'K') {
-            return $value * 1024;
-        }
-    }
-
-    return $capacity_str + 0;
 }
 
 # Check multipathd runtime configuration

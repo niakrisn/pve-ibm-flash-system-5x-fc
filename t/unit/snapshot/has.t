@@ -6,7 +6,7 @@ use strict;
 use warnings;
 use Test::More;
 use Test::Exception;
-use lib 'lib';
+use lib qw(lib t/unit/lib);
 
 # Load test helpers
 use lib 't/unit/lib';
@@ -45,11 +45,12 @@ subtest 'has_snapshot - snapshot exists' => sub {
         method      => 'POST',
         url_pattern => qr{/rest/lsvdisk/\Q$snapshot_name\E$},
         token       => $test_token,
+        body        => { bytes => 1 },
         response    => {
             json => [{
                 id        => '456',
                 name      => $snapshot_name,
-                capacity  => '10.00GB',
+                capacity  => 10 * 1024 * 1024 * 1024,
             }]
         },
     );
