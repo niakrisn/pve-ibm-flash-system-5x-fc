@@ -262,16 +262,19 @@ sub deactivate_volume {
 
 sub filesystem_path {
     my ($class, $scfg, $volname, $snapname) = @_;
+    # $scfg->{storage} should already be set by Proxmox before calling this method
+    # If not set, we cannot proceed - this indicates a Proxmox bug
     return PVE::Storage::Custom::IBMFlashSystem::Volume::get_filesystem_path(
-        $class, $scfg, undef, $volname, $snapname
+        $class, $scfg, $volname, $snapname
     );
 }
 
 sub path {
     my ($class, $scfg, $volname, $storeid, $snapname) = @_;
-    $scfg->{storage} = $storeid;  # Ensure storeid is set
+    # Ensure storeid is in scfg before passing to Volume module
+    $scfg->{storage} = $storeid;
     return PVE::Storage::Custom::IBMFlashSystem::Volume::get_volume_path(
-        $class, $scfg, $storeid, $volname, $snapname
+        $class, $scfg, $volname, $storeid, $snapname
     );
 }
 

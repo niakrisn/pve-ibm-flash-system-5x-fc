@@ -32,7 +32,7 @@ Fibre Channel SAN → Host Clusters → Volumes
 - Deploy: Build a deb package and install on remote server
 - Restart: `systemctl restart pvedaemon`
 - Register: `pvesm add <storage-id> --type <plugin-name> --portal <ip> ...`
-- Storage API: `10.0.0.222` endpoints `/rest/<cmd>`
+- Storage API: `10.0.0.222` endpoints `/rest/<cmd>`, user: pvcu, password: qenwu2-Wiwseb-nosgim. Всегда используй токен который хранится на удаленном хосте.
 - Docker: Use local Docker for build package
 
 ---
@@ -54,80 +54,124 @@ Fibre Channel SAN → Host Clusters → Volumes
 
 ### Stage 2: Proxmox API v13 Integration
 
-**Plugin Declaration Methods:**
-- `api()`: Return `13`
-- `options()`: Configuration options - `portal`, `username`, `password`, `pool`, `host_cluster`, `timeout`, `verify_ssl`, `max_retries`, `retry_delay`
-- `plugindata()`: Capabilities - `content => { images => 1, rootdir => 1 }`, `format => { raw => 1 }`, `migration => { shared => 1 }`
-- `volume_has_feature()`: Return support for snapshot, clone, template, copy, sparseinit
+# Спецификация Proxmox Storage API v13 (IBM FlashSystem REST)
 
-### Stage 3: Pool Management
+## 1. Метаданные и Конфигурация
 
-**Volume Operations (bound to configured pool):**
-- `status()`: `POST /rest/lsmdiskgrp` filtered by pool name
-- `alloc_image()`: `POST /rest/mkvdisk` with `mdiskgrp`, `size`, `unit => 'b'`, `name`
-- `volume_size_info()`: `POST /rest/lsvdisk` for size and vdisk_UID
+### `api()`
+*   **Действие**: Возвращает версию API.
+*   **Требование**: Возвращать строго `13`.
 
-### Stage 4: Host Cluster Logic
+### `plugindata()`
+*   **Действие**: Описывает статические возможности плагина.
+*   **Требование**: 
+    *   `content` => `{ images => 1, rootdir => 1 }`
+    *   `format` => `{ raw => 1 }`
+    *   `migration` => `{ shared => 1 }` (обязательно для Live Migration).
 
-**Dynamic Host Creation for SAN Connectivity:**
-- `activate_volume()`:
-  - Get local initiator (WWPN for FC)
-  - `POST /rest/lshost` to check if host exists
-  - If not found: `POST /rest/mkhost` with `hostcluster => $scfg->{host_cluster}` (critical!)
-  - `POST /rest/mkvdiskhostmap/{vol_id}` to map volume
-- `path()`: Return `/dev/disk/by-id/scsi-3<vdisk_UID>`
-
-### Stage 5: FlashCopy Snapshots
-
-**Snapshot Operations:**
-- `volume_snapshot()`: `/rest/mkvdisk` → `/rest/mkfcmap` → `/rest/prestartfcmap/{id}` → `/rest/startfcmap/{id}`
-- `volume_snapshot_rollback()`: `/restorefcmap`
-- `volume_snapshot_delete()`: `/rest/stopfcmap` → `/rest/rmfcmap` → `/rest/rmvdisk`
-
-### Stage 6: Validation Testing
-
-**Manual Tests:**
-1. **Expired Token Test:**
-   - Run `pvesm list`
-   - Delete `/run/pve-storage-ibm.token` via SSH
-   - Run `pvesm list` again - should transparently re-authenticate
-2. **Migration Test:**
-   - Migrate VM with IBM FS disk to another node
-   - Verify host is created in cluster on target node
+### `options()` и `properties()`
+*   **Действие**: Определение параметров в `storage.cfg` и их типов.
+*   **Обязательные поля**: `portal`, `pool`, `hostcluster`, `username`, `password`.
 
 ---
 
-## Code Reference
+## 2. Мониторинг и Состояние
 
-### Token Retry Pattern
+### `activate_storage($storeid, $scfg, $cache)`
+*   **Действие**: Проверка связи с API СХД.
+*   **Критическое поведение**: Должен выполнять проверочный запрос (например, `GET /lssystem`). Если токен истек (HTTP 403 / InvalidToken), метод обязан выполнить ревалидацию. Если СХД недоступна — вызвать `die`.
 
-```perl
-sub api_request {
-    my ($self, $scfg, $method, $endpoint, $data) = @_;
+### `status($storeid, $scfg, $cache)`
+*   **Действие**: Возврат объема пула.
+*   **Критическое поведение**: Запрашивать данные через `POST /rest/lsmdiskgrp`. Возвращать массив `($total, $free, $used, 1)` строго в **байтах**.
 
-    my $token = $self->get_cached_token();
-    my $attempts = 0;
-    my $max_retries = $scfg->{max_retries} // 3;
+---
 
-    while ($attempts <= $max_retries) {
-        my $res = $self->ua->request($method, $url, {
-            headers => { 'X-Auth-Token' => $token },
-            json => $data
-        });
+## 3. Жизненный цикл томов (CRUD)
 
-        if ($res->{status} == 403 || $res->{content} =~ /InvalidToken/i) {
-            $token = $self->_authenticate($scfg);  # Updates cache
-            $attempts++;
-            next;
-        }
+### `alloc_image($storeid, $scfg, $vmid, $fmt, $name, $size)`
+*   **Действие**: Создание нового тома.
+*   **Критическое поведение**: Использовать **`POST /rest/mkvolume`**. Конвертировать `$size` (в КБ) в **байты** (`unit: b`). Всегда передавать **`"thin": true`**. Возвращать имя тома.
 
-        return decode_json($res->{content});
-    }
-    die "API request failed after $max_retries retries";
-}
-```
+### `free_image($storeid, $scfg, $volname, $isBase)`
+*   **Действие**: Удаление тома.
+*   **Критическое поведение (State-Based Cleanup)**: Чтобы избежать ошибок блокировки (`CMMVC8698E`):
+    1. Вызвать `POST /rest/lsvdiskhostmap` для этого тома. Снять маппинги со **всех** хостов кластера (использовать цикл по результатам).
+    2. Найти и удалить все связанные FlashCopy маппинги (`lsfcmap` -> `stop` -> `rmfcmap`).
+    3. Только после этого вызывать `rmvdisk`.
 
-### Starting Point
+### `volume_size_info($scfg, $storeid, $volname, $timeout)`
+*   **Действие**: Получение актуального размера.
+*   **Критическое поведение**: Запрашивать `capacity` и `used_capacity` через API. Возвращать данные в байтах.
 
-Begin by creating the directory structure locally and implementing `_authenticate` method. Verify with a simple system info query (`POST /rest/lssystem`).
+### `volume_resize($scfg, $storeid, $volname, $size, $running)`
+*   **Действие**: Расширение тома.
+*   **Критическое поведение**: Расширять основной том И все его зависимые снапшоты (`Targets`) на одну и ту же дельту в байтах. Если маппинг активен и СХД блокирует расширение: `stopfcmap` -> `expand` -> `startfcmap`.
+
+---
+
+## 4. Доступ к данным и транспорт (Activation)
+
+### `path($scfg, $volname, $storeid, $snapname)`
+*   **Действие**: Возвращает путь к блочному устройству.
+*   **Критическое поведение**: 
+    1. Метод **обязан** каждый раз запрашивать `vdisk_UID` (WWN) тома через API СХД.
+    2. Построить строку пути: `/dev/mapper/3<vdisk_UID>` (UID в нижнем регистре).
+    3. **Важно**: Метод не должен проверять наличие файла в ОС, он только возвращает строку «где диск должен быть».
+
+### `activate_volume($storeid, $scfg, $volname, $snapname, $cache)`
+*   **Действие**: Подключение LUN к хосту.
+*   **Критическое поведение (Discovery Loop)**: 
+    1. Выполнить `mkvdiskhostmap`.
+    2. Выполнить `rescan-scsi-bus.sh -a -c`.
+    3. **Цикл ожидания**: Проверять наличие файла `/dev/mapper/3<UID>` до 30 секунд.
+    4. Если устройство не появилось за 5 секунд, принудительно вызвать `multipath -v2`.
+    5. **Синхронизация**: Не возвращать успех, пока устройство не станет доступно для открытия (использовать `sysopen` на чтение/запись). Это критично для предотвращения ошибок `qemu-img` при "Full Clone".
+
+### `deactivate_volume($storeid, $scfg, $volname, $snapname, $cache)`
+*   **Действие**: Отключение LUN.
+*   **Критическое поведение**: Сначала `multipath -f`, затем удаление путей в `/sys/block/sdX/device/delete`, и только в конце — API вызов `rmvdiskhostmap`.
+
+### `qemu_blockdev_options($scfg, $storeid, $volname, $snapname, $vmid)`
+*   **Действие**: Опции для QEMU.
+*   **Требование**: Всегда возвращать `{ driver => 'host_device', filename => $path }`.
+
+---
+
+## 5. Снапшоты и Клонирование
+
+### `volume_has_feature($scfg, $feature, $storeid, $volname, $snapname, $running)`
+*   **Требование**: Для фич `clone`, `copy`, `snapshot` возвращать хэш возможностей: `{ base => 1, current => 1, snap => 1 }`. Это заставит Proxmox вызывать нативные методы плагина.
+
+### `clone_image($scfg, $storeid, $volname, $vmid, $snapname)`
+*   **Действие**: Аппаратное клонирование.
+*   **Критическое поведение**: Реализовать как **Hardware Full Copy**.
+    1. Создать новый том через `mkvolume`.
+    2. Создать маппинг с **`copyrate: 150`** и **`autodelete: true`**.
+    3. Это гарантирует, что диск станет независимым автоматически, а Proxmox получит управление мгновенно.
+
+### `volume_snapshot($scfg, $storeid, $volname, $snapname)`
+*   **Действие**: Создание снапшота.
+*   **Критическое поведение**: Использовать `mkvolume` (thin) и `mkfcmap` с **`copyrate: 0`**. Дождаться статуса `active/copying` перед возвратом.
+
+### `volume_snapshot_rollback($scfg, $storeid, $volname, $snapname)`
+*   **Действие**: Откат к снапшоту.
+*   **Критическое поведение (Manual Reverse-Sync)**:
+    1. Сохранить текущую структуру «Звезды» (все Target-тома) в файл `/run/pve-ibm-rollback-$volname.json`.
+    2. Удалить все текущие `fcmap` от этого источника (`force: true`).
+    3. Создать временный реверсивный маппинг `Snapshot -> VM_Disk` с **`copyrate: 150`** и **`cleanrate: 150`**.
+    4. Дождаться перехода в статус `active`. С этого момента данные считаются восстановленными.
+    5. Удалить реверсивный маппинг.
+    6. По данным из JSON-журнала восстановить оригинальную «Звезду» (`VM_Disk` снова становится `Source` для всех томов снапшотов) с **`copyrate: 0`**.
+
+### `create_base($storeid, $scfg, $volname)`
+*   **Действие**: Создание шаблона.
+*   **Критическое поведение**: Выполнить переименование тома через `POST /rest/chvdisk` (замена `vm-` на `base-`). Метод `path()` должен немедленно начать возвращать путь, основываясь на новом имени.
+
+---
+
+### Особые указания по обработке ошибок:
+*   При получении ошибки **`CMMVC5701E`** (Object Busy) плагин должен делать до 5 попыток с паузой в 1 секунду.
+*   Все операции с FlashCopy должны подтверждаться опросом статуса (`lsfcmap`), использование фиксированных задержек `sleep()` запрещено.
+
 
