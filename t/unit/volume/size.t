@@ -58,7 +58,8 @@ subtest 'get_volume_size - success with capacity and used' => sub {
         PVE::Storage::Custom::IBMFlashSystem::Volume::get_volume_size(
             'PVE::Storage::Custom::IBMFlashSystem',
             \%test_scfg,
-            $test_volname
+            $test_volname,
+            $test_storeid
         );
 
     is($size_bytes, 10 * 1024 * 1024 * 1024, 'Returns correct capacity in bytes');
@@ -96,7 +97,8 @@ subtest 'get_volume_size - parses GB format' => sub {
         PVE::Storage::Custom::IBMFlashSystem::Volume::get_volume_size(
             'PVE::Storage::Custom::IBMFlashSystem',
             \%test_scfg,
-            $test_volname
+            $test_volname,
+            $test_storeid
         );
 
     is($size_bytes, 512 * 1024 * 1024 * 1024, 'Parses 512GB correctly');
@@ -133,7 +135,8 @@ subtest 'get_volume_size - parses TB format' => sub {
         PVE::Storage::Custom::IBMFlashSystem::Volume::get_volume_size(
             'PVE::Storage::Custom::IBMFlashSystem',
             \%test_scfg,
-            $test_volname
+            $test_volname,
+            $test_storeid
         );
 
     is($size_bytes, 1 * 1024 * 1024 * 1024 * 1024, 'Parses 1TB correctly');
@@ -171,7 +174,8 @@ subtest 'get_volume_size - handles plain bytes' => sub {
         PVE::Storage::Custom::IBMFlashSystem::Volume::get_volume_size(
             'PVE::Storage::Custom::IBMFlashSystem',
             \%test_scfg,
-            $test_volname
+            $test_volname,
+            $test_storeid
         );
 
     is($size_bytes, $expected_bytes, 'Handles plain number bytes correctly');
@@ -201,7 +205,8 @@ subtest 'get_volume_size - volume not found' => sub {
         PVE::Storage::Custom::IBMFlashSystem::Volume::get_volume_size(
             'PVE::Storage::Custom::IBMFlashSystem',
             \%test_scfg,
-            $test_volname
+            $test_volname,
+            $test_storeid
         );
     } qr/Volume '$test_volname' not found/i, 'Dies when volume not found';
 
@@ -236,7 +241,8 @@ subtest 'get_volume_size - returns raw format' => sub {
         PVE::Storage::Custom::IBMFlashSystem::Volume::get_volume_size(
             'PVE::Storage::Custom::IBMFlashSystem',
             \%test_scfg,
-            $test_volname
+            $test_volname,
+            $test_storeid
         );
 
     is($format, 'raw', 'Returns raw format');
@@ -272,7 +278,8 @@ subtest 'get_volume_size - missing used_capacity returns 0' => sub {
         PVE::Storage::Custom::IBMFlashSystem::Volume::get_volume_size(
             'PVE::Storage::Custom::IBMFlashSystem',
             \%test_scfg,
-            $test_volname
+            $test_volname,
+            $test_storeid
         );
 
     is($used_bytes, 0, 'Returns 0 for missing used_capacity');

@@ -10,7 +10,7 @@ use PVE::Storage::Custom::IBMFlashSystem::Client;
 use PVE::Storage::Custom::IBMFlashSystem::Logger;
 
 use Exporter 'import';
-our @EXPORT_OK = qw(_get_vdisk_id _get_vdisk_uid);
+our @EXPORT_OK = qw(_get_vdisk_id _get_vdisk_uid _clear_vdisk_uid_cache);
 
 # vdisk UID cache (60s TTL)
 my %vdisk_uid_cache;
@@ -78,6 +78,11 @@ sub _get_vdisk_id {
     my $vdisk_id = $vdisk_info->{id} or die "Volume '$volname' has no id\n";
 
     return $vdisk_id;
+}
+
+# Clear vdisk UID cache (for testing)
+sub _clear_vdisk_uid_cache {
+    %vdisk_uid_cache = ();
 }
 
 1;

@@ -18,6 +18,7 @@ use PVE::Storage::Custom::IBMFlashSystem::Common;
 # Shorthand for common functions
 sub _get_vdisk_id { return PVE::Storage::Custom::IBMFlashSystem::Common::_get_vdisk_id(@_); }
 sub _get_vdisk_uid { return PVE::Storage::Custom::IBMFlashSystem::Common::_get_vdisk_uid(@_); }
+sub _clear_vdisk_uid_cache { return PVE::Storage::Custom::IBMFlashSystem::Common::_clear_vdisk_uid_cache(@_); }
 
 # vdisk UID cache is now in Common.pm
 

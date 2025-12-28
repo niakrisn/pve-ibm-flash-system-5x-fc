@@ -20,13 +20,15 @@ use PVE::Storage::Custom::IBMFlashSystem::Logger;
 
 # Authentication
 sub authenticate {
-    my ($class, $scfg) = @_;
-    return _authenticate($class, $scfg);
+    my ($class, $scfg, $storeid) = @_;
+    die "No storage ID provided\n" unless $storeid;
+    return _authenticate($class, $scfg, $storeid);
 }
 
 sub api_request {
-    my ($class, $scfg, $method, $endpoint, $data) = @_;
-    return _api_request($class, $scfg, $method, $endpoint, $data);
+    my ($class, $scfg, $storeid, $method, $endpoint, $data) = @_;
+    die "No storage ID provided\n" unless $storeid;
+    return _api_request($class, $scfg, $storeid, $method, $endpoint, $data);
 }
 
 sub clear_cached_token {
@@ -76,8 +78,7 @@ sub on_add_hook {
 
         # Verify credentials immediately
         eval {
-            $scfg->{storage} = $storeid;  # Ensure storeid is set for authenticate
-            PVE::Storage::Custom::IBMFlashSystem::Client::authenticate($class, $scfg);
+            PVE::Storage::Custom::IBMFlashSystem::Client::authenticate($class, $scfg, $storeid);
         };
         if ($@) {
             # Password is invalid, remove it
@@ -349,10 +350,9 @@ sub _get_password {
 
 # Authenticate and get token
 sub _authenticate {
-    my ($class, $scfg) = @_;
+    my ($class, $scfg, $storeid) = @_;
 
-    # Get storeid from scfg (Proxmox always adds it)
-    my $storeid = $scfg->{storage} || die "No storage ID in config\n";
+    die "No storage ID provided (in _authenticate)\n" unless $storeid;
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER _authenticate (storeid=%s)", $storeid);
 
@@ -423,13 +423,14 @@ sub _authenticate {
 
 # Core API request method with token retry logic
 sub _api_request {
-    my ($class, $scfg, $method, $endpoint, $data) = @_;
+    my ($class, $scfg, $storeid, $method, $endpoint, $data) = @_;
 
     $method = uc($method);
     die "Invalid HTTP method: $method\n" unless $method =~ /^(GET|POST|PUT|DELETE)$/;
 
+    die "No storage ID provided (endpoint=$endpoint, method=$method)\n" unless $storeid;
+
     my $start_time = time;
-    my $storeid = $scfg->{storage} || die "No storage ID in config\n";
 
     # Log API request initiation (level 2: verbose)
     my $request_body = $data ? PVE::Storage::Custom::IBMFlashSystem::Logger::format_body($class, $data) : '';
@@ -453,7 +454,7 @@ sub _api_request {
         unless ($token) {
             PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
                 "No cached token, authenticating (storeid=%s)", $storeid);
-            $token = _authenticate($class, $scfg);
+            $token = _authenticate($class, $scfg, $storeid);
         }
 
         # Build request
@@ -479,7 +480,7 @@ sub _api_request {
 
             # Clear cache and re-authenticate
             _clear_cached_token($class, $storeid);
-            $token = _authenticate($class, $scfg);
+            $token = _authenticate($class, $scfg, $storeid);
 
             $attempts++;
             sleep($retry_delay) if $attempts <= $max_retries;
