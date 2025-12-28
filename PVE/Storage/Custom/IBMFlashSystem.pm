@@ -249,14 +249,14 @@ sub free_image {
 sub activate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
     return PVE::Storage::Custom::IBMFlashSystem::Volume::activate_volume(
-        $class, $scfg, $storeid, $volname, $snapname
+        $class, $storeid, $scfg, $volname, $snapname, $cache
     );
 }
 
 sub deactivate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
     return PVE::Storage::Custom::IBMFlashSystem::Volume::deactivate_volume(
-        $class, $scfg, $storeid, $volname, $snapname
+        $class, $storeid, $scfg, $volname, $snapname, $cache
     );
 }
 
@@ -354,17 +354,19 @@ sub on_delete_hook {
 # ============================================================================
 
 sub qemu_blockdev_options {
-    my ($class, $scfg, $storeid, $volname, $snapshot) = @_;
+    my ($class, $scfg, $storeid, $volname, $machine_version, $options) = @_;
 
-    # For raw volumes, just return the path directly
-    # No special format options needed
-    my $path = $class->path($scfg, $storeid, $volname, $snapshot);
+    # Get snapshot name from options (not from machine_version parameter!)
+    my $snapname = $options->{'snapshot-name'};
 
+    # Call path() with correct parameter order: volname BEFORE storeid
+    my $path = $class->path($scfg, $volname, $storeid, $snapname);
+
+    # Return blockdev options in format expected by QEMU
+    # For FC block devices (/dev/mapper/...), use host_device driver
     return {
-        'file' => {
-            driver => 'raw',
-            file => $path,
-        },
+        driver => 'host_device',
+        filename => $path,
     };
 }
 
