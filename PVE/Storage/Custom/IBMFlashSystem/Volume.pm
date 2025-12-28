@@ -478,7 +478,9 @@ sub _list_images {
     # Ensure storeid is in scfg for api_request
     $scfg->{storage} = $storeid;
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER list_images (storeid=%s, vmid=%s)", $storeid, $vmid);
+    # vmid can be undef when listing all volumes
+    my $vmid_display = defined($vmid) ? $vmid : 'all';
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER list_images (storeid=%s, vmid=%s)", $storeid, $vmid_display);
 
     my $pool_name = $scfg->{pool} or die "Pool not configured\n";
 
@@ -542,6 +544,9 @@ sub _free_image {
 
     # Ensure storeid is in scfg for api_request
     $scfg->{storage} = $storeid;
+
+    # Default isBase to 0 if undef
+    $isBase //= 0;
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER free_image (storeid=%s, volname=%s, is_base=%d)", $storeid, $volname, $isBase);
 

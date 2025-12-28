@@ -28,12 +28,12 @@ Fibre Channel SAN → Host Clusters → Volumes
 
 ### Testing Environment
 
-- Remote server: `root@10.4.0.122` use key `~/.ssh/id_ed25519`
-- Deploy: Copy `.pm` file to `/usr/share/perl5/PVE/Storage/Custom/`
+- Remote server: `root@10.4.0.122` use key `~/.ssh/id_ed25519`. Any chekcs (syntax etc) do on this host.
+- Deploy: Build a deb package and install on remote server
 - Restart: `systemctl restart pvedaemon`
 - Register: `pvesm add <storage-id> --type <plugin-name> --portal <ip> ...`
 - Storage API: `10.0.0.222` endpoints `/rest/<cmd>`
-- Docker: Use local Docker for build and checks
+- Docker: Use local Docker for build package
 
 ---
 
