@@ -726,7 +726,9 @@ sub _filesystem_path {
     _activate_volume($class, $scfg, $storeid, $volname, $snapname);
 
     # Wait for multipath device to appear
-    my $vdisk_uid = _get_vdisk_uid($class, $scfg, $volname, $storeid);
+    # Build volname with snapname for UID query
+    my $api_volname = $snapname ? "$volname\@$snapname" : $volname;
+    my $vdisk_uid = _get_vdisk_uid($class, $scfg, $api_volname, $storeid);
     _wait_for_multipath_device($class, $scfg, $vdisk_uid, 30);
 
     return $path;
