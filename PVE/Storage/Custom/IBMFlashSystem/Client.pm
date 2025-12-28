@@ -100,10 +100,9 @@ sub on_add_hook {
 sub on_update_hook {
     my ($class, $storeid, $scfg, %param) = @_;
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info("on_update_hook called",
-        storeid => $storeid,
-        password_exists => exists($param{password}) ? 1 : 0,
-    );
+    my $has_password = exists($param{password}) ? 1 : 0;
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
+        "on_update_hook called (storeid=%s, password_exists=%d)", $storeid, $has_password);
 
     # Load full storage config if needed for validation
     if (exists($param{password}) || exists($param{username}) || exists($param{portal})) {
@@ -146,10 +145,12 @@ sub on_update_hook {
                     }
                 }
 
-                PVE::Storage::Custom::IBMFlashSystem::Logger::log_info("Password updated and verified", storeid => $storeid);
+                PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $full_scfg,
+                    "Password updated and verified (storeid=%s)", $storeid);
             } else {
                 _delete_password($class, $full_scfg, $storeid);
-                PVE::Storage::Custom::IBMFlashSystem::Logger::log_info("Password deleted", storeid => $storeid);
+                PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $full_scfg,
+                    "Password deleted (storeid=%s)", $storeid);
             }
         }
 
@@ -159,7 +160,8 @@ sub on_update_hook {
 
         if ($clear_token) {
             _clear_cached_token($class, $storeid);
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_info("Token cleared due to credential changes", storeid => $storeid);
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $full_scfg,
+                "Token cleared due to credential changes (storeid=%s)", $storeid);
         }
     }
 
@@ -244,10 +246,8 @@ sub _save_rollback_state {
     my $path = _get_rollback_state_path($class, $volname);
     eval { file_set_contents($path, encode_json($state), 0600) };
     if ($@) {
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn("Failed to save rollback state",
-            volname => $volname,
-            error => $@,
-        );
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class,
+            "Failed to save rollback state (volname=%s, error=%s)", $volname, $@);
     }
 
     return;
@@ -273,10 +273,8 @@ sub _clear_rollback_state {
 
     my $path = _get_rollback_state_path($class, $volname);
     if (-f $path) {
-        unlink($path) or PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn("Failed to clear rollback state",
-            volname => $volname,
-            error => $!,
-        );
+        unlink($path) or PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class,
+            "Failed to clear rollback state (volname=%s, error=%s)", $volname, $!);
     }
 
     return;
@@ -356,16 +354,12 @@ sub _authenticate {
     # Get storeid from scfg (Proxmox always adds it)
     my $storeid = $scfg->{storage} || die "No storage ID in config\n";
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug("ENTER _authenticate",
-        scfg => $scfg,
-    );
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER _authenticate (storeid=%s)", $storeid);
 
     my $start_time = time;
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info("Authenticating with IBM FlashSystem API",
-        scfg => $scfg,
-        endpoint => '/auth',
-    );
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
+        "Authenticating with IBM FlashSystem API (storeid=%s, endpoint=/auth)", $storeid);
 
     my $ua = _init_ua($class, $scfg);
     my $url = _build_url($class, $scfg, '/auth');
@@ -389,13 +383,10 @@ sub _authenticate {
             $error_msg = "Authentication headers missing or invalid (plugin bug)";
         }
 
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error("Authentication failed",
-            scfg => $scfg,
-            endpoint => '/auth',
-            status => $response->status_line,
-            content => $content,
-            duration => int($duration),
-        );
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class,
+            "Authentication failed (storeid=%s, endpoint=/auth, status=%s, duration=%dms)",
+            $storeid, $response->status_line, int($duration));
+
         die "Authentication failed: $error_msg\n";
     }
 
@@ -407,12 +398,9 @@ sub _authenticate {
         my $data = eval { decode_json($content) };
         if ($@) {
             my $duration = (time - $start_time) * 1000;
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_error("Failed to parse authentication response",
-                scfg => $scfg,
-                endpoint => '/auth',
-                error => $@,
-                duration => int($duration),
-            );
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class,
+                "Failed to parse authentication response (storeid=%s, endpoint=/auth, error=%s, duration=%dms)",
+                $storeid, $@, int($duration));
             die "Failed to parse authentication response: $@\n";
         }
 
@@ -423,15 +411,12 @@ sub _authenticate {
     _set_cached_token($class, $storeid, $token);
 
     my $duration = (time - $start_time) * 1000;
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info("Authentication successful",
-        scfg => $scfg,
-        endpoint => '/auth',
-        duration => int($duration),
-    );
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
+        "Authentication successful (storeid=%s, endpoint=/auth, duration=%dms)",
+        $storeid, int($duration));
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug("EXIT _authenticate successfully",
-        scfg => $scfg,
-    );
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg,
+        "EXIT _authenticate successfully (storeid=%s)", $storeid);
 
     return $token;
 }
@@ -444,20 +429,18 @@ sub _api_request {
     die "Invalid HTTP method: $method\n" unless $method =~ /^(GET|POST|PUT|DELETE)$/;
 
     my $start_time = time;
+    my $storeid = $scfg->{storage} || die "No storage ID in config\n";
 
     # Log API request initiation (level 2: verbose)
-    my $request_body = $data ? PVE::Storage::Custom::IBMFlashSystem::Logger::format_body($data) : '';
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug("API request: $method $endpoint",
-        scfg => $scfg,
-        endpoint => $endpoint,
-        method => $method,
-        body => $request_body,
-    ) if $request_body;
+    my $request_body = $data ? PVE::Storage::Custom::IBMFlashSystem::Logger::format_body($class, $data) : '';
+    if ($request_body) {
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg,
+            "API request: %s %s (body=%s)", $method, $endpoint, $request_body);
+    }
 
     my $ua = _init_ua($class, $scfg);
     my $url = _build_url($class, $scfg, $endpoint);
 
-    my $storeid = $scfg->{storage} || die "No storage ID in config\n";
     my $max_retries = $scfg->{max_retries} || 3;
     my $retry_delay = $scfg->{retry_delay} || 1;
     my $attempts = 0;
@@ -468,9 +451,8 @@ sub _api_request {
 
         # If no token, authenticate first
         unless ($token) {
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_info("No cached token, authenticating",
-                scfg => $scfg,
-            );
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
+                "No cached token, authenticating (storeid=%s)", $storeid);
             $token = _authenticate($class, $scfg);
         }
 
@@ -491,12 +473,9 @@ sub _api_request {
         my $content = $response->decoded_content || '';
 
         if ($status_code == 401 || $status_code == 403 || $content =~ /InvalidToken/i) {
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn("Token expired, re-authenticating",
-                scfg => $scfg,
-                endpoint => $endpoint,
-                status => $status_code,
-                attempt => $attempts + 1,
-            );
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class,
+                "Token expired, re-authenticating (storeid=%s, endpoint=%s, status=%d, attempt=%d)",
+                $storeid, $endpoint, $status_code, $attempts + 1);
 
             # Clear cache and re-authenticate
             _clear_cached_token($class, $storeid);
@@ -514,11 +493,9 @@ sub _api_request {
     # Check if we exhausted retries
     if ($attempts > $max_retries) {
         my $duration = (time - $start_time) * 1000;
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error("API request failed after $max_retries authentication retries",
-            scfg => $scfg,
-            endpoint => $endpoint,
-            duration => int($duration),
-        );
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class,
+            "API request failed after %d authentication retries (storeid=%s, endpoint=%s, duration=%dms)",
+            $max_retries, $storeid, $endpoint, int($duration));
         die "API request failed after $max_retries authentication retries\n";
     }
 
@@ -528,14 +505,9 @@ sub _api_request {
         my $content = $response->decoded_content;
         my $duration = (time - $start_time) * 1000;
 
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error("API request failed",
-            scfg => $scfg,
-            endpoint => $endpoint,
-            method => $method,
-            status => $status,
-            content => $content,
-            duration => int($duration),
-        );
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class,
+            "API request failed (storeid=%s, endpoint=%s, method=%s, status=%s, duration=%dms)",
+            $storeid, $endpoint, $method, $status, int($duration));
         die "API request failed: $status - $content\n";
     }
 
@@ -543,12 +515,9 @@ sub _api_request {
 
     # Log successful API response (level 2: verbose)
     my $duration = (time - $start_time) * 1000;
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug("API response received",
-        scfg => $scfg,
-        endpoint => $endpoint,
-        status => $response->code,
-        duration => int($duration),
-    );
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg,
+        "API response received (storeid=%s, endpoint=%s, status=%d, duration=%dms)",
+        $storeid, $endpoint, $response->code, int($duration));
 
     # Return decoded JSON if there's content
     return $content ? decode_json($content) : {};

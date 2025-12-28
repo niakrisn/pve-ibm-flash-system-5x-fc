@@ -1,5 +1,5 @@
 # IBM FlashSystem 5.x FC Storage Plugin for Proxmox VE 9.1+
-# Logger Module - Centralized logging with level filtering and sanitization
+# Logger Module - Simple string-based logging
 
 package PVE::Storage::Custom::IBMFlashSystem::Logger;
 
@@ -11,6 +11,7 @@ use JSON;
 # Log file path
 my $LOGFILE = "/var/log/pve-storage-ibm.log";
 my $logfh;
+my $current_debug_level = 0;  # Cache debug level per storage
 
 # ============================================================================
 # Public API
@@ -21,50 +22,66 @@ sub init {
     return _init_log();
 }
 
-sub log {
-    my ($class, $level, $message, %context) = @_;
-    return _log($class, $level, $message, %context);
-}
+# Simple logging with sprintf-style formatting
+# Usage: log_debug($class, $scfg, "format string", @args)
+#        log_info($class, $scfg, "format string", @args)
+#        log_warn($class, "format string", @args)
+#        log_error($class, "format string", @args)
+#
+# Examples:
+#   log_debug($class, $scfg, "API request: %s %s", $method, $endpoint)
+#   log_info($class, $scfg, "Volume %s activated", $volname)
+#   log_warn($class, "Retry attempt %d", $attempt)
+#   log_error($class, "Failed to connect: %s", $error)
 
 sub log_debug {
-    no warnings 'misc';  # Suppress "odd number of elements" warning (must be before my)
-    my ($class, $message, %context) = @_;
-    return _log($class, 'debug', $message, %context);
+    my ($class, $scfg, $format, @args) = @_;
+    my $message = @args ? sprintf($format, @args) : $format;
+    return _log('debug', $message, $scfg);
 }
 
 sub log_info {
-    no warnings 'misc';  # Suppress "odd number of elements" warning (must be before my)
-    my ($class, $message, %context) = @_;
-    return _log($class, 'info', $message, %context);
+    my ($class, $scfg, $format, @args) = @_;
+    my $message = @args ? sprintf($format, @args) : $format;
+    return _log('info', $message, $scfg);
 }
 
 sub log_warn {
-    no warnings 'misc';  # Suppress "odd number of elements" warning (must be before my)
-    my ($class, $message, %context) = @_;
-    return _log($class, 'warn', $message, %context);
+    my ($class, $format, @args) = @_;
+    my $message = @args ? sprintf($format, @args) : $format;
+    return _log('warn', $message);
 }
 
 sub log_error {
-    no warnings 'misc';  # Suppress "odd number of elements" warning (must be before my)
-    my ($class, $message, %context) = @_;
-    return _log($class, 'error', $message, %context);
+    my ($class, $format, @args) = @_;
+    my $message = @args ? sprintf($format, @args) : $format;
+    return _log('error', $message);
 }
 
+# Legacy API for backward compatibility (does nothing with context)
+sub log {
+    my ($class, $level, $message, $scfg) = @_;
+    return _log($level, $message, $scfg);
+}
+
+# Sanitize and format JSON bodies (keep for API request logging)
 sub sanitize {
     my ($class, $data) = @_;
-    return _sanitize_for_log($class, $data);
+    return _sanitize_for_log($data);
 }
 
 sub format_body {
     my ($class, $data) = @_;
-    return _format_log_body($class, $data);
+    return '' unless defined $data;
+    return $data unless ref($data);
+    my $clean = _sanitize_for_log($data);
+    return encode_json($clean);
 }
 
 # ============================================================================
 # Internal Functions
 # ============================================================================
 
-# Initialize log file handle
 sub _init_log {
     return if defined $logfh;
 
@@ -73,115 +90,62 @@ sub _init_log {
         return;
     };
 
-    # Set autoflush for real-time logging
     my $old_fh = select($logfh);
     $| = 1;
     select($old_fh);
 
-    # Set restrictive permissions (root:adm 640)
     chmod(0640, $LOGFILE);
-
     return;
 }
 
-# Main logging function
-# Usage: $class->_log($level, $message, %context)
-# Levels: error, warn, info, debug
-# Context: scfg, storeid, vmid, volname, endpoint, duration, status
-sub _log {
-    no warnings 'misc';  # Suppress "odd number of elements" warning (must be before my)
-    my ($class, $level, $message, %context) = @_;
+sub _get_debug_level {
+    my ($scfg) = @_;
 
-    # Check debug level from config
-    # If scfg is not provided or empty, assume level 2 (verbose) for debug logs
-    my $scfg = $context{scfg};
-    my $level_num = 0;
-    if ($scfg && ref($scfg) eq 'HASH' && %$scfg) {
-        $level_num = $scfg->{debug} || 0;
-    } else {
-        # No config provided - only show debug logs if explicitly requested
-        # For internal methods without scfg, always show debug at level 2
-        $level_num = ($level eq 'debug') ? 2 : 0;
-    }
-    return if $level_num == 0 && $level !~ /^(error|warn)$/;
+    return 0 unless $scfg && ref($scfg) eq 'HASH';
+    return $scfg->{debug} || 0;
+}
 
-    # Map level names to priority numbers
+sub _should_log {
+    my ($level, $scfg) = @_;
+
+    # Errors and warnings always log
+    return 1 if $level =~ /^(error|warn)$/;
+
+    my $debug_level = _get_debug_level($scfg);
+
     my %level_priority = (
-        'error' => 0,  # Always log errors
-        'warn'  => 0,  # Always log warnings
-        'info'  => 1,  # Log at level 1+
-        'debug' => 2,  # Log at level 2
+        'info'  => 1,
+        'debug' => 2,
     );
 
     my $priority = $level_priority{$level} // 2;
-    return if $priority > $level_num && $level !~ /^(error|warn)$/;
+    return $priority <= $debug_level;
+}
 
-    # Initialize log file handle
+sub _log {
+    my ($level, $message, $scfg) = @_;
+
+    # Check if we should log this level
+    return unless _should_log($level, $scfg);
+
+    # Initialize log file
     _init_log();
     return unless defined $logfh;
 
     # Format timestamp
     my $timestamp = strftime("%Y-%m-%d %H:%M:%S", localtime);
 
-    # Build context string
-    my $ctx_str = '';
-    if (%context) {
-        my @ctx_parts;
-        push @ctx_parts, "storeid=$context{storeid}" if $context{storeid};
-        push @ctx_parts, "vmid=$context{vmid}" if defined $context{vmid};
-        push @ctx_parts, "volname=$context{volname}" if $context{volname};
-        push @ctx_parts, "endpoint=$context{endpoint}" if $context{endpoint};
-        push @ctx_parts, "duration=$context{duration}ms" if defined $context{duration};
-        push @ctx_parts, "status=$context{status}" if $context{status};
-        # Additional context for debugging
-        push @ctx_parts, "total_volumes=$context{total_volumes}" if defined $context{total_volumes};
-        push @ctx_parts, "snap_volname=$context{snap_volname}" if $context{snap_volname};
-        push @ctx_parts, "snap_vdisk_id=$context{snap_vdisk_id}" if defined $context{snap_vdisk_id};
-        push @ctx_parts, "volume_keys=$context{volume_keys}" if $context{volume_keys};
-        push @ctx_parts, "is_base=$context{is_base}" if defined $context{is_base};
-        push @ctx_parts, "count=$context{count}" if defined $context{count};
-        push @ctx_parts, "scfg=$context{scfg}" if $context{scfg} && ref($context{scfg}) ne 'HASH';  # Avoid dumping full scfg
-        # Device and volume UID debugging info
-        push @ctx_parts, "vdisk_uid=$context{vdisk_uid}" if $context{vdisk_uid};
-        push @ctx_parts, "expected_path_3600=$context{expected_path_3600}" if $context{expected_path_3600};
-        push @ctx_parts, "expected_path_3=$context{expected_path_3}" if $context{expected_path_3};
-        push @ctx_parts, "mpath=$context{mpath}" if $context{mpath};
-        push @ctx_parts, "vname=$context{vname}" if $context{vname};
-        push @ctx_parts, "pool=$context{pool}" if $context{pool};
-        push @ctx_parts, "size_bytes=$context{size_bytes}" if $context{size_bytes};
-        push @ctx_parts, "fcmap_id=$context{fcmap_id}" if $context{fcmap_id};
-        push @ctx_parts, "hostname=$context{hostname}" if $context{hostname};
-        # Generic: output any other context keys
-        my %known = map { $_ => 1 } qw(storeid vmid volname endpoint duration status total_volumes
-            snap_volname snap_vdisk_id volume_keys is_base count scfg vdisk_uid expected_path_3600
-            expected_path_3 mpath vname pool size_bytes fcmap_id hostname);
-        for my $k (keys %context) {
-            push @ctx_parts, "$k=$context{$k}" if !$known{$k} && defined $context{$k};
-        }
-        $ctx_str = ' [' . join(', ', @ctx_parts) . ']' if @ctx_parts;
-    }
-
-    # Format and write log entry
-    my $log_entry = sprintf("%s [%s]%s %s\n",
-        $timestamp,
-        uc($level),
-        $ctx_str,
-        $message
-    );
-
-    print $logfh $log_entry;
+    # Write log entry
+    print $logfh sprintf("%s [%s] %s\n", $timestamp, uc($level), $message);
 
     return;
 }
 
-# Sanitize sensitive data from hashrefs for logging
-# Masks: password, token, secret, api_key, auth, credential
 sub _sanitize_for_log {
-    my ($class, $data) = @_;
+    my ($data) = @_;
 
     return $data unless ref($data);
 
-    # Patterns for sensitive field names
     my @sensitive_patterns = (
         qr/password/i,
         qr/token/i,
@@ -191,44 +155,29 @@ sub _sanitize_for_log {
         qr/credential/i,
     );
 
-    # Recursively sanitize hashrefs
     if (ref($data) eq 'HASH') {
         my %clean;
         foreach my $key (keys %$data) {
             my $is_sensitive = grep { $key =~ $_ } @sensitive_patterns;
             if ($is_sensitive) {
                 my $value = $data->{$key};
-                # Keep first 4 and last 4 chars, mask middle
                 if (defined $value && length($value) > 8) {
                     $clean{$key} = substr($value, 0, 4) . '****' . substr($value, -4);
                 } else {
                     $clean{$key} = '****';
                 }
             } else {
-                $clean{$key} = _sanitize_for_log($class, $data->{$key});
+                $clean{$key} = _sanitize_for_log($data->{$key});
             }
         }
         return \%clean;
     }
 
-    # Recursively sanitize arrayrefs
     if (ref($data) eq 'ARRAY') {
-        return [map { _sanitize_for_log($class, $_) } @$data];
+        return [map { _sanitize_for_log($_) } @$data];
     }
 
-    # Return scalars as-is
     return $data;
-}
-
-# Convert sanitized data structure to JSON for logging
-sub _format_log_body {
-    my ($class, $data) = @_;
-
-    return '' unless defined $data;
-    return $data unless ref($data);
-
-    my $clean = _sanitize_for_log($class, $data);
-    return encode_json($clean);
 }
 
 1;

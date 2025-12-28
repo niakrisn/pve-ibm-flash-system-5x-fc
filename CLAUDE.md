@@ -33,6 +33,7 @@ Fibre Channel SAN → Host Clusters → Volumes
 - Restart: `systemctl restart pvedaemon`
 - Register: `pvesm add <storage-id> --type <plugin-name> --portal <ip> ...`
 - Storage API: `10.0.0.222` endpoints `/rest/<cmd>`
+- Docker: Use local Docker for build and checks
 
 ---
 
