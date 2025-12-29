@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+Отвечай только по-русски.
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
@@ -34,6 +36,7 @@ Fibre Channel SAN → Host Clusters → Volumes
 - Register: `pvesm add <storage-id> --type <plugin-name> --portal <ip> ...`
 - Storage API: `10.0.0.222` endpoints `/rest/<cmd>`, user: pvcu, password: qenwu2-Wiwseb-nosgim. Всегда используй токен который хранится на удаленном хосте.
 - Docker: Use local Docker for build package
+- SCSI Scan: запрещено использовать rescan-scsi-bus.sh. Ищи FC порты и опрашивай только их.
 
 #### Unit Tests
 
@@ -159,7 +162,6 @@ scp t/unit/volume/*.t root@10.4.0.122:/root/pve-ibm-flash-system-5x-fc/t/unit/vo
 *   **Действие**: Подключение LUN к хосту.
 *   **Критическое поведение (Discovery Loop)**:
     1. Выполнить `mkvdiskhostmap`.
-    2. Выполнить `rescan-scsi-bus.sh -a -c`.
     3. **Цикл ожидания**: Проверять наличие файла `/dev/mapper/3<UID>` до 30 секунд.
     4. Если устройство не появилось за 5 секунд, принудительно вызвать `multipath -v2`.
     5. **Синхронизация**: Не возвращать успех, пока устройство не станет доступно для открытия (использовать `sysopen` на чтение/запись). Это критично для предотвращения ошибок `qemu-img` при "Full Clone".
@@ -210,4 +212,132 @@ scp t/unit/volume/*.t root@10.4.0.122:/root/pve-ibm-flash-system-5x-fc/t/unit/vo
 *   При получении ошибки **`CMMVC5701E`** (Object Busy) плагин должен делать до 5 попыток с паузой в 1 секунду.
 *   Все операции с FlashCopy должны подтверждаться опросом статуса (`lsfcmap`), использование фиксированных задержек `sleep()` запрещено.
 
+---
+
+## IBM FlashSystem REST API Documentation
+
+### Overview
+
+IBM FlashSystem 5.x предоставляет REST API для управления. Все endpoint'ы используют метод **POST** (специфика IBM).
+
+**Base URL:** `https://<portal>:<port>/rest/<endpoint>`
+
+**Аутентификация:** Token-based через заголовок `X-Auth-Token`
+
+### Справочник Endpoints
+
+#### Аутентификация
+
+| Endpoint | Описание |
+|----------|----------|
+| `POST /rest/auth` | Получить токен (заголовки: `X-Auth-Username`, `X-Auth-Password`) |
+
+#### Управление томами
+
+| Endpoint | Описание | Параметры |
+|----------|----------|-----------|
+| `POST /rest/mkvolume` | Создать том | `name`, `pool`, `size`, `unit: "b"`, `thin: true` |
+| `POST /rest/lsvdisk` | Список томов | `bytes: true` |
+| `POST /rest/lsvdisk/<name>` | Информация о томе | `bytes: true` |
+| `POST /rest/expandvdisksize/<id>` | Расширить том | `size` (дельта), `unit: "b"` |
+| `POST /rest/rmvdisk/<id>` | Удалить том | `{}` |
+| `POST /rest/lsmdiskgrp/<pool>` | Информация о пуле | `bytes: true` |
+
+#### Управление хостами
+
+| Endpoint | Описание | Параметры |
+|----------|----------|-----------|
+| `POST /rest/lshost` | Список хостов | `{}` |
+| `POST /rest/mkhost` | Создать хост | `name`, `hostcluster`, `type: "generic"` |
+| `POST /rest/mkport/<host>` | Добавить FC порт | `fcport_name: "XX:XX:XX:XX:XX:XX:XX:XX"` |
+| `POST /rest/lshostcluster/<cluster>` | Информация о кластере | `{}` |
+
+#### Подключение томов к хостам (LUN Mapping)
+
+| Endpoint | Описание | Параметры |
+|----------|----------|-----------|
+| `POST /rest/lsvdiskhostmap` | Список маппингов | `{}` |
+| `POST /rest/mkvdiskhostmap/<id>` | Подключить том к хосту | `host`, `scsi` (LUN 1-255) |
+| `POST /rest/rmvdiskhostmap/<id>` | Отключить том от хоста | `host` |
+
+#### FlashCopy (Снапшоты и клоны)
+
+| Endpoint | Описание | Параметры |
+|----------|----------|-----------|
+| `POST /rest/lsfcmap` | Список FlashCopy | `{}` |
+| `POST /rest/lsfcmap/<id>` | Информация о FlashCopy | `{}` |
+| `POST /rest/mkfcmap` | Создать FlashCopy | `source`, `target`, `copyrate` |
+| `POST /rest/prestartfcmap/<id>` | Подготовить FlashCopy | `{}` |
+| `POST /rest/startfcmap/<id>` | Запустить FlashCopy | `{}` |
+| `POST /rest/stopfcmap/<id>` | Остановить FlashCopy | `{}` |
+| `POST /rest/rmfcmap/<id>` | Удалить FlashCopy | `force: true` |
+
+### Коды ошибок IBM FlashSystem
+
+| Код | Описание | Обработка |
+|-----|----------|-----------|
+| `CMMVC5701E` | Объект занят | Retry 5 раз, пауза 1с |
+| `CMMVC5750E` | Не найден | Игнорировать (idempotent) |
+| `CMMVC5840E` | Том подключён/в FlashCopy | Сначала отключить |
+| `CMMVC5842E` | Объект не существует | Игнорировать (idempotent) |
+| `CMMVC5897E` | FlashCopy не удалён | Игнорировать |
+| `CMMVC5902E` | Уже подготовлен | Получить существующий ID |
+| `CMMVC5906E` | В состоянии preparing | Retry 5 раз, пауза 1с |
+| `CMMVC5916E` | Не активен | Игнорировать |
+| `CMMVC5951E` | Уже остановлен | Игнорировать |
+| `CMMVC6035E` | Уже существует | Игнорировать (idempotent) |
+| `CMMVC6374E` | Идентичный маппинг | Получить существующий ID |
+| `CMMVC6432E` | Хост не существует | Создать хост |
+| `CMMVC6470E` | Целевой том занят | Retry 5 раз, пауза 1с |
+| `CMMVC9055E` | Есть зависимые маппинги | Удалить зависимости |
+| `ClusterCrendentialsInvalid` | Неверные учетные данные | Проверить логин/пароль |
+
+### Параметр copyrate для FlashCopy
+
+| Значение | Описание | Использование |
+|----------|----------|---------------|
+| `0` | Copy-on-write (без немедленного копирования) | Снапшоты |
+| `1-100` | Фоновое копирование | Клоны |
+| `100-150` | Быстрое копирование | Быстрые клоны/восстановление |
+
+### Workflow'и
+
+#### Создание тома
+1. `POST /rest/mkvolume` → создать том
+2. `POST /rest/mkvdiskhostmap/<id>` → подключить к хосту
+3. Сканирование SCSI: `echo "- - -" > /sys/class/scsi_host/hostX/scan`
+4. Устройство появляется как `/dev/mapper/3<vdisk_UID>` (нижний регистр)
+
+#### Удаление тома
+1. `POST /rest/stopfcmap/<id>` → остановить FlashCopy
+2. `POST /rest/rmfcmap/<id>` → удалить FlashCopy
+3. `POST /rest/rmvdiskhostmap/<id>` → отключить от хоста
+4. `multipath -f <device>` → удалить multipath
+5. `POST /rest/rmvdisk/<id>` → удалить том
+
+#### Создание снапшота
+1. `POST /rest/mkvolume` → создать целевой том
+2. `POST /rest/mkfcmap` → создать FlashCopy (copyrate: 0)
+3. `POST /rest/prestartfcmap/<id>` → подготовить
+4. `POST /rest/startfcmap/<id>` → запустить
+
+#### Клонирование
+1. `POST /rest/mkvolume` → создать целевой том
+2. `POST /rest/mkfcmap` → создать FlashCopy (copyrate: 100-150)
+3. `POST /rest/prestartfcmap/<id>` → подготовить
+4. `POST /rest/startfcmap/<id>` → запустить
+5. Дождаться `idle_or_copied`
+6. `POST /rest/rmfcmap/<id>` → удалить (тома независимы)
+
+### Рекомендации
+
+1. Всегда использовать `thin: true` для томов со снапшотами
+2. Использовать `bytes: true` для получения размеров в байтах
+3. Обрабатывать пустые ответы: API может вернуть `{}` при отсутствии результатов
+4. Проверять тип ответа: `ref()` для определения array/hash/string
+5. Retry при "busy" ошибках: `CMMVC5701E`, `CMMVC5906E`, `CMMVC6470E`
+6. Игнорировать "not found" для idempotent операций
+8. Использовать `force: true` для операций очистки
+9. Ждать появления устройства до 30 секунд после маппинга
+10. Кешировать токены до HTTP 401/403
 

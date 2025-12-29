@@ -25,14 +25,14 @@ sub init {
 # Simple logging with sprintf-style formatting
 # Usage: log_debug($class, $scfg, "format string", @args)
 #        log_info($class, $scfg, "format string", @args)
-#        log_warn($class, "format string", @args)
-#        log_error($class, "format string", @args)
+#        log_warn($class, $scfg, "format string", @args)
+#        log_error($class, $scfg, "format string", @args)
 #
 # Examples:
 #   log_debug($class, $scfg, "API request: %s %s", $method, $endpoint)
 #   log_info($class, $scfg, "Volume %s activated", $volname)
-#   log_warn($class, "Retry attempt %d", $attempt)
-#   log_error($class, "Failed to connect: %s", $error)
+#   log_warn($class, $scfg, "Retry attempt %d", $attempt)
+#   log_error($class, $scfg, "Failed to connect: %s", $error)
 
 sub log_debug {
     my ($class, $scfg, $format, @args) = @_;
@@ -47,15 +47,15 @@ sub log_info {
 }
 
 sub log_warn {
-    my ($class, $format, @args) = @_;
+    my ($class, $scfg, $format, @args) = @_;
     my $message = @args ? sprintf($format, @args) : $format;
-    return _log('warn', $message);
+    return _log('warn', $message, $scfg);
 }
 
 sub log_error {
-    my ($class, $format, @args) = @_;
+    my ($class, $scfg, $format, @args) = @_;
     my $message = @args ? sprintf($format, @args) : $format;
-    return _log('error', $message);
+    return _log('error', $message, $scfg);
 }
 
 # Legacy API for backward compatibility (does nothing with context)
@@ -107,6 +107,9 @@ sub _get_debug_level {
 
 sub _should_log {
     my ($level, $scfg) = @_;
+
+    # Check quiet flag - disables all logging except errors/warnings
+    return 0 if $scfg && $scfg->{_quiet} && $level !~ /^(error|warn)$/;
 
     # Errors and warnings always log
     return 1 if $level =~ /^(error|warn)$/;

@@ -246,7 +246,7 @@ sub _save_rollback_state {
     my $path = _get_rollback_state_path($class, $volname);
     eval { file_set_contents($path, encode_json($state), 0600) };
     if ($@) {
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class,
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, undef,
             "Failed to save rollback state (volname=%s, error=%s)", $volname, $@);
     }
 
@@ -273,7 +273,7 @@ sub _clear_rollback_state {
 
     my $path = _get_rollback_state_path($class, $volname);
     if (-f $path) {
-        unlink($path) or PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class,
+        unlink($path) or PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, undef,
             "Failed to clear rollback state (volname=%s, error=%s)", $volname, $!);
     }
 
@@ -382,7 +382,7 @@ sub _authenticate {
             $error_msg = "Authentication headers missing or invalid (plugin bug)";
         }
 
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class,
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg,
             "Authentication failed (storeid=%s, endpoint=/auth, status=%s, duration=%dms)",
             $storeid, $response->status_line, int($duration));
 
@@ -397,7 +397,7 @@ sub _authenticate {
         my $data = eval { decode_json($content) };
         if ($@) {
             my $duration = (time - $start_time) * 1000;
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class,
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg,
                 "Failed to parse authentication response (storeid=%s, endpoint=/auth, error=%s, duration=%dms)",
                 $storeid, $@, int($duration));
             die "Failed to parse authentication response: $@\n";
@@ -473,7 +473,7 @@ sub _api_request {
         my $content = $response->decoded_content || '';
 
         if ($status_code == 401 || $status_code == 403 || $content =~ /InvalidToken/i) {
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class,
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
                 "Token expired, re-authenticating (storeid=%s, endpoint=%s, status=%d, attempt=%d)",
                 $storeid, $endpoint, $status_code, $attempts + 1);
 
@@ -493,7 +493,7 @@ sub _api_request {
     # Check if we exhausted retries
     if ($attempts > $max_retries) {
         my $duration = (time - $start_time) * 1000;
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class,
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg,
             "API request failed after %d authentication retries (storeid=%s, endpoint=%s, duration=%dms)",
             $max_retries, $storeid, $endpoint, int($duration));
         die "API request failed (endpoint=$endpoint) after $max_retries authentication retries\n";
@@ -505,7 +505,7 @@ sub _api_request {
         my $content = $response->decoded_content;
         my $duration = (time - $start_time) * 1000;
 
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class,
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg,
             "API request failed (storeid=%s, endpoint=%s, method=%s, status=%s, duration=%dms)",
             $storeid, $endpoint, $method, $status, int($duration));
         die "API request failed (endpoint=$endpoint, method=$method): $status - $content\n";

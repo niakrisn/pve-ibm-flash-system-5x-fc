@@ -11,12 +11,16 @@ use Exporter 'import';
 our @EXPORT_OK = qw(setup);
 
 # Add plugin paths to @INC
-use lib 'PVE/Storage/Custom', 'PVE/Storage/Custom/IBMFlashSystem';
+# Note: Must include '.' for relative paths to work
+use lib '.', 't/integration/lib', 't/unit/lib', 'PVE/Storage/Custom', 'PVE/Storage/Custom/IBMFlashSystem';
 
 # Load plugin modules
 use PVE::Storage::Custom::IBMFlashSystem::Client;
 use PVE::Storage::Custom::IBMFlashSystem::Logger;
 use PVE::Tools qw(file_get_contents);
+
+# Load test helpers
+use VMHelpers;
 
 # ============================================================================
 # Public API
@@ -87,11 +91,20 @@ sub setup {
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
         "Integration test environment setup complete (storeid=%s)", $storeid);
 
-    return bless {
+    # Create env object first
+    my $env = bless {
         scfg    => $scfg,
         storeid => $storeid,
         token   => $token,
     }, $class;
+
+    # Clean up orphan FC devices from previous test runs
+    # This ensures tests start with a clean slate
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
+        "Cleaning up orphan FC devices (storeid=%s)", $storeid);
+    VMHelpers::cleanup_orphan_fc_devices($env);
+
+    return $env;
 }
 
 # Generate unique volume name for testing

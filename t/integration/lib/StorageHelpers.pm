@@ -9,7 +9,7 @@ use warnings;
 use Exporter 'import';
 use JSON;
 
-our @EXPORT_OK = qw(volume_exists cleanup_volume get_volume_info get_host_mappings get_flashcopy_mappings);
+our @EXPORT_OK = qw(volume_exists volume_exists_by_wwn cleanup_volume get_volume_info get_volume_uid get_host_mappings get_flashcopy_mappings volume_is_accessible);
 
 # Add plugin paths
 use lib 'PVE/Storage/Custom', 'PVE/Storage/Custom/IBMFlashSystem';
@@ -61,6 +61,83 @@ sub get_volume_info {
     };
 }
 
+# Get volume UID (WWN) for device path construction
+# Returns: string with vdisk_UID (WWN) or undef
+sub get_volume_uid {
+    my ($env, $volname) = @_;
+
+    return undef unless $env && $volname;
+
+    # Use the plugin's internal _get_vdisk_uid method from Common.pm
+    my $result = eval {
+        PVE::Storage::Custom::IBMFlashSystem::Common::_get_vdisk_uid(
+            'PVE::Storage::Custom::IBMFlashSystem',
+            $env->scfg,
+            $volname,
+            $env->storeid,
+        );
+    };
+
+    if ($@) {
+        warn "Error getting volume UID for $volname: $@";
+        return undef;
+    }
+
+    return $result;
+}
+
+# Check if volume exists on storage by WWN
+# Returns: 1 if volume exists, 0 otherwise
+sub volume_exists_by_wwn {
+    my ($env, $wwn) = @_;
+
+    return 0 unless $env && $wwn;
+
+    # Query storage for volume with this UID/WWN
+    my $result = eval {
+        PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
+            'PVE::Storage::Custom::IBMFlashSystem',
+            $env->scfg,
+            $env->storeid,
+            'POST',
+            '/lsvdisk',
+            { filtervalue => "vdisk_UID=$wwn" },
+        );
+    };
+
+    return 0 if $@ || !$result;
+
+    # Check if we got any results
+    if (ref($result) eq 'ARRAY') {
+        return scalar(@$result) > 0;
+    } elsif (ref($result) eq 'HASH') {
+        # Single volume returned
+        my @keys = keys %$result;
+        return @keys > 0;
+    }
+
+    return 0;
+}
+
+# Check if a volume is accessible on the storage
+# Returns: 1 if accessible, 0 otherwise
+sub volume_is_accessible {
+    my ($env, $volname) = @_;
+
+    return 0 unless $env && $volname;
+
+    my $info = eval {
+        PVE::Storage::Custom::IBMFlashSystem::volume_size_info(
+            'PVE::Storage::Custom::IBMFlashSystem',
+            $env->scfg,
+            $env->storeid,
+            $volname,
+        );
+    };
+
+    return $@ ? 0 : 1;
+}
+
 # Get host mappings for a volume
 # Returns: arrayref of mapping objects
 sub get_host_mappings {
@@ -82,6 +159,9 @@ sub get_host_mappings {
     if (ref($result) eq 'ARRAY') {
         return $result;
     } elsif (ref($result) eq 'HASH') {
+        # Check for empty hash (no mappings) vs single mapping object
+        my @keys = keys %$result;
+        return [] if @keys == 0;
         return [$result];
     }
     return [];
