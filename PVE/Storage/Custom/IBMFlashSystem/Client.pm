@@ -127,8 +127,7 @@ sub on_update_hook {
 
                 # Verify new password
                 eval {
-                    $full_scfg->{storage} = $storeid;
-                    PVE::Storage::Custom::IBMFlashSystem::Client::authenticate($class, $full_scfg);
+                    PVE::Storage::Custom::IBMFlashSystem::Client::authenticate($class, $full_scfg, $storeid);
                 };
                 if ($@) {
                     # Verification failed - remove password

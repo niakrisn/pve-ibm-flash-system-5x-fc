@@ -113,11 +113,11 @@ scp t/unit/volume/*.t root@10.4.0.122:/root/pve-ibm-flash-system-5x-fc/t/unit/vo
 
 ## 2. Мониторинг и Состояние
 
-### `activate_storage($storeid, $scfg, $cache)`
+### `activate_storage($class, $storeid, $scfg, $cache)`
 *   **Действие**: Проверка связи с API СХД.
 *   **Критическое поведение**: Должен выполнять проверочный запрос (например, `GET /lssystem`). Если токен истек (HTTP 403 / InvalidToken), метод обязан выполнить ревалидацию. Если СХД недоступна — вызвать `die`.
 
-### `status($storeid, $scfg, $cache)`
+### `status($class, $storeid, $scfg, $cache)`
 *   **Действие**: Возврат объема пула.
 *   **Критическое поведение**: Запрашивать данные через `POST /rest/lsmdiskgrp`. Возвращать массив `($total, $free, $used, 1)` строго в **байтах**.
 
@@ -146,7 +146,7 @@ scp t/unit/volume/*.t root@10.4.0.122:/root/pve-ibm-flash-system-5x-fc/t/unit/vo
 
 ---
 
-## 4. Доступ к данные и транспорт (Activation)
+## 4. Доступ к данным и транспорт (Activation)
 
 ### `path($class, $scfg, $volname, $storeid, $snapname)`
 *   **Действие**: Возвращает путь к блочному устройству.
@@ -155,7 +155,7 @@ scp t/unit/volume/*.t root@10.4.0.122:/root/pve-ibm-flash-system-5x-fc/t/unit/vo
     2. Построить строку пути: `/dev/mapper/3<vdisk_UID}` (UID в нижнем регистре).
     3. **Важно**: Метод не должен проверять наличие файла в ОС, он только возвращает строку «где диск должен быть».
 
-### `activate_volume($class, $storeid, $scfg, $volname, $snapname, $cache, $hints = undef)`
+### `activate_volume($class, $storeid, $scfg, $volname, $snapname, $cache)`
 *   **Действие**: Подключение LUN к хосту.
 *   **Критическое поведение (Discovery Loop)**:
     1. Выполнить `mkvdiskhostmap`.
@@ -168,7 +168,7 @@ scp t/unit/volume/*.t root@10.4.0.122:/root/pve-ibm-flash-system-5x-fc/t/unit/vo
 *   **Действие**: Отключение LUN.
 *   **Критическое поведение**: Сначала `multipath -f`, затем удаление путей в `/sys/block/sdX/device/delete`, и только в конце — API вызов `rmvdiskhostmap`.
 
-### `qemu_blockdev_options($class, $scfg, $storeid, $volname, $snapname, $vmid)`
+### `qemu_blockdev_options($class, $scfg, $storeid, $volname, $machine_version, $options)`
 *   **Действие**: Опции для QEMU.
 *   **Требование**: Всегда возвращать `{ driver => 'host_device', filename => $path }`.
 

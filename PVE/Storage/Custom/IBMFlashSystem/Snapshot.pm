@@ -22,22 +22,22 @@ sub _get_vdisk_id { return PVE::Storage::Custom::IBMFlashSystem::Common::_get_vd
 # ============================================================================
 
 sub create_snapshot {
-    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
     return _volume_snapshot($class, $scfg, $storeid, $volname, $snapname);
 }
 
 sub rollback_snapshot {
-    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
     return _volume_snapshot_rollback($class, $scfg, $storeid, $volname, $snapname);
 }
 
 sub delete_snapshot {
-    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
     return _volume_snapshot_delete($class, $scfg, $storeid, $volname, $snapname);
 }
 
 sub has_snapshot {
-    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
     return _volume_has_snapshot($class, $scfg, $storeid, $volname, $snapname);
 }
 
@@ -167,10 +167,6 @@ sub _volume_snapshot {
     my $snapshot_name = _snapshot_name($class, $volname, $snapname);
     my $pool_name = $scfg->{pool} or die "Pool not configured\n";
 
-    # Sanitize snapshot name for FlashCopy mapping name
-    my $safe_snapname = $snapname;
-    $safe_snapname =~ s/[^a-zA-Z0-9._-]/_/g;
-
     # Get source volume size - query by name, capacity is in bytes from API
     my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/lsvdisk/$volname", { bytes => JSON::true });
     my $source_info = ref($result) eq 'ARRAY' ? $result->[0] : $result;
@@ -198,14 +194,13 @@ sub _volume_snapshot {
 
     # Step 2: Create FlashCopy mapping using volume names (not IDs)
     # copyrate: 0 = copy-on-write (snapshot mode), data copied only on change
+    # Note: Not specifying 'name' parameter - let IBM auto-generate to avoid length issues
     my $fcmap_id;
-    my $fcmap_name = "map_${volname}_to_${safe_snapname}";
     eval {
         my $fcmap_result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/mkfcmap', {
             source => $volname,
             target => $snapshot_name,
             copyrate => 0,
-            name => $fcmap_name,
         });
 
         # Debug: log the response

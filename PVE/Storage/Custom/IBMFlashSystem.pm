@@ -197,9 +197,9 @@ sub alloc_image {
 }
 
 sub clone_image {
-    my ($class, $scfg, $storeid, $volname, $vmid, $snapname) = @_;
+    my ($class, $storeid, $scfg, $volname, $vmid, $snapname) = @_;
     return PVE::Storage::Custom::IBMFlashSystem::Volume::clone_volume(
-        $class, $scfg, $storeid, $volname, $vmid
+        $class, $storeid, $scfg, $volname, $vmid
     );
 }
 
@@ -219,16 +219,15 @@ sub template_image {
 
 sub volume_size_info {
     my ($class, $scfg, $storeid, $volname, $timeout) = @_;
-    $scfg->{storage} = $storeid;  # Set before calling Volume method
     return PVE::Storage::Custom::IBMFlashSystem::Volume::get_volume_size(
-        $class, $scfg, $volname
+        $class, $scfg, $volname, $storeid
     );
 }
 
 sub volume_resize {
-    my ($class, $scfg, $storeid, $volname, $size, $running) = @_;
+    my ($class, $storeid, $scfg, $volname, $size, $running) = @_;
     return PVE::Storage::Custom::IBMFlashSystem::Volume::resize_volume(
-        $class, $scfg, $storeid, $volname, $size
+        $class, $storeid, $scfg, $volname, $size
     );
 }
 
@@ -262,8 +261,6 @@ sub deactivate_volume {
 
 sub filesystem_path {
     my ($class, $scfg, $volname, $snapname) = @_;
-    # $scfg->{storage} should already be set by Proxmox before calling this method
-    # If not set, we cannot proceed - this indicates a Proxmox bug
     return PVE::Storage::Custom::IBMFlashSystem::Volume::get_filesystem_path(
         $class, $scfg, $volname, $snapname
     );
@@ -271,8 +268,6 @@ sub filesystem_path {
 
 sub path {
     my ($class, $scfg, $volname, $storeid, $snapname) = @_;
-    # Ensure storeid is in scfg before passing to Volume module
-    $scfg->{storage} = $storeid;
     return PVE::Storage::Custom::IBMFlashSystem::Volume::get_volume_path(
         $class, $scfg, $volname, $storeid, $snapname
     );
@@ -297,30 +292,30 @@ sub deactivate_storage {
 # ============================================================================
 
 sub volume_snapshot {
-    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
     return PVE::Storage::Custom::IBMFlashSystem::Snapshot::create_snapshot(
-        $class, $scfg, $storeid, $volname, $snapname
+        $class, $storeid, $scfg, $volname, $snapname
     );
 }
 
 sub volume_snapshot_rollback {
-    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
     return PVE::Storage::Custom::IBMFlashSystem::Snapshot::rollback_snapshot(
-        $class, $scfg, $storeid, $volname, $snapname
+        $class, $storeid, $scfg, $volname, $snapname
     );
 }
 
 sub volume_snapshot_delete {
-    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
     return PVE::Storage::Custom::IBMFlashSystem::Snapshot::delete_snapshot(
-        $class, $scfg, $storeid, $volname, $snapname
+        $class, $storeid, $scfg, $volname, $snapname
     );
 }
 
 sub volume_has_snapshot {
-    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
     return PVE::Storage::Custom::IBMFlashSystem::Snapshot::has_snapshot(
-        $class, $scfg, $storeid, $volname, $snapname
+        $class, $storeid, $scfg, $volname, $snapname
     );
 }
 

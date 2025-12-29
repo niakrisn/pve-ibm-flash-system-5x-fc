@@ -40,7 +40,7 @@ sub allocate_volume {
 }
 
 sub clone_volume {
-    my ($class, $scfg, $storeid, $source_volname, $target_vmid) = @_;
+    my ($class, $storeid, $scfg, $source_volname, $target_vmid) = @_;
     return _clone_volume($class, $scfg, $storeid, $source_volname, $target_vmid);
 }
 
@@ -61,7 +61,7 @@ sub get_volume_size {
 }
 
 sub resize_volume {
-    my ($class, $scfg, $storeid, $volname, $size_kb) = @_;
+    my ($class, $storeid, $scfg, $volname, $size_kb) = @_;
     return _volume_resize($class, $scfg, $storeid, $volname, $size_kb);
 }
 
@@ -387,7 +387,8 @@ sub _volume_size_info {
         $vdisk_info = $result;
     }
 
-    die "Volume '$volname' not found\n" unless $vdisk_info;
+    # API returns empty hash {} for non-existent volumes
+    die "Volume '$volname' not found\n" unless ref($vdisk_info) eq 'HASH' && keys %$vdisk_info > 0;
 
     my $size_bytes = $vdisk_info->{capacity} || 0;
 
@@ -919,10 +920,6 @@ sub _convert_uid_to_mpath_format {
 sub _remove_multipath_device {
     my ($class, $mpath) = @_;
 
-    # Remove '3' prefix if present to get raw UID
-    my $uid = $mpath;
-    $uid =~ s/^3//;
-
     my $mpath_device = "/dev/mapper/$mpath";
 
     if (-e $mpath_device) {
@@ -1094,7 +1091,7 @@ sub _find_free_diskname {
 
     # Use PVE::Storage::Plugin's find_free_diskname
     # For block storage, we don't add file extensions
-    return PVE::Storage::Plugin->find_free_diskname($class, $storeid, $scfg, $vmid, $fmt);
+    return $class->find_free_diskname($storeid, $scfg, $vmid, $fmt);
 }
 
 # Check multipathd runtime configuration
