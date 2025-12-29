@@ -18,31 +18,7 @@ use PVE::Storage::Custom::IBMFlashSystem::Common;
 sub _get_vdisk_id { return PVE::Storage::Custom::IBMFlashSystem::Common::_get_vdisk_id(@_); }
 
 # ============================================================================
-# Public API
-# ============================================================================
-
-sub create_snapshot {
-    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
-    return _volume_snapshot($class, $scfg, $storeid, $volname, $snapname);
-}
-
-sub rollback_snapshot {
-    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
-    return _volume_snapshot_rollback($class, $scfg, $storeid, $volname, $snapname);
-}
-
-sub delete_snapshot {
-    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
-    return _volume_snapshot_delete($class, $scfg, $storeid, $volname, $snapname);
-}
-
-sub has_snapshot {
-    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
-    return _volume_has_snapshot($class, $scfg, $storeid, $volname, $snapname);
-}
-
-# ============================================================================
-# Internal Functions
+# Snapshot Operations
 # ============================================================================
 
 # Get snapshot vdisk name
@@ -167,8 +143,8 @@ sub _volume_has_snapshot {
 }
 
 # Create a snapshot using FlashCopy
-sub _volume_snapshot {
-    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+sub volume_snapshot {
+    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER volume_snapshot (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname);
 
@@ -319,7 +295,7 @@ sub _volume_snapshot {
 # 5. Remove the temporary reverse mapping
 # 6. Recreate all original mappings in correct direction: disk -> snapshots
 # 7. Start all mappings
-sub _volume_snapshot_rollback {
+sub volume_snapshot_rollback {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
 
     # PRE-OPERATION STATE CHECK: Clean up any orphaned state from previous runs
@@ -570,7 +546,7 @@ sub _volume_snapshot_rollback {
 }
 
 # Delete a snapshot with idempotency (success if already deleted)
-sub _volume_snapshot_delete {
+sub volume_snapshot_delete {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER volume_snapshot_delete (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname);

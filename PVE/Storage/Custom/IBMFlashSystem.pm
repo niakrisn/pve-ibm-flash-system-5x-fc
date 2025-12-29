@@ -188,60 +188,50 @@ sub alloc_image {
         $name = $class->find_free_diskname($storeid, $scfg, $vmid, $fmt);
     }
 
-    # Proxmox passes size in kilobytes, convert to bytes
-    my $size_bytes = $size * 1024;
-
-    return PVE::Storage::Custom::IBMFlashSystem::Volume::allocate_volume(
-        $class, $scfg, $storeid, $vmid, $name, $size_bytes
+    return PVE::Storage::Custom::IBMFlashSystem::Volume::alloc_image(
+        $class, $storeid, $scfg, $vmid, $fmt, $name, $size
     );
 }
 
 sub clone_image {
     my ($class, $storeid, $scfg, $volname, $vmid, $snapname) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Volume::clone_volume(
-        $class, $storeid, $scfg, $volname, $vmid
+    return PVE::Storage::Custom::IBMFlashSystem::Volume::clone_image(
+        $class, $scfg, $storeid, $volname, $vmid, $snapname
     );
 }
 
 sub create_base {
     my ($class, $storeid, $scfg, $volname) = @_;
     return PVE::Storage::Custom::IBMFlashSystem::Volume::create_base(
-        $class, $scfg, $storeid, $volname
-    );
-}
-
-sub template_image {
-    my ($class, $storeid, $scfg, $volname, $vmid) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Volume::make_template(
-        $class, $scfg, $storeid, $volname
+        $class, $storeid, $scfg, $volname
     );
 }
 
 sub volume_size_info {
     my ($class, $scfg, $storeid, $volname, $timeout) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Volume::get_volume_size(
-        $class, $scfg, $volname, $storeid
+    return PVE::Storage::Custom::IBMFlashSystem::Volume::volume_size_info(
+        $class, $scfg, $storeid, $volname, $timeout
     );
 }
 
 sub volume_resize {
     my ($class, $storeid, $scfg, $volname, $size, $running) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Volume::resize_volume(
-        $class, $storeid, $scfg, $volname, $size
+    return PVE::Storage::Custom::IBMFlashSystem::Volume::volume_resize(
+        $class, $scfg, $storeid, $volname, $size, $running
     );
 }
 
 sub list_images {
     my ($class, $storeid, $scfg, $vmid, $vollist, $cache) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Volume::list_volumes(
-        $class, $scfg, $storeid, $vmid, $vollist
+    return PVE::Storage::Custom::IBMFlashSystem::Volume::list_images(
+        $class, $storeid, $scfg, $vmid, $vollist
     );
 }
 
 sub free_image {
     my ($class, $storeid, $scfg, $volname, $isBase) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Volume::delete_volume(
-        $class, $scfg, $storeid, $volname, $isBase
+    return PVE::Storage::Custom::IBMFlashSystem::Volume::free_image(
+        $class, $storeid, $scfg, $volname, $isBase
     );
 }
 
@@ -261,7 +251,7 @@ sub deactivate_volume {
 
 sub path {
     my ($class, $scfg, $volname, $storeid, $snapname) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Volume::get_volume_path(
+    return PVE::Storage::Custom::IBMFlashSystem::Volume::_path(
         $class, $scfg, $volname, $storeid, $snapname
     );
 }
@@ -269,14 +259,14 @@ sub path {
 sub activate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
     return PVE::Storage::Custom::IBMFlashSystem::Volume::activate_storage(
-        $class, $storeid, $scfg
+        $class, $storeid, $scfg, $cache
     );
 }
 
 sub deactivate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
     return PVE::Storage::Custom::IBMFlashSystem::Volume::deactivate_storage(
-        $class, $storeid, $scfg
+        $class, $storeid, $scfg, $cache
     );
 }
 
@@ -285,30 +275,30 @@ sub deactivate_storage {
 # ============================================================================
 
 sub volume_snapshot {
-    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Snapshot::create_snapshot(
-        $class, $storeid, $scfg, $volname, $snapname
+    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+    return PVE::Storage::Custom::IBMFlashSystem::Snapshot::volume_snapshot(
+        $class, $scfg, $storeid, $volname, $snapname
     );
 }
 
 sub volume_snapshot_rollback {
-    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Snapshot::rollback_snapshot(
-        $class, $storeid, $scfg, $volname, $snapname
+    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+    return PVE::Storage::Custom::IBMFlashSystem::Snapshot::volume_snapshot_rollback(
+        $class, $scfg, $storeid, $volname, $snapname
     );
 }
 
 sub volume_snapshot_delete {
-    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Snapshot::delete_snapshot(
-        $class, $storeid, $scfg, $volname, $snapname
+    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+    return PVE::Storage::Custom::IBMFlashSystem::Snapshot::volume_snapshot_delete(
+        $class, $scfg, $storeid, $volname, $snapname
     );
 }
 
 sub volume_has_snapshot {
-    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Snapshot::has_snapshot(
-        $class, $storeid, $scfg, $volname, $snapname
+    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+    return PVE::Storage::Custom::IBMFlashSystem::Snapshot::_volume_has_snapshot(
+        $class, $scfg, $storeid, $volname, $snapname
     );
 }
 
