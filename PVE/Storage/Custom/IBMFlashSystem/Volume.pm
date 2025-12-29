@@ -7,6 +7,7 @@ use strict;
 use warnings;
 use JSON;
 use POSIX qw(strtod);
+use Fcntl qw(O_WRONLY);
 use PVE::Tools qw(run_command);
 
 use PVE::Storage::Custom::IBMFlashSystem::Client;
@@ -262,7 +263,7 @@ sub _clone_volume {
             });
         };
         if ($@) {
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, "Failed to create target volume for clone (storeid=%s, target=%s, error=%s)", $storeid, $new_name, $@);
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, "Failed to create target volume for clone (storeid=%s, endpoint=/rest/mkvolume, target=%s, error=%s)", $storeid, $new_name, $@);
             die "Failed to create target volume for clone: $@\n";
         }
 
@@ -276,7 +277,7 @@ sub _clone_volume {
             });
         };
         if ($@) {
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, "Failed to create FlashCopy mapping for clone (storeid=%s, source=%s, target=%s, error=%s)", $storeid, $source_volname, $new_name, $@);
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, "Failed to create FlashCopy mapping for clone (storeid=%s, endpoint=/rest/mkfcmap, source=%s, target=%s, error=%s)", $storeid, $source_volname, $new_name, $@);
             # Clean up target volume if FlashCopy fails
             eval {
                 my $target_id = _get_vdisk_id($class, $scfg, $new_name, $storeid);
@@ -301,7 +302,7 @@ sub _clone_volume {
             PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/startfcmap/$fcmap_id", {});
         };
         if ($@) {
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, "Failed to start FlashCopy mapping (storeid=%s, fcmap_id=%s, error=%s)", $storeid, $fcmap_id, $@);
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, "Failed to start FlashCopy mapping (storeid=%s, endpoint=/rest/prestartfcmap|/rest/startfcmap, fcmap_id=%s, error=%s)", $storeid, $fcmap_id, $@);
         }
 
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Linked clone created successfully (storeid=%s, source=%s, target=%s, fcmap_id=%s)", $storeid, $source_volname, $new_name, $fcmap_id);
@@ -606,29 +607,100 @@ sub _activate_volume {
     # Get volume ID
     my $vdisk_id = _get_vdisk_id($class, $scfg, $volname, $storeid);
 
-    # Get next available SCSI LUN for this host
+    # Get vdisk UID early (needed for device check)
+    my $vdisk_uid = _get_vdisk_uid($class, $scfg, $volname, $storeid);
+
+    # STEP 1: Get ACTUAL state from storage array - is this volume mapped to our host?
+    my $is_mapped_on_array = 0;
+    my $existing_lun = 0;
+    eval {
+        my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/lsvdiskhostmap/$vdisk_id", {});
+        if (ref($result) eq 'ARRAY') {
+            for my $map (@$result) {
+                if ($map->{host} eq $hostname) {
+                    $is_mapped_on_array = 1;
+                    $existing_lun = $map->{SCSI_id} || $map->{scsi} || 0;
+                    last;
+                }
+            }
+        }
+    };
+    if ($@) {
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg,
+            "Could not query mapping state (error=%s), assuming not mapped", $@);
+    }
+
+    # STEP 2: Check ACTUAL state on local host - does device exist?
+    my $mpath = _convert_uid_to_mpath_format($class, $vdisk_uid);
+    my $device_exists = -f "/dev/mapper/$mpath";
+
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg,
+        "Activation state check: array_mapped=%s, device_exists=%s, existing_lun=%s",
+        $is_mapped_on_array ? 'yes' : 'no',
+        $device_exists ? 'yes' : 'no',
+        $existing_lun || 'none');
+
+    # STEP 3: Decide what to do based on ACTUAL state
+    if ($is_mapped_on_array && $device_exists) {
+        # Already mapped and device exists - we're done (idempotent)
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
+            "Volume already active (storeid=%s, volname=%s)", $storeid, $volname);
+        return;
+    }
+
+    if (!$is_mapped_on_array && $device_exists) {
+        # Orphaned device! Mapping was removed from array but device still exists on host
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
+            "Found orphaned device (vdisk_uid=%s), cleaning up", $vdisk_uid);
+        _remove_multipath_device($class, $vdisk_uid);
+        _remove_scsi_devices($class, $vdisk_uid);
+        $device_exists = 0;  # Mark as cleaned up
+    }
+
+    if ($is_mapped_on_array && !$device_exists) {
+        # Orphaned mapping! Device doesn't exist but mapping on array says it should
+        # Remove orphaned mapping before creating new one
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
+            "Found orphaned mapping (vdisk_id=%s), removing before re-activation", $vdisk_id);
+        eval {
+            PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/rmvdiskhostmap/$vdisk_id", {
+                host => $hostname
+            });
+        };
+        if ($@) {
+            die "Failed to remove orphaned mapping (endpoint=/rest/rmvdiskhostmap): $@\n";
+        }
+        # FC rescan to clear stale paths
+        _scan_fc_hosts($class);
+    }
+
+    # STEP 4: Create new mapping (either there was none, or we just cleaned up orphaned one)
     my $scsi_lun = _get_available_scsi_lun($class, $scfg, $storeid, $hostname);
 
-    # Map volume to host with explicit SCSI LUN
     eval {
         PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/mkvdiskhostmap/$vdisk_id", {
             host => $hostname,
             scsi => $scsi_lun,
         });
+
+        # Wait for multipath device to appear after FC mapping
+        _wait_for_multipath_device($class, $scfg, $vdisk_uid, 30);
     };
     if ($@) {
-        # CMMVC6374E = mapping already prepared (OK, continue)
-        # CMMVC5840E = object already mapped (OK, continue)
-        unless ($@ =~ /CMMVC6374E|CMMVC5840E|already mapped|already prepared/i) {
-            die "Failed to map volume to host: $@\n";
+        # Activation failed - clean up the mapping we just created
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
+            "Activation failed (endpoint=/rest/mkvdiskhostmap, vdisk_id=%s, error=%s)", $vdisk_id, $@);
+        eval {
+            PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/rmvdiskhostmap/$vdisk_id", {
+                host => $hostname
+            });
+        };
+        if ($@) {
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
+                "Failed to cleanup after activation failure (endpoint=/rest/rmvdiskhostmap, vdisk_id=%s, error=%s)", $vdisk_id, $@);
         }
+        die $@;  # Re-throw original error
     }
-
-    # Get vdisk UID for device path resolution
-    my $vdisk_uid = _get_vdisk_uid($class, $scfg, $volname, $storeid);
-
-    # Wait for multipath device to appear after FC mapping
-    _wait_for_multipath_device($class, $scfg, $vdisk_uid, 30);
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Volume activated (storeid=%s, volname=%s, hostname=%s, vdisk_id=%s, vdisk_uid=%s)", $storeid, $volname, $hostname, $vdisk_id, $vdisk_uid);
 
@@ -641,11 +713,12 @@ sub _deactivate_volume {
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER deactivate_volume (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname // 'undef');
 
-    # Get volume ID
-    my $vdisk_id = eval { _get_vdisk_id($class, $scfg, $volname, $storeid) };
-    return unless $vdisk_id;  # Volume doesn't exist
+    my $hostname = _get_hostname($class);
 
-    # Get vdisk UID for device cleanup
+    # Get volume ID (may fail if volume was already deleted)
+    my $vdisk_id = eval { _get_vdisk_id($class, $scfg, $volname, $storeid) };
+
+    # Get vdisk UID for device cleanup (may fail if volume was deleted)
     my $vdisk_uid = eval { _get_vdisk_uid($class, $scfg, $volname, $storeid) };
 
     # Step 1: Remove local multipath and SCSI devices FIRST
@@ -658,16 +731,56 @@ sub _deactivate_volume {
     }
 
     # Step 2: Remove host mapping on storage array AFTER local cleanup
-    my $hostname = _get_hostname($class);
-    eval {
-        PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/rmvdiskhostmap/$vdisk_id", {
-            host => $hostname
-        });
-    };
-    if ($@) {
-        # Ignore if mapping doesn't exist
-        if ($@ !~ /CMMVC5750E|not found|not mapped/i) {
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, "Failed to remove host mapping (volname=%s, error=%s)", $volname, $@);
+    # IMPORTANT: Try to remove mapping even if volume doesn't exist (orphaned mapping cleanup)
+    if ($vdisk_id) {
+        # Normal case: volume exists, remove mapping by vdisk_id
+        eval {
+            PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/rmvdiskhostmap/$vdisk_id", {
+                host => $hostname
+            });
+        };
+        if ($@) {
+            # Ignore if mapping doesn't exist
+            if ($@ !~ /CMMVC5750E|not found|not mapped/i) {
+                PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, "Failed to remove host mapping (volname=%s, endpoint=/rest/rmvdiskhostmap, error=%s)", $volname, $@);
+            }
+        }
+    } else {
+        # Volume was deleted but may still have orphaned mappings!
+        # Query all mappings for this host and find any matching our volname
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg,
+            "Volume not found, checking for orphaned mappings (volname=%s)", $volname);
+
+        eval {
+            my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/lsvdiskhostmap', {});
+            my $hostmaps = [];
+            if (ref($result) eq 'HASH' && $result->{vdiskhostmap}) {
+                $hostmaps = $result->{vdiskhostmap};
+            } elsif (ref($result) eq 'ARRAY') {
+                $hostmaps = $result;
+            }
+
+            # Find and remove any mappings for this volume on our host
+            for my $map (@$hostmaps) {
+                if ($map->{host} eq $hostname && $map->{name} eq $volname) {
+                    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
+                        "Removing orphaned mapping (volname=%s, vdisk_id=%s)", $volname, $map->{id});
+                    eval {
+                        PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/rmvdiskhostmap/$map->{id}", {
+                            host => $hostname
+                        });
+                    };
+                    if ($@) {
+                        PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
+                            "Failed to remove orphaned mapping (volname=%s, endpoint=/rest/rmvdiskhostmap, vdisk_id=%s, error=%s)",
+                            $volname, $map->{id}, $@);
+                    }
+                }
+            }
+        };
+        if ($@) {
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg,
+                "Failed to query mappings for cleanup (error=%s)", $@);
         }
     }
 
@@ -761,11 +874,18 @@ sub _scan_fc_hosts {
             # fc_host entry format: hostX -> SCSI host is hostX
             my $scsi_host = $entry;
 
+            # Sanitize: only allow alphanumeric and underscore (taint mode safety)
+            if ($scsi_host !~ /\A[\w]+\z/) {
+                next;  # Skip invalid entries
+            }
+
             my $scan_file = "/sys/class/scsi_host/$scsi_host/scan";
             if (-f $scan_file) {
                 eval {
-                    open(my $fh, '>', $scan_file);
-                    print $fh "- - -\n";
+                    # Use sysopen to avoid taint mode issues with open()
+                    sysopen(my $fh, $scan_file, O_WRONLY)
+                        or die "Cannot open $scan_file: $!";
+                    syswrite($fh, "- - -\n");
                     close($fh);
                     $scanned++;
                 };

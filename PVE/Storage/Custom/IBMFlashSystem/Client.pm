@@ -497,7 +497,7 @@ sub _api_request {
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class,
             "API request failed after %d authentication retries (storeid=%s, endpoint=%s, duration=%dms)",
             $max_retries, $storeid, $endpoint, int($duration));
-        die "API request failed after $max_retries authentication retries\n";
+        die "API request failed (endpoint=$endpoint) after $max_retries authentication retries\n";
     }
 
     # Parse response
@@ -509,7 +509,7 @@ sub _api_request {
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class,
             "API request failed (storeid=%s, endpoint=%s, method=%s, status=%s, duration=%dms)",
             $storeid, $endpoint, $method, $status, int($duration));
-        die "API request failed: $status - $content\n";
+        die "API request failed (endpoint=$endpoint, method=$method): $status - $content\n";
     }
 
     my $content = $response->decoded_content;
