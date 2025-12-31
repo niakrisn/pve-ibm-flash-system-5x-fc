@@ -82,6 +82,7 @@ sub volume_has_feature {
         copy => 1,         # Supports copying via clone_image (Full Clone)
         template => 1,     # Supports template conversion
         sparseinit => 1,   # Supports sparse initialization
+        rename => 1,       # Supports volume renaming
     );
 
     my $res = $features{$feature};
@@ -148,20 +149,18 @@ sub properties {
 sub parse_volname {
     my ($class, $volname) = @_;
 
-    # VM/CT disks: vm-<VMID>-disk-<INDEX>
-    if ($volname =~ m/^vm-(\d+)-disk-(\d+)(\.\w+)?$/) {
+    # VM/CT disks: vm-<VMID>-disk-<INDEX> or vm-<VMID>-cloudinit
+    if ($volname =~ m/^vm-(\d+)-(?:disk-\d+|cloudinit)(?:\.\w+)?$/) {
         my $vmid = $1;
-        my $diskid = $2;
-        my $extension = $3 // '';
+        my $extension = $2 // '';
         my $format = $extension eq '.raw' || !$extension ? 'raw' : 'raw';
         return ('images', $volname, $vmid, undef, undef, undef, $format);
     }
 
-    # Template/base disks: base-<VMID>-disk-<INDEX>
-    if ($volname =~ m/^base-(\d+)-disk-(\d+)(\.\w+)?$/) {
+    # Template/base disks: base-<VMID>-disk-<INDEX> or base-<VMID>-cloudinit
+    if ($volname =~ m/^base-(\d+)-(?:disk-\d+|cloudinit)(?:\.\w+)?$/) {
         my $vmid = $1;
-        my $diskid = $2;
-        my $extension = $3 // '';
+        my $extension = $2 // '';
         my $format = $extension eq '.raw' || !$extension ? 'raw' : 'raw';
         return ('images', $volname, $vmid, undef, undef, undef, $format);
     }
@@ -184,7 +183,7 @@ sub find_free_diskname {
 sub volume_is_base {
     my ($class, $scfg, $volname) = @_;
 
-    return ($volname =~ m/^base-\d+-disk-\d+$/) ? 1 : 0;
+    return ($volname =~ m/^base-/) ? 1 : 0;
 }
 
 # ============================================================================
@@ -198,7 +197,6 @@ sub status {
 
 sub alloc_image {
     my ($class, $storeid, $scfg, $vmid, $fmt, $name, $size) = @_;
-
     $fmt = 'raw' if !defined($fmt);
 
     # Generate volume name if not provided
@@ -250,6 +248,13 @@ sub free_image {
     my ($class, $storeid, $scfg, $volname, $isBase) = @_;
     return PVE::Storage::Custom::IBMFlashSystem::Volume::free_image(
         $class, $storeid, $scfg, $volname, $isBase
+    );
+}
+
+sub rename_volume {
+    my ($class, $scfg, $storeid, $source_volname, $target_vmid, $target_volname) = @_;
+    return PVE::Storage::Custom::IBMFlashSystem::Volume::rename_volume(
+        $class, $scfg, $storeid, $source_volname, $target_vmid, $target_volname
     );
 }
 
