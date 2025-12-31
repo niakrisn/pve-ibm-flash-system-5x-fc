@@ -17,6 +17,7 @@ use PVE::Storage::Custom::IBMFlashSystem::Common;
 # Shorthand for common functions
 sub _get_vdisk_id { return PVE::Storage::Custom::IBMFlashSystem::Common::_get_vdisk_id(@_); }
 sub _get_hostname { return PVE::Storage::Custom::IBMFlashSystem::Common::_get_hostname(@_); }
+sub wait_for_vdisk_state { return PVE::Storage::Custom::IBMFlashSystem::Common::wait_for_vdisk_state(@_); }
 
 # ============================================================================
 # Snapshot Operations
@@ -78,20 +79,28 @@ sub _discover_snapshot_volumes {
 sub _get_fcmap_id {
     my ($class, $scfg, $storeid, $source_vol, $target_vol) = @_;
 
-    my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/lsfcmap', {});
+    my $max_attempts = 5;
+    my $attempt = 0;
+    while ($attempt < $max_attempts) {
+        my $result = eval { PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/lsfcmap', {}) };
+        
+        # API returns array directly
+        my $fcmaps = ref($result) eq 'ARRAY' ? $result : [];
 
-    # API returns array directly
-    my $fcmaps = ref($result) eq 'ARRAY' ? $result : [];
-    my $fcmap_id;
-
-    for my $fcmap (@$fcmaps) {
-        if ($fcmap->{source_vdisk_name} eq $source_vol && $fcmap->{target_vdisk_name} eq $target_vol) {
-            $fcmap_id = $fcmap->{id};
-            last;
+        for my $fcmap (@$fcmaps) {
+            if ($fcmap->{source_vdisk_name} eq $source_vol && $fcmap->{target_vdisk_name} eq $target_vol) {
+                return $fcmap->{id};
+            }
+        }
+        
+        $attempt++;
+        if ($attempt < $max_attempts) {
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "FlashCopy mapping $source_vol -> $target_vol not found, retrying in 2s (attempt $attempt/$max_attempts)");
+            sleep(2);
         }
     }
 
-    return $fcmap_id;
+    return undef;
 }
 
 # Remove all FlashCopy mappings where the specified volume is the source
@@ -180,6 +189,11 @@ sub volume_snapshot {
             die "Failed to create snapshot volume: $@\n";
         }
         # Volume exists, continue with FlashCopy mapping
+    }
+
+    # Polling for eventual consistency of target volume
+    unless (wait_for_vdisk_state($class, $scfg, $storeid, $snapshot_name, 'exists')) {
+         die "Snapshot volume '$snapshot_name' was created but is not visible in API after timeout\n";
     }
 
     # Step 2: Create FlashCopy mapping using volume names (not IDs)
@@ -453,25 +467,32 @@ sub volume_snapshot_rollback {
     PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/startfcmap/$reverse_fcmap_id", {});
 
     # Step 5: Wait for restore to start copying before removing the mapping
-    # With copyrate=150, the restore starts immediately and can be removed once active/copying
-    # This is much faster than waiting for full completion
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Waiting for restore to become active (fcmap_id=%s)", $reverse_fcmap_id);
 
-    _wait_for_fcmap_state($class, $scfg, $storeid, $reverse_fcmap_id, ['active', 'copying'], 60);
+    eval {
+        _wait_for_fcmap_state($class, $scfg, $storeid, $reverse_fcmap_id, ['active', 'copying'], 60);
+    };
+    if ($@) {
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg, "Timed out waiting for reverse mapping success: $@");
+        die "Rollback failed during restore phase: $@\n";
+    }
 
     # Step 6: Remove the temporary reverse mapping
-    # Now that copying has started, we can remove the mapping - data continues to copy in background
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Removing temporary reverse mapping (fcmap_id=%s)", $reverse_fcmap_id);
 
     eval {
         PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/stopfcmap/$reverse_fcmap_id", {});
-    };
-    eval {
+        sleep(1);
         PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/rmfcmap/$reverse_fcmap_id", { force => JSON::true });
     };
+    if ($@) {
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg, "Non-fatal error cleaning up reverse mapping: $@");
+    }
 
     # Step 7: Wait for reverse mapping to be completely removed from storage array
-    _wait_for_resource_cleanup($class, $scfg, $storeid, 'fcmap', $reverse_fcmap_id, 60);
+    eval {
+        _wait_for_resource_cleanup($class, $scfg, $storeid, 'fcmap', $reverse_fcmap_id, 30);
+    };
 
     # Update rollback state - restore complete, recreating mappings
     PVE::Storage::Custom::IBMFlashSystem::Client::save_rollback_state($class, $volname, {
@@ -880,7 +901,9 @@ sub _get_volume_fabric_state {
         is_target => scalar(@target_mappings) > 0,
         fcmap_count => scalar(@source_mappings) + scalar(@target_mappings),
         host_mapped => $host_mapped,
-        active_mappings => \@source_mappings,
+        source_mappings => \@source_mappings,
+        target_mappings => \@target_mappings,
+        active_mappings => [@source_mappings, @target_mappings],
     };
 }
 
@@ -898,7 +921,7 @@ sub _reconcile_volume_state {
     if ($state->{is_target}) {
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Found orphaned reverse mapping, cleaning up (volname=%s)", $volname);
 
-        for my $mapping (@{$state->{active_mappings}}) {
+        for my $mapping (@{$state->{target_mappings}}) {
             my $id = $mapping->{id};
             eval {
                 PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/stopfcmap/$id", {});

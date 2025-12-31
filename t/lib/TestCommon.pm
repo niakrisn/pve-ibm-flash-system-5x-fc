@@ -24,6 +24,7 @@ our @EXPORT = qw(
     cleanup_test_volumes
     cleanup_host_orphans
     verify_task_log
+    wait_for_vm_config
 );
 
 my $STOREID = 'fs-01';
@@ -57,6 +58,9 @@ sub run_cmd {
     log_info("Running: $cmd");
     my $output = `$cmd 2>&1`;
     my $exit_code = $? >> 8;
+    if ($exit_code != 0) {
+        log_info("COMMAND FAILED (exit=$exit_code): $output");
+    }
     return ($exit_code, $output);
 }
 
@@ -79,7 +83,16 @@ sub verify_volume_exists {
     my ($scfg, $volname, $size_bytes) = @_;
     my $res = eval { api_request($scfg, 'POST', "/lsvdisk/$volname", { bytes => JSON::true }) };
     if ($@ || !defined $res || (ref($res) eq 'ARRAY' && !@$res) || (ref($res) eq 'HASH' && !keys %$res)) {
-        fail("Volume $volname check failed: " . ($@ || "Not found (empty response)"));
+        my $err = $@ || "Not found (empty response)";
+        diag("Volume $volname check failed: $err");
+        
+        # Dump all volumes to see what's actually there
+        my $all = eval { api_request($scfg, 'POST', "/lsvdisk", {}) };
+        if (ref($all) eq 'ARRAY') {
+            diag("Existing volumes on storage: " . join(', ', map { $_->{name} } @$all));
+        }
+        
+        fail("Volume $volname check failed");
         return 0;
     }
     # Handle both array and single object returns
@@ -268,10 +281,21 @@ sub cleanup_test_volumes {
     }
     
     foreach my $name (@aggressive_names) {
+         # Stop any FC maps involving this name
+         my $fcmaps = eval { api_request($scfg, 'POST', '/lsfcmap', {}) };
+         if (ref($fcmaps) eq 'ARRAY') {
+             foreach my $map (@$fcmaps) {
+                 if ($map->{source_vdisk_name} eq $name || $map->{target_vdisk_name} eq $name) {
+                     eval { api_request($scfg, 'POST', "/stopfcmap/" . $map->{id}, {}); };
+                     eval { api_request($scfg, 'POST', "/rmfcmap/" . $map->{id}, { force => JSON::true }); };
+                 }
+             }
+         }
+         
          eval { api_request($scfg, 'POST', "/rmvdiskhostmap/" . $name, { host => 'pve-01' }); };
          eval { api_request($scfg, 'POST', "/rmvdisk/" . $name, { force => JSON::true }); };
          if ($@) {
-             log_info("Failed to aggressively delete $name: $@");
+             # log_info("Failed to aggressively delete $name: $@") unless $@ =~ /CMMVC5753E/;
          } else {
              log_info("Aggressively deleted potential ghost volume: $name");
          }
@@ -303,6 +327,26 @@ sub get_vmid_status {
         return $1;
     }
     return 'unknown';
+}
+
+# Wait for VM config file to exist and be stable
+# This is needed after operations like rollback that may temporarily affect config
+sub wait_for_vm_config {
+    my ($vmid, $timeout) = @_;
+    $timeout //= 10;
+    
+    my $start = time();
+    while (time() - $start < $timeout) {
+        my ($ret, $out) = run_cmd("qm config $vmid 2>&1");
+        if ($ret == 0 && $out !~ /does not exist/) {
+            log_info("VM $vmid config is stable");
+            return 1;
+        }
+        sleep(1);
+    }
+    
+    log_info("WARNING: VM $vmid config not stable after ${timeout}s");
+    return 0;
 }
 
 1;

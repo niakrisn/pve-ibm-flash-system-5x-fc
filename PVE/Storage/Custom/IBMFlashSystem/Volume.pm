@@ -382,8 +382,8 @@ sub volume_resize {
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER volume_resize (storeid=%s, volname=%s, size=%d)", $storeid, $volname, $size);
 
-    # Proxmox passes size in kilobytes, convert to bytes
-    my $new_size_bytes = $size * 1024;
+    # Proxmox passes size in bytes to volume_resize
+    my $new_size_bytes = $size;
 
     # Get current size from storage array
     my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/lsvdisk/$volname", { bytes => JSON::true });
@@ -535,8 +535,11 @@ sub free_image {
             if ($source eq $volname || $target eq $volname) {
                 my $fcmap_id = $fcmap->{id};
 
-                # Stop the mapping first
+                # Stop the mapping first (ignore errors if already stopped)
                 eval { PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/stopfcmap/$fcmap_id", {}); };
+                
+                # Brief wait for mapping to reach stopped state
+                sleep(1);
 
                 # Remove the mapping with force flag
                 eval {
@@ -847,21 +850,34 @@ sub _remove_multipath_device {
 sub _remove_scsi_devices {
     my ($class, $uid) = @_;
 
-    # Use multipath to find all SCSI paths for this WWN
-    # This is more reliable than vpd_pg80 for FC devices
-    my $mpath = _convert_uid_to_mpath_format($class, $uid);
+    # Find all SCSI devices with this WWN via sysfs
+    # FC devices have wwid files in /sys/block/sdX/device/wwid
     my @devices;
-
-    eval {
-        my $output = `multipath -ll $mpath 2>/dev/null`;
-        if ($output) {
-            # Parse multipath output to find path devices (sdX)
-            # Format: "14:0:2:1 sdd 8:48 failed ..."
-            while ($output =~ /(\d+:\d+:\d+:\d+)\s+(sd\w+)\s/g) {
-                push @devices, $2;
+    
+    # Convert UID to NAA format (naa.60050763...)
+    my $uid_lower = lc($uid);
+    my $naa_wwid = "naa.$uid_lower";
+    
+    # Scan all sd* block devices
+    if (opendir(my $dh, '/sys/block')) {
+        while (my $entry = readdir($dh)) {
+            next unless $entry =~ /^sd[a-z]+$/;
+            
+            my $wwid_file = "/sys/block/$entry/device/wwid";
+            if (-f $wwid_file) {
+                if (open(my $fh, '<', $wwid_file)) {
+                    my $wwid = <$fh>;
+                    close($fh);
+                    chomp($wwid) if $wwid;
+                    
+                    if ($wwid && $wwid eq $naa_wwid) {
+                        push @devices, $entry;
+                    }
+                }
             }
         }
-    };
+        closedir($dh);
+    }
 
     # Delete each SCSI device via sysfs
     for my $dev (@devices) {
