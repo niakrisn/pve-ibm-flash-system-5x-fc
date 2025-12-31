@@ -7,12 +7,14 @@ use strict;
 use warnings;
 use POSIX qw(strtod);
 use PVE::Storage::Plugin;
+use PVE::Tools;
 
 use base qw(PVE::Storage::Plugin);
 
 # Import sub-modules
 use PVE::Storage::Custom::IBMFlashSystem::Logger;
 use PVE::Storage::Custom::IBMFlashSystem::Client;
+use PVE::Storage::Custom::IBMFlashSystem::Common qw(_get_hostname);
 use PVE::Storage::Custom::IBMFlashSystem::Volume;
 use PVE::Storage::Custom::IBMFlashSystem::Snapshot;
 
@@ -71,16 +73,32 @@ sub plugindata {
 sub volume_has_feature {
     my ($class, $scfg, $feature, $storeid, $volname, $snapname, $running) = @_;
 
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "volume_has_feature check: feature=%s, volname=%s", $feature, $volname // 'undef');
+
     # Features supported by IBM FlashSystem
     my %features = (
         snapshot => 1,
-        clone => 1,        # Supports both linked and full clone
-        copy => 1,         # Supports copying via clone_image
+        clone => 0,        # Linked clone disabled to ensure snapshot rollback support
+        copy => 1,         # Supports copying via clone_image (Full Clone)
         template => 1,     # Supports template conversion
         sparseinit => 1,   # Supports sparse initialization
     );
 
-    return $features{$feature} // undef;
+    my $res = $features{$feature};
+    if ($feature eq 'clone') {
+        $res = undef;
+    } elsif ($feature eq 'copy') {
+        $res = { base => { raw => 1 }, current => { raw => 1 }, snap => { raw => 1 } };
+    } elsif ($feature eq 'template') {
+        $res = { current => { raw => 1 } };
+    } elsif ($feature eq 'sparseinit') {
+        $res = { base => { raw => 1 }, current => { raw => 1 } };
+    } elsif ($feature eq 'snapshot') {
+        $res = { current => { raw => 1 } };
+    }
+
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "volume_has_feature result: feature=%s, res=%s", $feature, $res // 'undef');
+    return $res;
 }
 
 # Plugin properties
@@ -194,7 +212,7 @@ sub alloc_image {
 }
 
 sub clone_image {
-    my ($class, $storeid, $scfg, $volname, $vmid, $snapname) = @_;
+    my ($class, $scfg, $storeid, $volname, $vmid, $snapname) = @_;
     return PVE::Storage::Custom::IBMFlashSystem::Volume::clone_image(
         $class, $scfg, $storeid, $volname, $vmid, $snapname
     );
@@ -215,7 +233,7 @@ sub volume_size_info {
 }
 
 sub volume_resize {
-    my ($class, $storeid, $scfg, $volname, $size, $running) = @_;
+    my ($class, $scfg, $storeid, $volname, $size, $running) = @_;
     return PVE::Storage::Custom::IBMFlashSystem::Volume::volume_resize(
         $class, $scfg, $storeid, $volname, $size, $running
     );
@@ -258,16 +276,200 @@ sub path {
 
 sub activate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Volume::activate_storage(
-        $class, $storeid, $scfg, $cache
-    );
+
+    # Temporarily disable all logging (except errors/warnings) for this function
+    local $scfg->{_quiet} = 1;
+
+    # Check 0: Verify credentials by attempting authentication
+    eval {
+        PVE::Storage::Custom::IBMFlashSystem::Client::authenticate($class, $scfg, $storeid);
+    };
+    if ($@) {
+        my $error = $@;
+        # Parse common authentication errors
+        if ($error =~ /Invalid username or password/) {
+            die "[IBM FlashSystem] ERROR: Authentication failed - Invalid username or password.\n" .
+                "Please check the storage credentials and update the password:\n" .
+                "  pvesm set $storeid --password <your-password>\n";
+        } elsif ($error =~ /Connection refused|Timeout|Can't connect/) {
+            die "[IBM FlashSystem] ERROR: Cannot connect to IBM FlashSystem at $scfg->{portal}.\n" .
+                "Please check the portal address and network connectivity.\n";
+        } else {
+            die "[IBM FlashSystem] ERROR: Authentication failed - $error";
+        }
+    }
+
+    # Check 1: Verify multipathd configuration
+    _check_multipath_runtime_config($class, $scfg);
+
+    # Check 2: Verify host cluster exists
+    my $host_cluster = $scfg->{hostcluster} or die "hostcluster not configured\n";
+    eval {
+        PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/lshostcluster/$host_cluster", {});
+    };
+    if ($@) {
+        die "[IBM FlashSystem] ERROR: Host cluster '$host_cluster' not found. " .
+            "Please create the host cluster on the storage array first:\n" .
+            "  mkhostcluster -name $host_cluster\n";
+    }
+
+    # Check 3: Verify pool exists and Volume Protection is disabled
+    PVE::Storage::Custom::IBMFlashSystem::Volume::get_pool_info($class, $scfg, $storeid);
+
+    # Check 4: Ensure host exists on storage array
+    _ensure_host_exists($class, $scfg, $storeid);
+
+    return 1;
 }
 
 sub deactivate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Volume::deactivate_storage(
-        $class, $storeid, $scfg, $cache
-    );
+
+    my $hostname = _get_hostname($class);
+    my $host_cluster = $scfg->{hostcluster} or die "hostcluster not configured\n";
+
+    # Remove host from cluster
+    eval {
+        PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/rmhostclustermember/$host_cluster", {
+            host => $hostname,
+        });
+    };
+    if ($@) {
+        # Ignore if host doesn't exist in cluster
+        if ($@ !~ /CMMVC5750E|not found|does not exist/i) {
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
+                "Failed to remove host from cluster (hostname=%s, hostcluster=%s, error=%s)", $hostname, $host_cluster, $@);
+        }
+    }
+
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Storage deactivated (storeid=%s)", $storeid);
+
+    return 1;
+}
+
+# ============================================================================
+# Local Helper Functions
+# ============================================================================
+
+# Check multipathd runtime configuration
+sub _check_multipath_runtime_config {
+    my ($class, $scfg) = @_;
+
+    my $config_output = "";
+
+    # Get current active configuration from multipathd
+    eval {
+        PVE::Tools::run_command(['/usr/sbin/multipathd', 'show', 'config'],
+            logfunc => sub { $config_output .= shift . "\n"; },
+            timeout => 5);
+    };
+
+    if ($@ || !$config_output) {
+        die "multipathd is not running or not responding. " .
+            "Please install multipath-tools and start the service:\n" .
+            "  apt-get install multipath-tools\n" .
+            "  systemctl start multipathd\n";
+    }
+
+    # Parse user_friendly_names - must be 'no'
+    my ($user_friendly_names) = $config_output =~ /user_friendly_names\s+"?([yes|no]+)"?/i;
+    if (defined($user_friendly_names) && lc($user_friendly_names) eq 'yes') {
+        die "CRITICAL: multipathd is configured with 'user_friendly_names yes'. " .
+            "The IBM FlashSystem plugin requires 'user_friendly_names no'.\n";
+    }
+
+    # Parse find_multipaths - must be 'no' or 'off'
+    my ($find_multipaths) = $config_output =~ /find_multipaths\s+"?([yes|no|off|on]+)"?/i;
+    if (defined($find_multipaths) && (lc($find_multipaths) eq 'yes' || lc($find_multipaths) eq 'on')) {
+        die "CRITICAL: multipathd has 'find_multipaths $find_multipaths' enabled. " .
+            "The IBM FlashSystem plugin requires 'find_multipaths no'.\n";
+    }
+
+    return 1;
+}
+
+# Get local WWPNs for FC connectivity
+sub _get_local_wwpns {
+    my ($class) = @_;
+
+    my @wwpns;
+
+    # Scan /sys/class/fc_host for WWPNs
+    if (opendir(my $dh, '/sys/class/fc_host')) {
+        while (my $entry = readdir($dh)) {
+            next if $entry =~ /^\./;
+            my $port_name_file = "/sys/class/fc_host/$entry/port_name";
+            if (-f $port_name_file) {
+                if (open(my $fh, '<', $port_name_file)) {
+                    my $wwpn = <$fh>;
+                    chomp $wwpn;
+                    # Format: 0xXX...XX, convert to XX:XX:...:XX format for IBM API
+                    if ($wwpn =~ /^0x([0-9a-fA-F]{16})$/) {
+                        $wwpn = $1;
+                        $wwpn =~ s/(..)/$1:/g;
+                        $wwpn =~ s/:$//;
+                        push @wwpns, uc($wwpn);
+                    }
+                    close($fh);
+                }
+            }
+        }
+        closedir($dh);
+    }
+
+    return \@wwpns;
+}
+
+# Ensure host exists on storage array and in cluster, create if not
+sub _ensure_host_exists {
+    my ($class, $scfg, $storeid) = @_;
+
+    my $hostname = _get_hostname($class);
+    my $host_cluster = $scfg->{hostcluster} or die "hostcluster not configured\n";
+
+    # Check if host already exists
+    my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/lshost', {});
+
+    my $hosts = ref($result) eq 'ARRAY' ? $result : [];
+    my $host_exists = 0;
+
+    for my $host (@$hosts) {
+        if ($host->{name} eq $hostname) {
+            $host_exists = 1;
+            last;
+        }
+    }
+
+    # Create host if not exists
+    unless ($host_exists) {
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Creating host on storage array (hostname=%s)", $hostname);
+
+        my $wwpns = _get_local_wwpns($class);
+
+        # Step 1: Create host without cluster
+        my $create_result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/mkhost', {
+            name => $hostname,
+            type => 'generic',
+        });
+
+        # Step 2: Add FC ports
+        for my $wwpn (@$wwpns) {
+            eval {
+                PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/mkport/$hostname", {
+                    fcport_name => $wwpn,
+                });
+            };
+        }
+
+        # Step 3: Add host to cluster
+        PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/mkhostclustermember/$host_cluster", {
+            host => $hostname,
+        });
+
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Host created and added to cluster successfully (hostname=%s, hostcluster=%s, wwpn_count=%d)", $hostname, $host_cluster, scalar(@$wwpns));
+    }
+
+    return $hostname;
 }
 
 # ============================================================================

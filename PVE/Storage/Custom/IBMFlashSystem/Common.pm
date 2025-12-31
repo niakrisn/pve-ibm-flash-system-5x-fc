@@ -10,7 +10,7 @@ use PVE::Storage::Custom::IBMFlashSystem::Client;
 use PVE::Storage::Custom::IBMFlashSystem::Logger;
 
 use Exporter 'import';
-our @EXPORT_OK = qw(_get_vdisk_id _get_vdisk_uid _clear_vdisk_uid_cache);
+our @EXPORT_OK = qw(_get_vdisk_id _get_vdisk_uid _clear_vdisk_uid_cache _get_hostname);
 
 # vdisk UID cache (60s TTL)
 my %vdisk_uid_cache;
@@ -83,6 +83,17 @@ sub _get_vdisk_id {
 # Clear vdisk UID cache (for testing)
 sub _clear_vdisk_uid_cache {
     %vdisk_uid_cache = ();
+}
+
+# Get hostname for this node
+sub _get_hostname {
+    my ($class) = @_;
+
+    # Try to get FQDN first, fall back to short hostname
+    my $hostname = eval { `hostname -f` } || `hostname`;
+    chomp $hostname;
+
+    return $hostname;
 }
 
 1;

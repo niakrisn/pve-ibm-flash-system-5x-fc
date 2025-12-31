@@ -16,6 +16,7 @@ use PVE::Storage::Custom::IBMFlashSystem::Common;
 
 # Shorthand for common functions
 sub _get_vdisk_id { return PVE::Storage::Custom::IBMFlashSystem::Common::_get_vdisk_id(@_); }
+sub _get_hostname { return PVE::Storage::Custom::IBMFlashSystem::Common::_get_hostname(@_); }
 
 # ============================================================================
 # Snapshot Operations
@@ -144,7 +145,7 @@ sub _volume_has_snapshot {
 
 # Create a snapshot using FlashCopy
 sub volume_snapshot {
-    my ($class, $storeid, $scfg, $volname, $snapname) = @_;
+    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER volume_snapshot (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname);
 
@@ -1027,17 +1028,6 @@ sub _recover_snapshot_mappings {
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "Snapshot mapping recovery complete (volname=%s, recovered_count=%d)", $volname, $recovered_count) if $recovered_count > 0;
 
     return;
-}
-
-# Get hostname for this node
-sub _get_hostname {
-    my ($class) = @_;
-
-    # Try to get FQDN first, fall back to short hostname
-    my $hostname = eval { `hostname -f` } || `hostname`;
-    chomp $hostname;
-
-    return $hostname;
 }
 
 # _get_vdisk_id is now in Common.pm with correct signature: ($class, $scfg, $volname, $storeid)

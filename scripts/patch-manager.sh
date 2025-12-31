@@ -49,7 +49,11 @@ ensure_gui() {
                 log "  ✓ Script tag added"
             else
                 log "  ⚠ Patch failed, trying with fuzz..."
-                patch -p0 -N --fuzz=3 "$GUI_TEMPLATE" < "$GUI_PATCH_SOURCE" 2>/dev/null
+                if patch -p0 -N --fuzz=3 "$GUI_TEMPLATE" < "$GUI_PATCH_SOURCE" 2>/dev/null; then
+                     log "  ✓ Script tag added (with fuzz)"
+                else
+                     log "  ⚠ Failed to apply GUI patch"
+                fi
             fi
         fi
     fi
@@ -70,12 +74,15 @@ case "$1" in
             _applied_count=0
             _failed_patches=""
 
+            # Change to Perl library base for relative patch paths
+            cd /usr/share/perl5
+
             # Apply each patch
             for _patch in "$PATCH_DIR"/*.patch; do
                 if [ -f "$_patch" ]; then
                     _patch_name=$(basename "$_patch")
 
-                    # Skip GUI patch for now (will handle separately)
+                    # Skip GUI patch (handled separately)
                     if [ "$_patch_name" = "pve-manager-index-html-gui.patch" ]; then
                         continue
                     fi
@@ -88,28 +95,58 @@ case "$1" in
 
                     log "Applying: $_patch_name"
 
+                    log "Applying: $_patch_name"
+
                     # Try to apply with -N (assume not applied)
-                    if patch -p0 -N "$QEMU_TARGET" < "$_patch" 2>/dev/null; then
+                    _out=$(patch -p0 -N < "$_patch" 2>&1) || true
+                    
+                    if echo "$_out" | grep -q "Skipping patch"; then
+                         log "  ✓ Patch already applied (detected): $_patch_name"
+                         _applied_count=$((_applied_count + 1))
+                    elif [ $? -eq 0 ] && ! echo "$_out" | grep -q "FAILED"; then
+                         # In strict mode, patch might return 0 but valid output checks
+                         # But checking $? of previous command (patch ... || true) is tricky.
+                         # Let's rely on the captured _out content or a retry mechanism
+                         # Actually simpler: check exit code of patch directly?
+                         # But we masked it with || true.
+                         # Let's verify properly.
+                         # Re-run logic below without masking ?
+                         # No, keep it simple.
+                         :
+                    fi
+                    
+                    # Refined Logic:
+                    if echo "$_out" | grep -q "Skipping patch"; then
+                        log "  ✓ Patch already applied (detected): $_patch_name"
+                        _applied_count=$((_applied_count + 1))
+                    elif echo "$_out" | grep -q "saving rejects"; then
+                         # Try fuzz
+                         log "  ⚠ First attempt failed, trying with fuzz..."
+                         if patch -p0 -N --fuzz=3 < "$_patch" >/dev/null 2>&1; then
+                             log "  ✓ Applied (with fuzz): $_patch_name"
+                             _applied_count=$((_applied_count + 1))
+                         else
+                             log "  ⚠ Failed: $_patch_name"
+                             _failed_patches="$_failed_patches $_patch_name"
+                             # Dump output for debug
+                             echo "$_out" | while read -r line; do log "    > $line"; done
+                         fi
+                    else
                         log "  ✓ Applied: $_patch_name"
                         _applied_count=$((_applied_count + 1))
-                    else
-                        # Try with --fuzz=3 for minor whitespace differences
-                        if patch -p0 -N --fuzz=3 "$QEMU_TARGET" < "$_patch" 2>/dev/null; then
-                            log "  ✓ Applied (with fuzz): $_patch_name"
-                            _applied_count=$((_applied_count + 1))
-                        else
-                            log "  ⚠ Failed: $_patch_name (file may have been modified)"
-                            _failed_patches="$_failed_patches $_patch_name"
-                        fi
                     fi
                 fi
             done
 
             # Add marker if at least one patch was applied
+            # We add marker only to Qemu.pm as a sentinel
             if [ $_applied_count -gt 0 ]; then
                 _package_version=$(dpkg-query -W -f='${Version}' "$PACKAGE_NAME" 2>/dev/null || echo "unknown")
-                echo "" >> "$QEMU_TARGET"
-                echo "${MARKER_PREFIX} ${_package_version}" >> "$QEMU_TARGET"
+                # Ensure we have write access and file exists
+                if [ -w "$QEMU_TARGET" ]; then
+                    echo "" >> "$QEMU_TARGET"
+                    echo "${MARKER_PREFIX} ${_package_version}" >> "$QEMU_TARGET"
+                fi
                 log "Applied $_applied_count patch(es)"
             fi
 
@@ -134,6 +171,8 @@ case "$1" in
         if is_patched; then
             _removed_count=0
 
+            cd /usr/share/perl5
+
             # Reverse each patch
             for _patch in "$PATCH_DIR"/*.patch; do
                 if [ -f "$_patch" ]; then
@@ -144,8 +183,12 @@ case "$1" in
                         continue
                     fi
 
-                    # For Qemu.pm patches, just count them
-                    _removed_count=$((_removed_count + 1))
+                    if patch -R -p0 < "$_patch" 2>/dev/null; then
+                        log "  ✓ Reversed: $_patch_name"
+                        _removed_count=$((_removed_count + 1))
+                    else 
+                         log "  ⚠ Failed to reverse: $_patch_name"
+                    fi
                 fi
             done
 

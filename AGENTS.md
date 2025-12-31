@@ -179,7 +179,19 @@ scp t/unit/volume/*.t root@10.4.0.122:/root/pve-ibm-flash-system-5x-fc/t/unit/vo
 ## 5. Снапшоты и Клонирование
 
 ### `volume_has_feature($class, $scfg, $feature, $storeid, $volname, $snapname, $running)`
-*   **Требование**: Для фич `clone`, `copy`, `snapshot` возвращать хэш возможностей: `{ base => 1, current => 1, snap => 1 }`. Это заставит Proxmox вызывать нативные методы плагина.
+
+*   **Назначение**: Проверяет поддержку определенных возможностей хранилища.
+*   **Требование**: Для фич `clone`, `copy`, `snapshot`, `template`, `sparseinit` возвращать вложенный хэш возможностей с указанием формата (обычно `raw`):
+    ```perl
+    {
+        clone      => { base => { raw => 1 } },
+        copy       => { base => { raw => 1 }, current => { raw => 1 }, snap => { raw => 1 } },
+        snapshot   => { current => { raw => 1 } },
+        template   => { current => { raw => 1 } },
+        sparseinit => { base => { raw => 1 }, current => { raw => 1 } }
+    }
+    ```
+*   **Реализация**: Возвращает `1` для простых фич или хеш для сложных.
 
 ### `clone_image($class, $scfg, $storeid, $volname, $vmid, $snapname)`
 *   **Действие**: Аппаратное клонирование.

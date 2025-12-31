@@ -1,26 +1,11 @@
---- /usr/share/perl5/PVE/API2/Qemu.pm   2025-12-27 12:01:59.178141354 +0300
-+++ /usr/share/perl5/PVE/API2/Qemu.pm   2025-12-27 12:41:48.415404165 +0300
-@@ -626,6 +626,13 @@
-                     ($volid, $size) = PVE::QemuServer::OVMF::create_efidisk(
-                         $storecfg, $storeid, $vmid, $fmt, $arch, $disk, $smm, $cvm_type,
-                     );
-+
-+                    # Deactivate efidisk after OVMF_VARS is written
-+                    # Block storage volumes remain mapped if not explicitly deactivated
-+                    eval {
-+                        PVE::Storage::deactivate_volumes($storecfg, [$volid]);
-+                    };
-+                    log_warn($@) if $@;
-                 } elsif ($ds eq 'tpmstate0') {
-                     # A fixed size is used for TPM state volumes
-                     $size = PVE::Tools::convert_size(
-@@ -4520,7 +4527,17 @@
+--- PVE/API2/Qemu.pm	2025-12-31 10:18:54
++++ PVE/API2/Qemu.pm	2025-12-31 10:19:31
+@@ -4520,7 +4520,16 @@
                  local $SIG{INT} = local $SIG{TERM} = local $SIG{QUIT} = local $SIG{HUP} =
                      sub { die "interrupted by signal\n"; };
  
 -                PVE::Storage::activate_volumes($storecfg, $vollist, $snapname);
 +                # Only activate source volumes if storage doesn't support storage-level cloning
-+                # (i.e., needs host-based copying via qemu-img)
 +                my $need_source_activation = 0;
 +                foreach my $volid (@$vollist) {
 +                    if (!PVE::Storage::volume_has_feature($storecfg, 'clone', $volid, $snapname, $running)) {
@@ -33,37 +18,53 @@
  
                  my $bwlimit = extract_param($param, 'bwlimit');
  
-@@ -4587,18 +4604,24 @@
+--- PVE/QemuServer.pm	2025-12-31 10:18:54
++++ PVE/QemuServer.pm	2025-12-31 10:19:29
+@@ -7888,8 +7888,18 @@
+         $newvolid = PVE::Storage::vdisk_clone($storecfg, $drive->{file}, $newvmid, $snapname);
+         push @$newvollist, $newvolid;
+     } else {
++        # Check if storage supports full clone offload
+         my ($src_storeid) = PVE::Storage::parse_volume_id($drive->{file});
+         my $storeid = $storage || $src_storeid;
++        
++        # Optimization: Use vdisk_clone if storage supports 'copy' (Smart Clone / FlashCopy)
++        if (PVE::Storage::volume_has_feature($storecfg, 'copy', $drive->{file}, $snapname, $running)) {
++             print "Using storage driver support for full clone (copy)\n";
++             $newvolid = PVE::Storage::vdisk_clone($storecfg, $drive->{file}, $newvmid, undef);
++             push @$newvollist, $newvolid;
++             goto no_data_clone;
++        }
  
-                 PVE::QemuServer::Network::create_ifaces_ipams_ips($newconf, $newid);
+         my $dst_format = resolve_dst_disk_format($storecfg, $storeid, $drive->{file}, $format);
  
--                if ($target) {
--                    if (!$running) {
--                        # always deactivate volumes - avoids that LVM LVs are active on several nodes
--                        eval {
--                            PVE::Storage::deactivate_volumes($storecfg, $vollist, $snapname);
--                        };
--                        # but only warn when that fails (e.g., parallel clones keeping them active)
--                        log_warn($@) if $@;
--                    }
-+                # Deactivate volumes after cloning to prevent orphan mappings
-+                # Skip only if source VM is running (volumes needed for running VM)
-+                if (!$running) {
-+                    eval {
-+                        PVE::Storage::deactivate_volumes($storecfg, $vollist, $snapname);
-+                    };
-+                    # Warn but don't fail - parallel clones may keep volumes active
-+                    log_warn($@) if $@;
-+                }
+@@ -7935,6 +7945,8 @@
+                     $vmid, $newvmid, $jobs, $completion, $qga,
+                 );
+             }
++            # Deactivate configured cloudinit volume
++            PVE::Storage::deactivate_volumes($storecfg, [$newvolid]);
+             goto no_data_clone;
+         }
  
-+                # Always deactivate new volumes - cloned VM is not running yet
-+                eval {
-                     PVE::Storage::deactivate_volumes($storecfg, $newvollist);
-+                };
-+                log_warn($@) if $@;
+@@ -7989,6 +8001,8 @@
+                 PVE::QemuServer::QemuImage::convert($drive->{file}, $newvolid, $size, $opts);
+             }
+         }
++        # Deactivate volume after data copy defined
++        PVE::Storage::deactivate_volumes($storecfg, [$newvolid]);
+     }
  
-+                if ($target) {
-+                    # Move config to target node for cross-node clone
-                     my $newconffile = PVE::QemuConfig->config_file($newid, $target);
-                     die "Failed to move config to node '$target' - rename failed: $!\n"
-                         if !rename($conffile, $newconffile);
+ no_data_clone:
+--- PVE/QemuServer/OVMF.pm	2025-12-31 10:18:53
++++ PVE/QemuServer/OVMF.pm	2025-12-31 10:19:26
+@@ -177,6 +177,9 @@
+ 
+     PVE::QemuServer::QemuImage::convert($ovmf_vars, $volid, $vars_size_b);
+     my $size = PVE::Storage::volume_size_info($storecfg, $volid, 3);
++    
++    # Deactivate the volume to prevent orphan mapping
++    PVE::Storage::deactivate_volumes($storecfg, [$volid]);
+ 
+     if ($efidisk->{'pre-enrolled-keys'} && is_ms_2023_cert_enrolled($ovmf_vars)) {
+         $efidisk->{'ms-cert'} = '2023';
