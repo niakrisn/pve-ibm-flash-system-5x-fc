@@ -143,14 +143,26 @@ sub volume_is_accessible {
 sub get_host_mappings {
     my ($env, $volname) = @_;
 
+    # Get vdisk_id from volname
+    my $vdisk_id = eval {
+        PVE::Storage::Custom::IBMFlashSystem::Common::_get_vdisk_id(
+            'PVE::Storage::Custom::IBMFlashSystem',
+            $env->scfg,
+            $volname,
+            $env->storeid
+        );
+    };
+    
+    return [] if $@ || !$vdisk_id;
+
     my $result = eval {
         PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
             'PVE::Storage::Custom::IBMFlashSystem',
             $env->scfg,
             $env->storeid,
             'POST',
-            '/lsvdiskhostmap',
-            { name => $volname },
+            '/lsvdiskhostmap/' . $vdisk_id,
+            {},
         );
     };
 
