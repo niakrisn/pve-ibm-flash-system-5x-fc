@@ -17,10 +17,6 @@ skip_without_fc('FC connectivity required');
 my $env = TestEnv->setup();
 my $vmid = 9999;
 
-# Cleanup handler
-END {
-    cleanup_vm($vmid) if $vmid;
-}
 
 subtest 'Basic VM Lifecycle (EFI only)' => sub {
     

@@ -19,11 +19,6 @@ my $env = TestEnv->setup();
 my $source_vmid = 9999;
 my $clone_vmid = 9998;
 
-# Cleanup handler
-END {
-    cleanup_vm($source_vmid) if $source_vmid;
-    cleanup_vm($clone_vmid) if $clone_vmid;
-}
 
 subtest 'Full Clone VM Lifecycle (EFI + 1 SCSI)' => sub {
     

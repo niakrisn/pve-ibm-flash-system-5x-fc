@@ -17,10 +17,6 @@ skip_without_fc('FC connectivity required');
 my $env = TestEnv->setup();
 my $vmid = 9999;
 
-# Cleanup handler
-END {
-    cleanup_vm($vmid) if $vmid;
-}
 
 subtest 'Multi-Disk VM Lifecycle (EFI + 2 SCSI)' => sub {
     
