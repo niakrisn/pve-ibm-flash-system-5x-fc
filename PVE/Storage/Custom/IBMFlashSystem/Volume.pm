@@ -285,31 +285,6 @@ sub create_base {
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Base template created successfully (new_name=%s)", $new_name);
 
-    # WORKAROUND for PVE skipping CloudInit renaming:
-    # If we just converted a main disk (vm-X-disk-Y -> base-X-disk-Y),
-    # check if there's a cloudinit disk (vm-X-cloudinit) and rename it too.
-    if ($new_name =~ /^base-(\d+)-disk-\d+$/) {
-        my $vmid = $1;
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "Main disk converted, checking for side-car CloudInit volumes for VMID %s", $vmid);
-        
-        eval {
-            my $old_ci = "vm-$vmid-cloudinit";
-            my $new_ci = "base-$vmid-cloudinit";
-
-            my $ci_id = _get_vdisk_id($class, $scfg, $old_ci, $storeid);
-            if ($ci_id) {
-                PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Found side-car CloudInit volume, renaming: %s -> %s", $old_ci, $new_ci);
-                PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/chvdisk/$ci_id", {
-                    name => $new_ci,
-                });
-                wait_for_vdisk_state($class, $scfg, $storeid, $new_ci, 'exists');
-            }
-        };
-        if ($@) {
-             PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg, "Optional side-car CloudInit renaming failed: %s", $@);
-        }
-    }
-
     return $new_name;
 }
 
@@ -610,7 +585,7 @@ sub activate_volume {
 
     # 2. Wait for device discovery
     eval {
-        _wait_for_multipath_device($class, $scfg, $vdisk_uid, 30);
+        _wait_for_multipath_device($class, $scfg, $vdisk_uid, 60);
     };
     if ($@) {
          PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg, "Device discovery timed out for vdisk_uid=%s", $vdisk_uid);
@@ -869,7 +844,7 @@ sub _remove_scsi_devices {
                     my $wwid = <$fh>;
                     close($fh);
                     chomp($wwid) if $wwid;
-                    
+
                     if ($wwid && $wwid eq $naa_wwid) {
                         push @devices, $entry;
                     }
@@ -877,6 +852,12 @@ sub _remove_scsi_devices {
             }
         }
         closedir($dh);
+    }
+
+    if (@devices) {
+         PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, undef, "Deleting SCSI devices for UID $uid: " . join(", ", @devices));
+    } else {
+         PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, undef, "No SCSI devices found for UID $uid (WWID: $naa_wwid)");
     }
 
     # Delete each SCSI device via sysfs

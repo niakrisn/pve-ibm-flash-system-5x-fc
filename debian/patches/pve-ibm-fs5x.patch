@@ -1,0 +1,90 @@
+--- PVE/API2/Qemu.pm	2025-12-31 19:26:49
++++ PVE/API2/Qemu.pm	2026-01-01 11:52:34
+@@ -4520,7 +4520,18 @@
+                 local $SIG{INT} = local $SIG{TERM} = local $SIG{QUIT} = local $SIG{HUP} =
+                     sub { die "interrupted by signal\n"; };
+ 
+-                PVE::Storage::activate_volumes($storecfg, $vollist, $snapname);
++                # IBM FlashSystem: Optimization - only activate if storage-level clone/copy not supported
++                my $need_source_activation = 0;
++                foreach my $volid (@$vollist) {
++                    my $has_clone = PVE::Storage::volume_has_feature($storecfg, 'clone', $volid, $snapname, $running);
++                    my $has_copy = PVE::Storage::volume_has_feature($storecfg, 'copy', $volid, $snapname, $running);
++                    if (!$has_clone && !$has_copy) {
++                        $need_source_activation = 1;
++                        last;
++                    }
++                }
++                PVE::Storage::activate_volumes($storecfg, $vollist, $snapname)
++                    if $need_source_activation;
+ 
+                 my $bwlimit = extract_param($param, 'bwlimit');
+ 
+@@ -4606,7 +4617,15 @@
+ 
+                 PVE::AccessControl::add_vm_to_pool($newid, $pool) if $pool;
+             };
+-            if (my $err = $@) {
++            my $err = $@;
++
++            if (!$running) {
++                # IBM FlashSystem: always cleanup source volumes to avoid orphans
++                eval { PVE::Storage::deactivate_volumes($storecfg, $vollist, $snapname); };
++                warn "Source volume cleanup failed: $@" if $@;
++            }
++
++            if ($err) {
+                 eval { PVE::QemuServer::BlockJob::qemu_blockjobs_cancel($vmid, $jobs) };
+                 sleep 1; # some storage like rbd need to wait before release volume - really?
+ 
+--- PVE/QemuServer.pm	2025-12-31 19:26:50
++++ PVE/QemuServer.pm	2025-12-31 19:27:28
+@@ -7888,9 +7888,18 @@
+         $newvolid = PVE::Storage::vdisk_clone($storecfg, $drive->{file}, $newvmid, $snapname);
+         push @$newvollist, $newvolid;
+     } else {
++        # IBM FlashSystem: Check if storage supports full clone offload
+         my ($src_storeid) = PVE::Storage::parse_volume_id($drive->{file});
+         my $storeid = $storage || $src_storeid;
+ 
++        # IBM FlashSystem: Optimization - Use vdisk_clone if storage supports 'copy' (Smart Clone / FlashCopy)
++        if (PVE::Storage::volume_has_feature($storecfg, 'copy', $drive->{file}, $snapname, $running)) {
++            print "Using storage driver support for full clone (copy)\n";
++            $newvolid = PVE::Storage::vdisk_clone($storecfg, $drive->{file}, $newvmid, undef);
++            push @$newvollist, $newvolid;
++            goto no_data_clone;
++        }
++
+         my $dst_format = resolve_dst_disk_format($storecfg, $storeid, $drive->{file}, $format);
+ 
+         my $name = undef;
+@@ -7935,6 +7944,8 @@
+                     $vmid, $newvmid, $jobs, $completion, $qga,
+                 );
+             }
++            # IBM FlashSystem: Deactivate configured cloudinit volume
++            PVE::Storage::deactivate_volumes($storecfg, [$newvolid]);
+             goto no_data_clone;
+         }
+ 
+@@ -7989,6 +8000,8 @@
+                 PVE::QemuServer::QemuImage::convert($drive->{file}, $newvolid, $size, $opts);
+             }
+         }
++        # IBM FlashSystem: Deactivate volume after data copy defined
++        PVE::Storage::deactivate_volumes($storecfg, [$newvolid]);
+     }
+ 
+ no_data_clone:
+--- PVE/QemuServer/OVMF.pm	2025-12-31 19:26:50
++++ PVE/QemuServer/OVMF.pm	2025-12-31 19:27:30
+@@ -178,6 +178,9 @@
+     PVE::QemuServer::QemuImage::convert($ovmf_vars, $volid, $vars_size_b);
+     my $size = PVE::Storage::volume_size_info($storecfg, $volid, 3);
+ 
++    # IBM FlashSystem: Deactivate the volume to prevent orphan mapping
++    PVE::Storage::deactivate_volumes($storecfg, [$volid]);
++
+     if ($efidisk->{'pre-enrolled-keys'} && is_ms_2023_cert_enrolled($ovmf_vars)) {
+         $efidisk->{'ms-cert'} = '2023';
+     }

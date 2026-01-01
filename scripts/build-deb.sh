@@ -75,9 +75,12 @@ INSTALLED_SIZE=$(du -sk "$PKG_DIR" | cut -f1)
 
 echo "Installed-Size: $INSTALLED_SIZE" >> "$PKG_DIR/DEBIAN/control"
 
-# Build deb package
+# Build the package
 cd "$OUTPUT_DIR"
 dpkg-deb --build "${PACKAGE}_${VERSION}_${ARCH}"
+
+# Return to root directory
+cd ..
 
 # Fix ownership
 chown -R $(id -u):$(id -g) "$OUTPUT_DIR" 2>/dev/null || true
