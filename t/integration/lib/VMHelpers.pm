@@ -35,36 +35,37 @@ sub cleanup_orphan_fc_devices {
 
     return unless $env && $env->scfg;
 
-    # Get all multipath devices
-    my $mpath_output = `multipath -ll 2>/dev/null`;
-    return unless $mpath_output;
+    print STDERR "Starting deep SCSI discovery and cleanup...\n";
 
-    # Parse multipath output to get WWNs
-    # Format: "360050763808185cfd0000000000003b1 dm-2 IBM,2145"
-    my @orphan_wwns;
-    while ($mpath_output =~ /^([0-9a-f]{33})\s+/gm) {
-        my $wwn = $1;
-        push @orphan_wwns, $wwn;
+    # 1. Identify all IBM 2145 SCSI devices
+    my $devs_output = `lsblk -dno NAME,VENDOR,MODEL,WWN,STATE 2>/dev/null`;
+    my @all_ibm_devs;
+    while ($devs_output =~ /^(\S+)\s+IBM\s+2145\s+(\S+)\s+(\S+)/gm) {
+        push @all_ibm_devs, { name => $1, wwn => $2, state => $3 };
     }
 
-    return unless @orphan_wwns;
-
-    # Check if each WWN exists on storage
-    foreach my $wwn (@orphan_wwns) {
+    foreach my $dev (@all_ibm_devs) {
+        my $wwn = $dev->{wwn};
+        $wwn =~ s/^0x//; 
+        
+        # Check if the volume actually exists on the SAN
         my $exists = _volume_exists_by_wwn($env, $wwn);
 
         if (!$exists) {
-            # Volume doesn't exist on storage - this is an orphan!
-            # Find and remove the multipath device
+            print STDERR "Cleaning up orphan SCSI device: $dev->{name} (WWN: $wwn, State: $dev->{state})\n";
             _remove_fc_device_by_wwn($wwn);
         }
     }
 
-    # Final flush of any remaining orphaned multipath devices
-    my $remaining = `multipath -ll 2>/dev/null`;
-    while ($remaining =~ /^([0-9a-f]{33})\s+/gm) {
+    # 2. Final flush of any remaining orphaned multipath devices
+    my $mpath_output = `multipath -ll 2>/dev/null`;
+    while ($mpath_output =~ /^([0-9a-f]{33})\s+/gm) {
         my $mpath = $1;
-        _remove_multipath_device($mpath);
+        my $exists = _volume_exists_by_wwn($env, $mpath);
+        if (!$exists) {
+             print STDERR "Cleaning up orphan multipath device: $mpath\n";
+             _remove_multipath_device($mpath);
+        }
     }
 
     return;
@@ -221,30 +222,38 @@ sub _remove_fc_device_by_wwn {
 
     return unless $wwn;
 
-    # Get multipath device name
-    my $mpath = $wwn;  # multipath uses WWN as device name
-
-    # First, flush the multipath device
+    # 1. Flush multipath device if it exists
+    my $mpath = $wwn;
     _remove_multipath_device($mpath);
 
-    # Then remove SCSI paths
-    my $devs = `ls /sys/block | grep '^sd'`;
-    for my $dev (split /\s+/, $devs) {
-        next unless $dev;
+    # 2. Find and remove all SCSI devices matching this WWN
+    # WWN in /sys/block/*/wwid usually has "naa." or "eui." prefix
+    my $short_wwn = $wwn;
+    $short_wwn =~ s/^0x//i;
 
-        # Check if this device is part of our multipath map
-        my $parent = `lsblk /dev/$dev -o pkname -n 2>/dev/null`;
-        chomp $parent;
-        next unless $parent && $parent eq "dm-?";  # Could be dm-0, dm-1, etc
+    my $sys_path = "/sys/block";
+    opendir(my $dh, $sys_path) or return;
+    my @devs = grep { /^sd[a-z]+/ } readdir($dh);
+    closedir($dh);
 
-        # Delete the SCSI device
-        my $delete_file = "/sys/block/$dev/device/delete";
-        if (-f $delete_file) {
-            eval {
-                open(my $fh, '>', $delete_file);
-                print $fh "1";
-                close($fh);
-            };
+    foreach my $dev (@devs) {
+        my $wwid_file = "$sys_path/$dev/device/wwid";
+        next unless -f $wwid_file;
+        
+        my $wwid = `cat $wwid_file 2>/dev/null`;
+        chomp $wwid;
+        
+        # FlashSystem WWNs usually appear as naa.60050763808185cfd000000000000500
+        if ($wwid =~ /$short_wwn/i) {
+            print STDERR "Deleting SCSI device $dev (WWID: $wwid)\n";
+            my $delete_file = "$sys_path/$dev/device/delete";
+            if (-f $delete_file) {
+                eval {
+                    open(my $fh, '>', $delete_file);
+                    print $fh "1";
+                    close($fh);
+                };
+            }
         }
     }
 
