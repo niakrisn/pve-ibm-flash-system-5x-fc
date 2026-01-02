@@ -190,20 +190,48 @@ sub clone_image {
     my $size_bytes = $vdisk_info->{capacity} || 0;
 
     # Create target volume with same size using mkvolume
+    # Wrapped in compensating transaction pattern to prevent orphan volumes on failure
     my $pool_name = $scfg->{pool} or die "Pool not configured\n";
-    PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/mkvolume', {
-        name => $new_name,
-        pool => $pool_name,
-        size => $size_bytes,
-        unit => 'b',
-        thin => JSON::true,
-    });
+    my $volume_created = 0;
+    my $fcmap_id;
 
-    # Create FlashCopy mapping with copyrate 100 (full copy) and autodelete
-    my $fcmap_id = PVE::Storage::Custom::IBMFlashSystem::FCMap::create_fcmap($class, $scfg, $storeid, $volname, $new_name, 100);
+    eval {
+        # Step 1: Create target volume
+        PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/mkvolume', {
+            name => $new_name,
+            pool => $pool_name,
+            size => $size_bytes,
+            unit => 'b',
+            thin => JSON::true,
+        });
+        $volume_created = 1;
 
-    # Start the FlashCopy mapping
-    PVE::Storage::Custom::IBMFlashSystem::FCMap::start_fcmap($class, $scfg, $storeid, $fcmap_id);
+        # Step 2: Create FlashCopy mapping with copyrate 100 (full copy)
+        $fcmap_id = PVE::Storage::Custom::IBMFlashSystem::FCMap::create_fcmap($class, $scfg, $storeid, $volname, $new_name, 100);
+
+        # Step 3: Start the FlashCopy mapping
+        PVE::Storage::Custom::IBMFlashSystem::FCMap::start_fcmap($class, $scfg, $storeid, $fcmap_id);
+    };
+    if ($@) {
+        my $error = $@;
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg, "Clone operation failed, performing cleanup (target=%s, error=%s)", $new_name, $error);
+
+        # Compensating transaction: cleanup any partially created resources
+        if (defined $fcmap_id) {
+            eval {
+                PVE::Storage::Custom::IBMFlashSystem::FCMap::stop_fcmap($class, $scfg, $storeid, $fcmap_id);
+                PVE::Storage::Custom::IBMFlashSystem::FCMap::remove_fcmap($class, $scfg, $storeid, $fcmap_id, 1);
+            };
+        }
+
+        if ($volume_created) {
+            eval {
+                PVE::Storage::Custom::IBMFlashSystem::Common::safe_delete_volume($class, $scfg, $storeid, $new_name);
+            };
+        }
+
+        die "Clone operation failed: $error\n";
+    }
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Full clone created successfully (storeid=%s, source=%s, target=%s)", $storeid, $volname, $new_name);
 

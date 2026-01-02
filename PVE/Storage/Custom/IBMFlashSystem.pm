@@ -461,9 +461,9 @@ sub on_add_hook {
 }
 
 sub on_update_hook {
-    my ($class, $storeid, $scfg, %param) = @_;
+    my ($class, $storeid, $scfg, $update_params, %sensitive_params) = @_;
     return PVE::Storage::Custom::IBMFlashSystem::Client::on_update_hook(
-        $class, $storeid, $scfg, %param
+        $class, $storeid, $scfg, $update_params, %sensitive_params
     );
 }
 

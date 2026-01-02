@@ -100,30 +100,14 @@ sub on_add_hook {
 }
 
 sub on_update_hook {
-    my ($class, $storeid, $scfg, %param) = @_;
+    my ($class, $storeid, $scfg, $update_params, %sensitive_params) = @_;
 
-    my $has_password = exists($param{password}) ? 1 : 0;
-    
-    # Log received parameters for debugging (moved up to capture all calls)
-    my @param_keys = keys %param;
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
-        "on_update_hook called (storeid=%s, params=%s)", $storeid, join(",", @param_keys));
-
-    # Load full storage config if needed for validation (if any relevant param checks)
-    my ($class, $storeid, $update_params, %sensitive_params) = @_;
-
-    # Proxmox architecture note:
-    # on_update_hook receives:
-    # 1. $storeid
-    # 2. $update_params (HashRef of NON-SENSITIVE changes)
-    # 3. %sensitive_params (List/Hash of SENSITIVE changes like password)
-    
-    # Log debug info
-    my @update_keys = keys %$update_params;
+    # Log received parameters for debugging
+    my @param_keys = keys %$update_params;
     my @sensitive_keys = keys %sensitive_params;
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, undef,
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
         "on_update_hook called (storeid=%s, updates=[%s], sensitive=[%s])", 
-        $storeid, join(',', @update_keys), join(',', @sensitive_keys));
+        $storeid, join(',', @param_keys), join(',', @sensitive_keys));
 
     # 1. Handle Password Update
     my $old_password;

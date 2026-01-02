@@ -186,12 +186,17 @@ sub volume_snapshot {
         PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/prestartfcmap/$fcmap_id", {});
     };
     if ($@) {
-        # Cleanup on error: remove created snapshot volume
+        my $prepare_error = $@;
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg, "Failed to prepare FlashCopy, performing cleanup (fcmap_id=%s, error=%s)", $fcmap_id, $prepare_error);
+
+        # Cleanup on error: remove FlashCopy mapping first, then snapshot volume
         eval {
-            my $vdisk_id = _get_vdisk_id($class, $scfg, $snapshot_name, $storeid);
-            PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/rmvdisk/$vdisk_id");
+            PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/rmfcmap/$fcmap_id", { force => JSON::true });
         };
-        die "Failed to prepare FlashCopy mapping: $@\n";
+        eval {
+            PVE::Storage::Custom::IBMFlashSystem::Common::safe_delete_volume($class, $scfg, $storeid, $snapshot_name);
+        };
+        die "Failed to prepare FlashCopy mapping: $prepare_error\n";
     }
 
     # Step 4: Start FlashCopy with retry for CMMVC5906E (preparing state)
