@@ -10,6 +10,7 @@ use lib qw(t/unit/lib t/integration/lib);
 use TestEnv;
 use VMScenario qw(create_q35_vm cleanup_vm);
 use StateVerifier;
+use StorageHelpers;
 use FCHelpers qw(skip_without_fc);
 
 # Skip if no FC connectivity
@@ -41,18 +42,12 @@ subtest 'Snapshot VM Lifecycle (EFI + 1 SCSI)' => sub {
     # Step 4: Create snapshot 'snap1'
     diag("Creating snapshot 'snap1'...");
     ok(system('qm', 'snapshot', $vmid, 'snap1') == 0, "Snapshot 'snap1' created");
-    
-    # Verify snapshot exists
-    my $snaplist = `qm listsnapshot $vmid 2>&1`;
-    ok($snaplist =~ /snap1/, "Snapshot 'snap1' exists in snapshot list");
+    ok(StateVerifier::verify_snapshot($env, $vmid, 'snap1', $disks), "Snapshot 'snap1' verified on storage");
     
     # Step 5: Create snapshot 'snap2'
     diag("Creating snapshot 'snap2'...");
     ok(system('qm', 'snapshot', $vmid, 'snap2') == 0, "Snapshot 'snap2' created");
-    
-    # Verify both snapshots exist
-    $snaplist = `qm listsnapshot $vmid 2>&1`;
-    ok($snaplist =~ /snap1/ && $snaplist =~ /snap2/, "Both snapshots exist");
+    ok(StateVerifier::verify_snapshot($env, $vmid, 'snap2', $disks), "Snapshot 'snap2' verified on storage");
     
     # Step 6: Rollback to snap1
     diag("Rolling back to snap1...");
@@ -61,10 +56,9 @@ subtest 'Snapshot VM Lifecycle (EFI + 1 SCSI)' => sub {
     # Step 7: Delete snap2
     diag("Deleting snapshot 'snap2'...");
     ok(system('qm', 'delsnapshot', $vmid, 'snap2') == 0, "Snapshot 'snap2' deleted");
-    
-    # Verify snap2 is gone
-    $snaplist = `qm listsnapshot $vmid 2>&1`;
-    ok($snaplist =~ /snap1/ && $snaplist !~ /snap2/, "Only snap1 remains");
+
+    # Verify snap2 FlashCopy mapping and volume are removed
+    ok(!StorageHelpers::volume_exists($env, "snap-$disks->[1]-snap2"), "Snapshot volume snap2 removed from storage");
     
     # Step 8: Stop VM
     diag("Stopping VM $vmid...");
@@ -74,6 +68,9 @@ subtest 'Snapshot VM Lifecycle (EFI + 1 SCSI)' => sub {
     # Step 9: Delete snap1
     diag("Deleting snapshot 'snap1'...");
     ok(system('qm', 'delsnapshot', $vmid, 'snap1') == 0, "Snapshot 'snap1' deleted");
+
+    # Verify snap1 FlashCopy mapping and volume are removed
+    ok(!StorageHelpers::volume_exists($env, "snap-$disks->[1]-snap1"), "Snapshot volume snap1 removed from storage");
     
     # Step 10: Destroy VM
     diag("Destroying VM $vmid...");

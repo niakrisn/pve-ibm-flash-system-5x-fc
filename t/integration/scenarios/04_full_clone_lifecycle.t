@@ -47,12 +47,16 @@ subtest 'Full Clone VM Lifecycle (EFI + 1 SCSI)' => sub {
     # Step 5: Full clone to VM 9998
     diag("Cloning source VM $source_vmid to clone VM $clone_vmid (full clone)...");
     ok(system('qm', 'clone', $source_vmid, $clone_vmid, '--full') == 0, "Full clone created");
-    
-    # Verify clone VM config exists
-    my $clone_conf = `qm config $clone_vmid 2>&1`;
-    ok($clone_conf =~ /scsi0/, "Clone VM $clone_vmid config exists");
-    
+
+    # CRITICAL: Verify source VM is STILL DEACTIVATED after clone
+    # Clone should NOT re-map source volumes
+    diag("Verifying source VM $source_vmid is STILL DEACTIVATED after clone...");
+    ok(StateVerifier::verify_deactivated($env, $source_vmid, $source_disks), "Source VM $source_vmid is STILL DEACTIVATED after clone");
+
     my $clone_disks = ['vm-9998-disk-0', 'vm-9998-disk-1']; # EFI + 1 SCSI (cloned)
+
+    # Verify clone VM is properly created
+    ok(StateVerifier::verify_cloned($env, $source_vmid, $clone_vmid, $clone_disks), "Clone VM $clone_vmid verified");
     
     # Step 6: Verify clone VM is CREATED (independent volumes)
     ok(StateVerifier::verify_created($env, $clone_vmid, $clone_disks), "Clone VM $clone_vmid is CREATED");

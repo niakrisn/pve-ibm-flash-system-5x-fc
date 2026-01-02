@@ -146,12 +146,22 @@ sub verify_destroyed {
 # Verify Snapshot state
 sub verify_snapshot {
     my ($env, $vmid, $snapname, $disks_ref) = @_;
-    
+
     diag("Verifying Snapshot $snapname for VM $vmid");
-    
-    # 1. Config has snapshot
-    my $conf = `qm config $vmid`;
-    ok($conf =~ /\[$snapname\]/, "QM: Snapshot $snapname exists in config") or return 0;
+
+    # 1. Config has snapshot (with retries for async write)
+    # PVE uses "parent: snapname" format for snapshots
+    my $conf_found = 0;
+    for (1..10) {
+        my $conf = `qm config $vmid`;
+        # Check for parent: snapname format or use qm listsnapshot
+        if ($conf =~ /^\s*parent:\s*$snapname\s*$/m || `qm listsnapshot $vmid 2>/dev/null` =~ /$snapname/) {
+            $conf_found = 1;
+            last;
+        }
+        sleep 1;
+    }
+    ok($conf_found, "QM: Snapshot $snapname exists in config") or return 0;
     
     # 2. Storage has FlashCopy mappings and snapshot volumes
     foreach my $disk (@$disks_ref) {
