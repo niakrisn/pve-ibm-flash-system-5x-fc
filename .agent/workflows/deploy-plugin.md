@@ -14,12 +14,6 @@ rsync -avz --delete PVE/ root@10.4.0.122:/usr/share/perl5/PVE/
 
 **Why dangerous:** The `--delete` flag removes files on the destination that don't exist in the source. Since we only have the plugin in `PVE/Storage/Custom/`, rsync will delete ALL other system modules (API2, CLI, QemuServer, etc.).
 
-### ✅ ALWAYS DO THIS:
-```bash
-# ✅ SAFE - Copies only Custom storage plugins WITHOUT --delete
-rsync -avz PVE/Storage/Custom/ root@10.4.0.122:/usr/share/perl5/PVE/Storage/Custom/
-```
-
 **Key points:**
 - ✅ NO `--delete` flag
 - ✅ Trailing slashes on both paths
@@ -28,31 +22,7 @@ rsync -avz PVE/Storage/Custom/ root@10.4.0.122:/usr/share/perl5/PVE/Storage/Cust
 ## Deployment Steps
 
 ### 1. Deploy Plugin Modules
-
-Copy **ONLY** the Custom storage plugins directory to the system:
-
-```bash
-# ✅ SAFE - Copies entire Custom directory recursively WITHOUT --delete
-rsync -avz PVE/Storage/Custom/ root@10.4.0.122:/usr/share/perl5/PVE/Storage/Custom/
-```
-
-**Important:** Note the trailing slashes in both paths - this ensures we copy the **contents** of the Custom directory, not the directory itself.
-
-**Files deployed:**
-- `IBMFlashSystem.pm` - Main plugin file
-- `IBMFlashSystem/Client.pm` - REST API client
-- `IBMFlashSystem/Common.pm` - Common utilities
-- `IBMFlashSystem/Volume.pm` - Volume operations
-- `IBMFlashSystem/Snapshot.pm` - Snapshot operations
-- `IBMFlashSystem/DeviceManager.pm` - Device management
-- `IBMFlashSystem/FCMap.pm` - FlashCopy operations
-- `IBMFlashSystem/Logger.pm` - Logging
-
-### 2. Restart Proxmox Services
-
-```bash
-ssh root@10.4.0.122 "systemctl restart pvedaemon pveproxy pvestatd"
-```
+- Используй только пакет для деплоя кода на удаленный сервер
 
 ### 3. Verify Deployment
 

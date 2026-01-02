@@ -17,6 +17,7 @@ use PVE::Storage::Custom::IBMFlashSystem::Client;
 use PVE::Storage::Custom::IBMFlashSystem::Common qw(_get_hostname);
 use PVE::Storage::Custom::IBMFlashSystem::Volume;
 use PVE::Storage::Custom::IBMFlashSystem::Snapshot;
+use PVE::Storage::Custom::IBMFlashSystem::Protocol;
 
 # ============================================================================
 # Plugin Declaration (Proxmox Storage API v13)
@@ -49,6 +50,7 @@ sub options {
         disable => { optional => 1 },
         content => { optional => 1 },
         shared => { optional => 1 },
+        protocol => { optional => 1, fixed => 1 },
         debug => {
             optional => 1,
             type => 'integer',
@@ -137,6 +139,11 @@ sub properties {
             minimum => 0,
             maximum => 2,
             default => 0,
+        },
+        protocol => {
+            description => "Storage protocol (FC). Default: fc",
+            type => 'string',
+            default => 'fc',
         },
     };
 }
@@ -304,8 +311,9 @@ sub activate_storage {
         }
     }
 
-    # Check 1: Verify multipathd configuration
-    _check_multipath_runtime_config($class, $scfg);
+    # Check 1: Verify multipathd configuration (via Protocol handler)
+    my $protocol = PVE::Storage::Custom::IBMFlashSystem::Protocol->get_handler($scfg);
+    $protocol->validate_system_config($scfg);
 
     # Check 2: Verify host cluster exists
     my $host_cluster = $scfg->{hostcluster} or die "hostcluster not configured\n";
@@ -356,75 +364,6 @@ sub deactivate_storage {
 # Local Helper Functions
 # ============================================================================
 
-# Check multipathd runtime configuration
-sub _check_multipath_runtime_config {
-    my ($class, $scfg) = @_;
-
-    my $config_output = "";
-
-    # Get current active configuration from multipathd
-    eval {
-        PVE::Tools::run_command(['/usr/sbin/multipathd', 'show', 'config'],
-            logfunc => sub { $config_output .= shift . "\n"; },
-            timeout => 5);
-    };
-
-    if ($@ || !$config_output) {
-        die "multipathd is not running or not responding. " .
-            "Please install multipath-tools and start the service:\n" .
-            "  apt-get install multipath-tools\n" .
-            "  systemctl start multipathd\n";
-    }
-
-    # Parse user_friendly_names - must be 'no'
-    my ($user_friendly_names) = $config_output =~ /user_friendly_names\s+"?([yes|no]+)"?/i;
-    if (defined($user_friendly_names) && lc($user_friendly_names) eq 'yes') {
-        die "CRITICAL: multipathd is configured with 'user_friendly_names yes'. " .
-            "The IBM FlashSystem plugin requires 'user_friendly_names no'.\n";
-    }
-
-    # Parse find_multipaths - must be 'no' or 'off'
-    my ($find_multipaths) = $config_output =~ /find_multipaths\s+"?([yes|no|off|on]+)"?/i;
-    if (defined($find_multipaths) && (lc($find_multipaths) eq 'yes' || lc($find_multipaths) eq 'on')) {
-        die "CRITICAL: multipathd has 'find_multipaths $find_multipaths' enabled. " .
-            "The IBM FlashSystem plugin requires 'find_multipaths no'.\n";
-    }
-
-    return 1;
-}
-
-# Get local WWPNs for FC connectivity
-sub _get_local_wwpns {
-    my ($class) = @_;
-
-    my @wwpns;
-
-    # Scan /sys/class/fc_host for WWPNs
-    if (opendir(my $dh, '/sys/class/fc_host')) {
-        while (my $entry = readdir($dh)) {
-            next if $entry =~ /^\./;
-            my $port_name_file = "/sys/class/fc_host/$entry/port_name";
-            if (-f $port_name_file) {
-                if (open(my $fh, '<', $port_name_file)) {
-                    my $wwpn = <$fh>;
-                    chomp $wwpn;
-                    # Format: 0xXX...XX, convert to XX:XX:...:XX format for IBM API
-                    if ($wwpn =~ /^0x([0-9a-fA-F]{16})$/) {
-                        $wwpn = $1;
-                        $wwpn =~ s/(..)/$1:/g;
-                        $wwpn =~ s/:$//;
-                        push @wwpns, uc($wwpn);
-                    }
-                    close($fh);
-                }
-            }
-        }
-        closedir($dh);
-    }
-
-    return \@wwpns;
-}
-
 # Ensure host exists on storage array and in cluster, create if not
 sub _ensure_host_exists {
     my ($class, $scfg, $storeid) = @_;
@@ -449,7 +388,8 @@ sub _ensure_host_exists {
     unless ($host_exists) {
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Creating host on storage array (hostname=%s)", $hostname);
 
-        my $wwpns = _get_local_wwpns($class);
+        my $protocol = PVE::Storage::Custom::IBMFlashSystem::Protocol->get_handler($scfg);
+        my $wwpns = $protocol->get_local_ports();
 
         # Step 1: Create host without cluster
         my $create_result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/mkhost', {

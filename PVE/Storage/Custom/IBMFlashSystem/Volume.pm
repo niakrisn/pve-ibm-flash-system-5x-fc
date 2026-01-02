@@ -16,7 +16,7 @@ use PVE::Storage::Custom::IBMFlashSystem::Logger;
 # Import common functions via full package name
 use PVE::Storage::Custom::IBMFlashSystem::Common;
 use PVE::Storage::Custom::IBMFlashSystem::FCMap;
-use PVE::Storage::Custom::IBMFlashSystem::DeviceManager;
+use PVE::Storage::Custom::IBMFlashSystem::Protocol;
 
 # Shorthand for common functions
 sub _get_vdisk_id { return PVE::Storage::Custom::IBMFlashSystem::Common::_get_vdisk_id(@_); }
@@ -569,7 +569,8 @@ sub activate_volume {
 
     # 2. Wait for device discovery
     eval {
-        PVE::Storage::Custom::IBMFlashSystem::DeviceManager::wait_for_multipath_device($class, $scfg, $vdisk_uid, 60);
+        my $protocol = PVE::Storage::Custom::IBMFlashSystem::Protocol->get_handler($scfg);
+        $protocol->wait_for_device($scfg, $vdisk_uid, 60);
     };
     if ($@) {
          PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg, "Device discovery timed out for vdisk_uid=%s", $vdisk_uid);
@@ -597,9 +598,10 @@ sub deactivate_volume {
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg,
             "Removing local devices (volname=%s, vdisk_uid=%s)", $volname, $vdisk_uid);
         
-        my $mpath = PVE::Storage::Custom::IBMFlashSystem::DeviceManager::convert_uid_to_mpath_format($class, $vdisk_uid);
-        PVE::Storage::Custom::IBMFlashSystem::DeviceManager::remove_multipath_device($class, $mpath);
-        PVE::Storage::Custom::IBMFlashSystem::DeviceManager::remove_scsi_devices($class, $vdisk_uid);
+        my $protocol = PVE::Storage::Custom::IBMFlashSystem::Protocol->get_handler($scfg);
+        my $mpath = $protocol->convert_uid_to_device($vdisk_uid);
+        $protocol->remove_device($mpath);
+        $protocol->remove_scsi_devices($vdisk_uid);
     }
 
     # Step 2: Remove host mapping on storage array AFTER local cleanup (API Cleanup)
@@ -673,8 +675,9 @@ sub _path {
     # Get vdisk UID for base volume (ignore snapshot name)
     my $vdisk_uid = _get_vdisk_uid($class, $scfg, $volname, $storeid);
 
-    # Convert UID to multipath format
-    my $mpath = PVE::Storage::Custom::IBMFlashSystem::DeviceManager::convert_uid_to_mpath_format($class, $vdisk_uid);
+    # Convert UID to device path via protocol handler
+    my $protocol = PVE::Storage::Custom::IBMFlashSystem::Protocol->get_handler($scfg);
+    my $mpath = $protocol->convert_uid_to_device($vdisk_uid);
 
     # Return multipath device path
     return "/dev/mapper/$mpath";

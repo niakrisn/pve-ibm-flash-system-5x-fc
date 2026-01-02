@@ -66,6 +66,17 @@
                                 allowBlank: !me.isCreate,
                                 emptyText: me.isCreate ? '' : gettext('Unchanged'),
                             },
+                            {
+                                xtype: 'proxmoxKVComboBox',
+                                name: 'protocol',
+                                fieldLabel: gettext('Protocol'),
+                                value: 'fc',
+                                allowBlank: false,
+                                disabled: !me.isCreate,  // Read-only after creation (fixed)
+                                comboItems: [
+                                    ['fc', 'FC (Fibre Channel)'],
+                                ],
+                            },
                         ];
 
                         me.column2 = [
