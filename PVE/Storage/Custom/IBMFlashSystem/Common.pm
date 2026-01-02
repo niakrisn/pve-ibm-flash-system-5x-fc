@@ -172,4 +172,50 @@ sub wait_for_vdisk_state {
     return undef;
 }
 
+# ============================================================================
+# Error Handling
+# ============================================================================
+
+# Check if error string contains specific CMMVC error code
+# IBM FlashSystem returns errors like "CMMVC6035E The action failed..."
+# Reference: https://www.ibm.com/docs/en/flashsystem-5x00/8.4.0?topic=messages-cli-message-reference
+sub error_code_matches {
+    my ($class, $error_string, @codes) = @_;
+
+    return 0 unless $error_string;
+
+    # Extract CMMVC code from error string
+    # Format: "CMMVC5897E The FlashCopy mapping was not deleted..."
+    if ($error_string =~ /CMMVC(\d+[A-Z])/) {
+        my $code = "CMMVC$1";
+        foreach my $check_code (@codes) {
+            return 1 if $code eq $check_code;
+        }
+    }
+    return 0;
+}
+
+# Semantic error helpers for common error types
+
+sub is_already_exists_error {
+    my ($class, $error) = @_;
+    return error_code_matches($class, $error, 'CMMVC6035E', 'CMMVC6374E', 'CMMVC5902E');
+}
+
+sub is_not_found_error {
+    my ($class, $error) = @_;
+    return error_code_matches($class, $error, 'CMMVC5750E', 'CMMVC5753E') || $error =~ /not found|404/i;
+}
+
+sub is_resource_busy_error {
+    my ($class, $error) = @_;
+    return error_code_matches($class, $error, 'CMMVC9055E', 'CMMVC5906E');
+}
+
+sub is_mapping_stopped_error {
+    my ($class, $error) = @_;
+    return error_code_matches($class, $error, 'CMMVC5897E', 'CMMVC5951E') || 
+           $error =~ /already stopped|not active|in the stopped state|stopping/i;
+}
+
 1;
