@@ -11,11 +11,12 @@ use JSON;
 
 our @EXPORT_OK = qw(volume_exists volume_exists_by_wwn cleanup_volume get_volume_info get_volume_uid get_host_mappings get_flashcopy_mappings volume_is_accessible);
 
-# Add plugin paths
-use lib 'PVE/Storage/Custom', 'PVE/Storage/Custom/IBMFlashSystem';
+# Add plugin paths (rely on PERL5LIB for system-installed modules)
+# use lib 'PVE/Storage/Custom', 'PVE/Storage/Custom/IBMFlashSystem';
 
 use PVE::Storage::Custom::IBMFlashSystem::Client;
 use PVE::Storage::Custom::IBMFlashSystem::Logger;
+use PVE::Storage::Custom::IBMFlashSystem::Volume;
 
 # ============================================================================
 # Public API
@@ -68,22 +69,22 @@ sub get_volume_uid {
 
     return undef unless $env && $volname;
 
-    # Use the plugin's internal _get_vdisk_uid method from Common.pm
-    my $result = eval {
-        PVE::Storage::Custom::IBMFlashSystem::Common::_get_vdisk_uid(
+    # Use the new Volume helper
+    my $info = eval {
+        PVE::Storage::Custom::IBMFlashSystem::Volume::_get_volume_info(
             'PVE::Storage::Custom::IBMFlashSystem',
             $env->scfg,
-            $volname,
             $env->storeid,
+            $volname,
         );
     };
 
-    if ($@) {
-        warn "Error getting volume UID for $volname: $@";
+    if ($@ || !$info) {
+        warn "Error getting volume UID for $volname: $@" if $@;
         return undef;
     }
 
-    return $result;
+    return $info->{uid};
 }
 
 # Check if volume exists on storage by WWN
@@ -139,29 +140,17 @@ sub volume_is_accessible {
 }
 
 # Get host mappings for a volume
-# Returns: arrayref of mapping objects
 sub get_host_mappings {
     my ($env, $volname) = @_;
 
-    # Get vdisk_id from volname
-    my $vdisk_id = eval {
-        PVE::Storage::Custom::IBMFlashSystem::Common::_get_vdisk_id(
-            'PVE::Storage::Custom::IBMFlashSystem',
-            $env->scfg,
-            $volname,
-            $env->storeid
-        );
-    };
-    
-    return [] if $@ || !$vdisk_id;
-
+    # Use volname directly as IBM API supports it
     my $result = eval {
         PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
             'PVE::Storage::Custom::IBMFlashSystem',
             $env->scfg,
             $env->storeid,
             'POST',
-            '/lsvdiskhostmap/' . $vdisk_id,
+            '/lsvdiskhostmap/' . $volname,
             {},
         );
     };

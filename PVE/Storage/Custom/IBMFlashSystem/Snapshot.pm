@@ -14,11 +14,13 @@ use PVE::Storage::Custom::IBMFlashSystem::Logger;
 # Import common functions via full package name
 use PVE::Storage::Custom::IBMFlashSystem::Common;
 use PVE::Storage::Custom::IBMFlashSystem::FCMap;
+use PVE::Storage::Custom::IBMFlashSystem::Volume;
 
-# Shorthand for common functions
-sub _get_vdisk_id { return PVE::Storage::Custom::IBMFlashSystem::Common::_get_vdisk_id(@_); }
+# Shorthand for functions from Volume.pm and Common.pm
 sub _get_hostname { return PVE::Storage::Custom::IBMFlashSystem::Common::_get_hostname(@_); }
-sub wait_for_vdisk_state { return PVE::Storage::Custom::IBMFlashSystem::Common::wait_for_vdisk_state(@_); }
+sub _get_volume_info { return PVE::Storage::Custom::IBMFlashSystem::Volume::_get_volume_info(@_); }
+sub wait_for_vdisk_state { return PVE::Storage::Custom::IBMFlashSystem::Volume::wait_for_vdisk_state(@_); }
+sub safe_delete_volume { return PVE::Storage::Custom::IBMFlashSystem::Volume::safe_delete_volume(@_); }
 
 # ============================================================================
 # Snapshot Operations
@@ -225,8 +227,7 @@ sub volume_snapshot {
                 PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/rmfcmap/$fcmap_id", { force => JSON::true });
             };
             eval {
-                my $vdisk_id = _get_vdisk_id($class, $scfg, $snapshot_name, $storeid);
-                PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/rmvdisk/$vdisk_id");
+                PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/rmvdisk/$snapshot_name");
             };
 
             die "Failed to start FlashCopy mapping after $start_attempts attempts: $error\n";
@@ -593,9 +594,8 @@ sub volume_snapshot_delete {
 
     # Remove host mapping from snapshot volume before deletion (idempotent)
     eval {
-        my $vdisk_id = _get_vdisk_id($class, $scfg, $snapshot_name, $storeid);
         my $hostname = _get_hostname($class);
-        PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/rmvdiskhostmap/$vdisk_id", {host => $hostname});
+        PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/rmvdiskhostmap/$snapshot_name", {host => $hostname});
     };
     if ($@) {
         # Ignore if snapshot volume not found (already deleted)
@@ -612,8 +612,7 @@ sub volume_snapshot_delete {
 
     while ($delete_attempts < $max_delete_attempts && !$volume_deleted) {
         eval {
-            my $vdisk_id = _get_vdisk_id($class, $scfg, $snapshot_name, $storeid);
-            PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/rmvdisk/$vdisk_id");
+            PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/rmvdisk/$snapshot_name");
             $volume_deleted = 1;
         };
         if ($@) {
@@ -652,9 +651,8 @@ sub volume_snapshot_delete {
 
                 # Force remove host mapping
                 eval {
-                    my $vdisk_id = _get_vdisk_id($class, $scfg, $snapshot_name, $storeid);
                     my $hostname = _get_hostname($class);
-                    PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/rmvdiskhostmap/$vdisk_id", {host => $hostname});
+                    PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/rmvdiskhostmap/$snapshot_name", {host => $hostname});
                 };
 
                 sleep(1);  # Brief delay before retry
@@ -716,7 +714,6 @@ sub _get_volume_fabric_state {
 
     # Get host mappings
     eval {
-        my $vdisk_id = _get_vdisk_id($class, $scfg, $volname, $storeid);
         my $hostname = _get_hostname($class);
         my $hostmaps = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/lsvdiskhostmap', {});
 
@@ -795,31 +792,30 @@ sub _reconcile_volume_state {
 sub _reconcile_host_mappings {
     my ($class, $scfg, $storeid, $volname) = @_;
 
-    my $vdisk_id = eval { _get_vdisk_id($class, $scfg, $volname, $storeid) };
-    return unless $vdisk_id;  # Volume doesn't exist, nothing to reconcile
+    return unless _get_volume_info($class, $scfg, $storeid, $volname);  # Volume doesn't exist, nothing to reconcile
 
     my $hostname = _get_hostname($class);
 
     # Check if volume is actually mapped to this host
     eval {
-        PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/lsvdiskhostmap/$vdisk_id", {});
+        PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/lsvdiskhostmap/$volname", {});
     };
 
     # If volume doesn't exist or error, we may have a dangling mapping
     if ($@) {
         # Volume was deleted but mapping might still exist
         eval {
-            PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/rmvdiskhostmap/$vdisk_id", {
+            PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/rmvdiskhostmap/$volname", {
                 host => $hostname
             });
         };
         if ($@) {
             # Ignore if mapping doesn't exist (already cleaned)
             if ($@ !~ /CMMVC5750E|not found/i) {
-                PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg, "Failed to remove dangling host mapping (volname=%s, endpoint=/rest/rmvdiskhostmap, vdisk_id=%s, error=%s)", $volname, $vdisk_id, $@);
+                PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg, "Failed to remove dangling host mapping (volname=%s, endpoint=/rest/rmvdiskhostmap, error=%s)", $volname, $@);
             }
         } else {
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Removed dangling host mapping (volname=%s, vdisk_id=%s)", $volname, $vdisk_id);
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Removed dangling host mapping (volname=%s)", $volname);
         }
     }
 
@@ -885,7 +881,5 @@ sub _recover_snapshot_mappings {
 
     return;
 }
-
-# _get_vdisk_id is now in Common.pm with correct signature: ($class, $scfg, $volname, $storeid)
 
 1;
