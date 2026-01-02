@@ -58,12 +58,12 @@ ensure_gui() {
         fi
     fi
 
-    # Ensure JS file exists
-    if [ ! -f "$GUI_JS_TARGET" ]; then
-        mkdir -p "$(dirname "$GUI_JS_TARGET")"
+    # Ensure JS file exists and is up to date
+    mkdir -p "$(dirname "$GUI_JS_TARGET")"
+    if [ -f "$GUI_JS_SOURCE" ]; then
         cp "$GUI_JS_SOURCE" "$GUI_JS_TARGET"
         chmod 644 "$GUI_JS_TARGET"
-        log "  ✓ JS file copied"
+        log "  ✓ JS file updated"
     fi
 }
 

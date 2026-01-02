@@ -2,7 +2,7 @@
 // IBM FlashSystem 5.x FC Storage Plugin for Proxmox VE 9.1+
 // Registration via PVE.Utils.storageSchema
 
-(function() {
+(function () {
     let attempts = 0;
     const maxAttempts = 100;
 
@@ -20,7 +20,7 @@
 
                     onlineHelp: 'storage_ibmflash',
 
-                    initComponent: function() {
+                    initComponent: function () {
                         let me = this;
 
                         me.column1 = [
@@ -63,7 +63,8 @@
                                 inputType: 'password',
                                 name: 'password',
                                 fieldLabel: gettext('Password'),
-                                allowBlank: false,
+                                allowBlank: !me.isCreate,
+                                emptyText: me.isCreate ? '' : gettext('Unchanged'),
                             },
                         ];
 

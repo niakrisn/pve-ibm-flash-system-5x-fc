@@ -76,9 +76,10 @@ sub on_add_hook {
         # Set password first
         _set_password($class, $scfg, $storeid, $password);
 
-        # Verify credentials immediately
+        # Verify credentials immediately with short timeout (5s) user request
+        my $check_scfg = { %$scfg, timeout => 5 };
         eval {
-            PVE::Storage::Custom::IBMFlashSystem::Client::authenticate($class, $scfg, $storeid);
+            PVE::Storage::Custom::IBMFlashSystem::Client::authenticate($class, $check_scfg, $storeid);
         };
         if ($@) {
             # Password is invalid, remove it
@@ -102,67 +103,135 @@ sub on_update_hook {
     my ($class, $storeid, $scfg, %param) = @_;
 
     my $has_password = exists($param{password}) ? 1 : 0;
+    
+    # Log received parameters for debugging (moved up to capture all calls)
+    my @param_keys = keys %param;
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
-        "on_update_hook called (storeid=%s, password_exists=%d)", $storeid, $has_password);
+        "on_update_hook called (storeid=%s, params=%s)", $storeid, join(",", @param_keys));
 
-    # Load full storage config if needed for validation
-    if (exists($param{password}) || exists($param{username}) || exists($param{portal})) {
-        my $cfg = PVE::Storage::config();
-        my $full_scfg = $cfg->{ids}->{$storeid};
-        die "Storage '$storeid' not found in config\n" unless $full_scfg;
+    # Load full storage config if needed for validation (if any relevant param checks)
+    my ($class, $storeid, $update_params, %sensitive_params) = @_;
 
-        # Merge new params into full config
-        foreach my $key (keys %param) {
-            $full_scfg->{$key} = $param{$key};
+    # Proxmox architecture note:
+    # on_update_hook receives:
+    # 1. $storeid
+    # 2. $update_params (HashRef of NON-SENSITIVE changes)
+    # 3. %sensitive_params (List/Hash of SENSITIVE changes like password)
+    
+    # Log debug info
+    my @update_keys = keys %$update_params;
+    my @sensitive_keys = keys %sensitive_params;
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, undef,
+        "on_update_hook called (storeid=%s, updates=[%s], sensitive=[%s])", 
+        $storeid, join(',', @update_keys), join(',', @sensitive_keys));
+
+    # 1. Handle Password Update
+    my $old_password;
+    if (exists($sensitive_params{password})) {
+        # Backup old password first
+        $old_password = _get_password($class, undef, $storeid);
+
+        if (defined($sensitive_params{password})) {
+            _set_password($class, undef, $storeid, $sensitive_params{password});
+        } else {
+            _delete_password($class, undef, $storeid);
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, undef,
+                "Password deleted (storeid=%s)", $storeid);
         }
+    }
 
-        # Clear token if password, username or portal changes (requires re-auth)
-        my $clear_token = 0;
+    # 2. Determine if we need to verify connectivity
+    # Check if any connection-related parameter is being updated
+    my @conn_params = qw(portal port username verify_ssl pool hostcluster);
+    my $verify = 0;
+    
+    # Check sensitive params (password)
+    if (exists($sensitive_params{password}) && defined($sensitive_params{password})) { 
+        $verify = 1; 
+    }
+    
+    # Check non-sensitive params
+    foreach my $p (@conn_params) {
+        if (exists($update_params->{$p})) {
+            $verify = 1;
+            last;
+        }
+    }
 
-        if (exists($param{password})) {
-            $clear_token = 1;
-            if (defined($param{password})) {
-                # Save new password
-                _set_password($class, $full_scfg, $storeid, $param{password});
+    if ($verify) {
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, undef,
+            "Verifying connectivity for updated parameters...");
 
-                # Verify new password
-                eval {
-                    PVE::Storage::Custom::IBMFlashSystem::Client::authenticate($class, $full_scfg, $storeid);
-                };
-                if ($@) {
-                    # Verification failed - remove password
-                    _delete_password($class, $full_scfg, $storeid);
-
-                    my $error = $@;
-                    if ($error =~ /Invalid username or password/) {
-                        die "[IBM FlashSystem] ERROR: Authentication failed - Invalid username or password.\n" .
-                            "Password was NOT updated.\n";
-                    } elsif ($error =~ /Portal not configured/) {
-                        die "[IBM FlashSystem] ERROR: Portal address not configured.\n";
-                    } else {
-                        die "[IBM FlashSystem] ERROR: Authentication failed - $error\n" .
-                            "Password was NOT updated.\n";
-                    }
-                }
-
-                PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $full_scfg,
-                    "Password updated and verified (storeid=%s)", $storeid);
+        # 3. Construct the Candidate Configuration
+        # We need to merge the CURRENT config with the UPDATES to test the new state.
+        
+        my $cfg = PVE::Storage::config();
+        my $current_scfg = $cfg->{ids}->{$storeid};
+        die "Storage '$storeid' not found in config\n" unless $current_scfg;
+        
+        # Create a shallow copy for modification
+        my $candidate_scfg = { %$current_scfg };
+        
+        # Apply non-sensitive updates
+        foreach my $k (keys %$update_params) {
+            if (defined($update_params->{$k})) {
+                $candidate_scfg->{$k} = $update_params->{$k};
             } else {
-                _delete_password($class, $full_scfg, $storeid);
-                PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $full_scfg,
-                    "Password deleted (storeid=%s)", $storeid);
+                delete $candidate_scfg->{$k}; # Deletion logic
             }
         }
-
-        if (exists($param{username}) || exists($param{portal})) {
-            $clear_token = 1;
+        
+        # Apply sensitive updates (password is already saved to file, so authenticate will read it)
+        # But we update other sensitive params if any (plugin has only password)
+        foreach my $k (keys %sensitive_params) {
+             # password is handled via _get_password inside authenticate
+             # just need to ensure other props are copied if valid
+             if (defined($sensitive_params{$k})) {
+                $candidate_scfg->{$k} = $sensitive_params{$k};
+             }
         }
 
-        if ($clear_token) {
-            _clear_cached_token($class, $storeid);
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $full_scfg,
-                "Token cleared due to credential changes (storeid=%s)", $storeid);
+        # Clear token to force fresh authentication using new params
+        _clear_cached_token($class, $storeid);
+
+        # Verify credentials immediately with short timeout (5s) user request
+        $candidate_scfg->{timeout} = 5;
+
+        eval {
+            # Use the CANDIDATE config for authentication!
+            PVE::Storage::Custom::IBMFlashSystem::Client::authenticate($class, $candidate_scfg, $storeid);
+        };
+        if ($@) {
+            my $error = $@;
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, undef,
+                "Verification failed: $error");
+
+            # ROLLBACK: restore old password if we just attempted a change
+            if (exists($sensitive_params{password})) {
+                PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, undef,
+                    "Restoring old password due to verification failure (storeid=%s)", $storeid);
+                if (defined($old_password)) {
+                    _set_password($class, undef, $storeid, $old_password);
+                } else {
+                    _delete_password($class, undef, $storeid);
+                }
+            }
+
+            if ($error =~ /Invalid username or password/) {
+                 die "[IBM FlashSystem] Authentication failed: Invalid username or password.\n";
+            } elsif ($error =~ /Connection refused|Timeout|Can't connect|Host is unreachable/) {
+                 die "[IBM FlashSystem] Connection failed: Cannot connect to " . ($candidate_scfg->{portal} // 'target') . ". Check IP/Port ($error).\n";
+            } else {
+                 # Fallback for any other error - enforce failure
+                 die "[IBM FlashSystem] Connectivity check failed: $error\n";
+            }
         }
+         
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, undef,
+            "Configuration updated and verified (storeid=%s)", $storeid);
+    } else {
+         PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, undef,
+            "Skipping connectivity verification (no connection params changed)");
     }
 
     return;

@@ -35,11 +35,11 @@ sub api {
 # Configuration options
 sub options {
     return {
-        portal => { fixed => 1 },
+        portal => { optional => 1 },
         port => { optional => 1 },
-        pool => { fixed => 1 },
-        hostcluster => { fixed => 1 },
-        username => { fixed => 1 },
+        pool => { optional => 1 },
+        hostcluster => { optional => 1 },
+        username => { optional => 1 },
         password => { optional => 1 },
         timeout => { optional => 1 },
         verify_ssl => { optional => 1 },
