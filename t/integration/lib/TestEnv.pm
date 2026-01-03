@@ -11,13 +11,16 @@ use Exporter 'import';
 our @EXPORT_OK = qw(setup);
 
 # Add plugin paths to @INC
-# Note: Must include '.' for relative paths to work
-use lib '.', 't/integration/lib', 't/unit/lib', 'PVE/Storage/Custom', 'PVE/Storage/Custom/IBMFlashSystem';
+# Note: Must include '.' for relative paths to work, and installed paths for the package
+use lib '.', 't/integration/lib', 't/unit/lib', 
+        '/usr/share/perl5', 
+        '/usr/share/pve-ibm-fs5x-fc-plugin-tests/lib';
 
 # Load plugin modules
 use PVE::Storage::Custom::IBMFlashSystem::Client;
 use PVE::Storage::Custom::IBMFlashSystem::Logger;
 use PVE::Tools qw(file_get_contents);
+use JSON;
 
 # Load test helpers
 use VMHelpers;
@@ -31,24 +34,36 @@ use VMHelpers;
 sub setup {
     my ($class, %params) = @_;
 
-    # Get storeid from env or use fs-01 (existing storage config)
-    my $storeid = $ENV{IBMFS_STOREID} || $params{storeid} || 'fs-01';
+    my $config_path = "/etc/pve/ibm-fs5x-tests.conf";
+    my $config = {};
+
+    # Load from config file if exists
+    if (-f $config_path) {
+        eval {
+            my $raw = file_get_contents($config_path);
+            $config = decode_json($raw) if $raw;
+        };
+        warn "Failed to load test config from $config_path: $@\n" if $@;
+    }
+
+    # Precedence: Env > Params > Config > Default
+    my $storeid = $ENV{IBMFS_STOREID} || $params{storeid} || $config->{flashsystem_storage} || 'fs-01';
+    my $local_storeid = $ENV{IBMFS_LOCAL_STOREID} || $params{local_storeid} || $config->{local_storage} || 'local-lvm';
 
     # Try to load storage config from Proxmox
     my $scfg;
-    eval {
-        require PVE::Storage;
-        my $storage_cfg = PVE::Storage::config();
-        $scfg = $storage_cfg->{ids}->{$storeid};
-    };
+    require PVE::Storage;
+    my $storage_cfg = PVE::Storage::config();
+    $scfg = $storage_cfg->{ids}->{$storeid};
 
-    # If loading from Proxmox fails, build minimal config
-    unless ($scfg) {
+    if (!$scfg) {
+        # Fallback to manual setup for standalone/unit tests if Proxmox config is missing
         my $portal = $ENV{IBMFS_PORTAL} || $params{portal} || '10.0.0.222';
         my $pool   = $ENV{IBMFS_POOL}   || $params{pool}   || 'pool-pvc-01';
         my $username = $ENV{IBMFS_USER} || $params{username} || 'pvcu';
 
         $scfg = {
+            type     => 'ibmflashsystem',
             storage  => $storeid,
             portal   => $portal,
             pool     => $pool,
@@ -59,7 +74,7 @@ sub setup {
     }
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
-        "Setting up integration test environment (storeid=%s)", $storeid);
+        "Setting up integration test environment (storeid=%s, local=%s)", $storeid, $local_storeid);
 
     # Try to use existing token from cache
     my $token;
@@ -91,16 +106,15 @@ sub setup {
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
         "Integration test environment setup complete (storeid=%s)", $storeid);
 
-    # Create env object first
+    # Create env object
     my $env = bless {
         scfg    => $scfg,
         storeid => $storeid,
-        local_storeid => 'local-lvm',
+        local_storeid => $local_storeid,
         token   => $token,
     }, $class;
 
     # Clean up orphan FC devices from previous test runs
-    # This ensures tests start with a clean slate
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
         "Cleaning up orphan FC devices (storeid=%s)", $storeid);
     VMHelpers::cleanup_orphan_fc_devices($env);

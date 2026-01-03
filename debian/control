@@ -1,11 +1,16 @@
-Package: pve-ibm-fs5x-fc-plugin
-Version: @VERSION@
+Source: pve-ibm-fs5x-fc-plugin
 Section: admin
 Priority: optional
+Maintainer: Nikita Kozlov <niakrisn@gmail.com>
+Build-Depends: debhelper (>= 10)
+Standards-Version: 4.5.0
+
+Package: pve-ibm-fs5x-fc-plugin
+Version: @VERSION@
 Architecture: all
+Maintainer: Nikita Kozlov <niakrisn@gmail.com>
 Depends: pve-manager (>= 9.0), pve-manager (<< 10.0)
 Recommends: patch, multipath-tools, liblwp-protocol-https-perl, libjson-perl
-Maintainer: Nikita Kozlov <niakrisn@gmail.com>
 Description: Proxmox VE plugin for IBM FlashSystem 5.x FC storage
  Proxmox VE storage plugin for IBM FlashSystem 5.x series storage
  arrays via Fibre Channel. Supports volume management, snapshots,
@@ -17,3 +22,15 @@ Description: Proxmox VE plugin for IBM FlashSystem 5.x FC storage
   - GUI integration for web interface
  .
  This package is specific to Proxmox VE 9.x.
+
+Package: pve-ibm-fs5x-fc-plugin-tests
+Version: @VERSION@
+Architecture: all
+Maintainer: Nikita Kozlov <niakrisn@gmail.com>
+Depends: pve-ibm-fs5x-fc-plugin (= @VERSION@), libjson-perl, libtest-mockmodule-perl, libtest-simple-perl
+Description: Integration tests for IBM FlashSystem 5.x FC Storage Plugin
+ This package contains integration tests and a runner script to verify
+ the functionality of the IBM FlashSystem plugin on a Proxmox VE node.
+ .
+ After installation, create /etc/pve/ibm-fs5x-tests.conf with storage IDs
+ and run: pve-ibm-fs5x-test-runner

@@ -1,9 +1,3 @@
-# CLAUDE.md
-
-Отвечай только по-русски.
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Project Overview
 
 Proxmox VE storage plugin for IBM FlashSystem 5.x series storage arrays via Fibre Channel. This is a **Perl-based custom storage plugin** implementing Proxmox Storage API v13.
