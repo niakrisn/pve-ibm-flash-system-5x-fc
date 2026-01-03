@@ -507,10 +507,10 @@ sub on_add_hook {
 }
 
 sub on_update_hook {
-    my ($class, $storeid, $scfg, $update_params, %sensitive_params) = @_;
+    my ($class, $storeid, $scfg, %sensitive_params) = @_;
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER on_update_hook (storeid=%s)", $storeid);
     my $res = PVE::Storage::Custom::IBMFlashSystem::Client::on_update_hook(
-        $class, $storeid, $scfg, $update_params, %sensitive_params
+        $class, $storeid, $scfg, %sensitive_params
     );
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT on_update_hook");
     return $res;
