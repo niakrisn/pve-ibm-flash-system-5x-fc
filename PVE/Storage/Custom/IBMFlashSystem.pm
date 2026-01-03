@@ -75,7 +75,7 @@ sub plugindata {
 sub volume_has_feature {
     my ($class, $scfg, $feature, $storeid, $volname, $snapname, $running) = @_;
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "volume_has_feature check: feature=%s, volname=%s", $feature, $volname // 'undef');
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER volume_has_feature (feature=%s, volname=%s)", $feature, $volname // 'undef');
 
     # Features supported by IBM FlashSystem
     my %features = (
@@ -100,7 +100,7 @@ sub volume_has_feature {
         $res = { current => { raw => 1 } };
     }
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "volume_has_feature result: feature=%s, res=%s", $feature, $res // 'undef');
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT volume_has_feature (result=%s)", $res // 'undef');
     return $res;
 }
 
@@ -199,7 +199,10 @@ sub volume_is_base {
 
 sub status {
     my ($class, $storeid, $scfg, $cache) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Volume::status($class, $storeid, $scfg, $cache);
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER status (storeid=%s)", $storeid);
+    my @res = PVE::Storage::Custom::IBMFlashSystem::Volume::status($class, $storeid, $scfg, $cache);
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT status (total=%d, free=%d, used=%d)", $res[0], $res[1], $res[2]);
+    return wantarray ? @res : $res[0];
 }
 
 sub alloc_image {
@@ -211,83 +214,120 @@ sub alloc_image {
         $name = $class->find_free_diskname($storeid, $scfg, $vmid, $fmt);
     }
 
-    return PVE::Storage::Custom::IBMFlashSystem::Volume::alloc_image(
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER alloc_image (storeid=%s, vmid=%s, name=%s, size=%d)", $storeid, $vmid, $name, $size);
+
+    my $res = PVE::Storage::Custom::IBMFlashSystem::Volume::alloc_image(
         $class, $storeid, $scfg, $vmid, $fmt, $name, $size
     );
+
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT alloc_image (name=%s)", $res);
+    return $res;
 }
 
 sub clone_image {
     my ($class, $scfg, $storeid, $volname, $vmid, $snapname) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Volume::clone_image(
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER clone_image (storeid=%s, source=%s, target_vmid=%s, snapname=%s)", $storeid, $volname, $vmid, $snapname // 'undef');
+    my $res = PVE::Storage::Custom::IBMFlashSystem::Volume::clone_image(
         $class, $scfg, $storeid, $volname, $vmid, $snapname
     );
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT clone_image (name=%s)", $res);
+    return $res;
 }
 
 sub create_base {
     my ($class, $storeid, $scfg, $volname) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Volume::create_base(
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER create_base (storeid=%s, volname=%s)", $storeid, $volname);
+    my $res = PVE::Storage::Custom::IBMFlashSystem::Volume::create_base(
         $class, $storeid, $scfg, $volname
     );
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT create_base (name=%s)", $res);
+    return $res;
 }
 
 sub volume_size_info {
     my ($class, $scfg, $storeid, $volname, $timeout) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Volume::volume_size_info(
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER volume_size_info (storeid=%s, volname=%s)", $storeid, $volname);
+    my @res = PVE::Storage::Custom::IBMFlashSystem::Volume::volume_size_info(
         $class, $scfg, $storeid, $volname, $timeout
     );
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT volume_size_info (size=%d)", $res[0]);
+    return wantarray ? @res : $res[0];
 }
 
 sub volume_resize {
     my ($class, $scfg, $storeid, $volname, $size, $running) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Volume::volume_resize(
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER volume_resize (storeid=%s, volname=%s, size=%d)", $storeid, $volname, $size);
+    PVE::Storage::Custom::IBMFlashSystem::Volume::volume_resize(
         $class, $scfg, $storeid, $volname, $size, $running
     );
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT volume_resize");
+    return;
 }
 
 sub list_images {
     my ($class, $storeid, $scfg, $vmid, $vollist, $cache) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Volume::list_images(
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER list_images (storeid=%s, vmid=%s)", $storeid, $vmid // 'all');
+    my $res = PVE::Storage::Custom::IBMFlashSystem::Volume::list_images(
         $class, $storeid, $scfg, $vmid, $vollist
     );
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT list_images (count=%d)", scalar(@$res));
+    return $res;
 }
 
 sub free_image {
     my ($class, $storeid, $scfg, $volname, $isBase) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Volume::free_image(
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER free_image (storeid=%s, volname=%s, isBase=%s)", $storeid, $volname, $isBase // '0');
+    PVE::Storage::Custom::IBMFlashSystem::Volume::free_image(
         $class, $storeid, $scfg, $volname, $isBase
     );
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT free_image");
+    return;
 }
 
 sub rename_volume {
     my ($class, $scfg, $storeid, $source_volname, $target_vmid, $target_volname) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Volume::rename_volume(
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER rename_volume (storeid=%s, source=%s, target_vmid=%s, target=%s)", $storeid, $source_volname, $target_vmid, $target_volname);
+    my $res = PVE::Storage::Custom::IBMFlashSystem::Volume::rename_volume(
         $class, $scfg, $storeid, $source_volname, $target_vmid, $target_volname
     );
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT rename_volume (res=%s)", $res);
+    return $res;
 }
 
 sub activate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Volume::activate_volume(
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER activate_volume (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname // 'undef');
+    PVE::Storage::Custom::IBMFlashSystem::Volume::activate_volume(
         $class, $storeid, $scfg, $volname, $snapname, $cache
     );
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT activate_volume");
+    return;
 }
 
 sub deactivate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Volume::deactivate_volume(
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER deactivate_volume (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname // 'undef');
+    PVE::Storage::Custom::IBMFlashSystem::Volume::deactivate_volume(
         $class, $storeid, $scfg, $volname, $snapname, $cache
     );
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT deactivate_volume");
+    return;
 }
 
 sub path {
     my ($class, $scfg, $volname, $storeid, $snapname) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Volume::path(
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER path (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname // 'undef');
+    my $res = PVE::Storage::Custom::IBMFlashSystem::Volume::path(
         $class, $scfg, $volname, $storeid, $snapname
     );
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT path (res=%s)", $res);
+    return $res;
 }
 
 sub activate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
+
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER activate_storage (storeid=%s)", $storeid);
 
     # Temporarily disable all logging (except errors/warnings) for this function
     local $scfg->{_quiet} = 1;
@@ -332,11 +372,14 @@ sub activate_storage {
     # Check 4: Ensure host exists on storage array
     _ensure_host_exists($class, $scfg, $storeid);
 
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT activate_storage");
     return 1;
 }
 
 sub deactivate_storage {
     my ($class, $storeid, $scfg, $cache) = @_;
+
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER deactivate_storage (storeid=%s)", $storeid);
 
     my $hostname = _get_hostname($class);
     my $host_cluster = $scfg->{hostcluster} or die "hostcluster not configured\n";
@@ -357,6 +400,7 @@ sub deactivate_storage {
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Storage deactivated (storeid=%s)", $storeid);
 
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT deactivate_storage");
     return 1;
 }
 
@@ -423,30 +467,42 @@ sub _ensure_host_exists {
 
 sub volume_snapshot {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Snapshot::volume_snapshot(
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER volume_snapshot (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname);
+    my $res = PVE::Storage::Custom::IBMFlashSystem::Snapshot::volume_snapshot(
         $class, $scfg, $storeid, $volname, $snapname
     );
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT volume_snapshot");
+    return $res;
 }
 
 sub volume_snapshot_rollback {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Snapshot::volume_snapshot_rollback(
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER volume_snapshot_rollback (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname);
+    my $res = PVE::Storage::Custom::IBMFlashSystem::Snapshot::volume_snapshot_rollback(
         $class, $scfg, $storeid, $volname, $snapname
     );
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT volume_snapshot_rollback");
+    return $res;
 }
 
 sub volume_snapshot_delete {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Snapshot::volume_snapshot_delete(
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER volume_snapshot_delete (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname);
+    my $res = PVE::Storage::Custom::IBMFlashSystem::Snapshot::volume_snapshot_delete(
         $class, $scfg, $storeid, $volname, $snapname
     );
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT volume_snapshot_delete");
+    return $res;
 }
 
 sub volume_has_snapshot {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Snapshot::_volume_has_snapshot(
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER volume_has_snapshot (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname);
+    my $res = PVE::Storage::Custom::IBMFlashSystem::Snapshot::_volume_has_snapshot(
         $class, $scfg, $storeid, $volname, $snapname
     );
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT volume_has_snapshot (res=%s)", $res // 'undef');
+    return $res;
 }
 
 # ============================================================================
@@ -455,23 +511,32 @@ sub volume_has_snapshot {
 
 sub on_add_hook {
     my ($class, $storeid, $scfg, %param) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Client::on_add_hook(
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER on_add_hook (storeid=%s)", $storeid);
+    my $res = PVE::Storage::Custom::IBMFlashSystem::Client::on_add_hook(
         $class, $storeid, $scfg, %param
     );
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT on_add_hook");
+    return $res;
 }
 
 sub on_update_hook {
     my ($class, $storeid, $scfg, $update_params, %sensitive_params) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Client::on_update_hook(
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER on_update_hook (storeid=%s)", $storeid);
+    my $res = PVE::Storage::Custom::IBMFlashSystem::Client::on_update_hook(
         $class, $storeid, $scfg, $update_params, %sensitive_params
     );
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT on_update_hook");
+    return $res;
 }
 
 sub on_delete_hook {
     my ($class, $storeid, $scfg) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Client::on_delete_hook(
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER on_delete_hook (storeid=%s)", $storeid);
+    my $res = PVE::Storage::Custom::IBMFlashSystem::Client::on_delete_hook(
         $class, $storeid, $scfg
     );
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT on_delete_hook");
+    return $res;
 }
 
 # ============================================================================
@@ -480,12 +545,15 @@ sub on_delete_hook {
 
 sub qemu_blockdev_options {
     my ($class, $scfg, $storeid, $volname, $machine_version, $options) = @_;
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER qemu_blockdev_options (storeid=%s, volname=%s)", $storeid, $volname);
 
     # Get snapshot name from options (not from machine_version parameter!)
     my $snapname = $options->{'snapshot-name'};
 
     # Call path() with correct parameter order: volname BEFORE storeid
     my $path = $class->path($scfg, $volname, $storeid, $snapname);
+
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT qemu_blockdev_options (path=%s)", $path);
 
     # Return blockdev options in format expected by QEMU
     # For FC block devices (/dev/mapper/...), use host_device driver

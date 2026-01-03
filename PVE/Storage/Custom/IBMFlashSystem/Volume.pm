@@ -128,8 +128,6 @@ sub status {
     # Temporarily disable all logging (except errors/warnings) for this function
     local $scfg->{_quiet} = 1;
 
-    #PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER status (storeid=%s)", $storeid);
-
     # Get pool info (includes Volume Protection check)
     my $pool_info = get_pool_info($class, $scfg, $storeid);
 
@@ -137,8 +135,6 @@ sub status {
     my $total = $pool_info->{capacity} || 0;
     my $free = $pool_info->{free_capacity} || 0;
     my $used = $total - $free;
-
-    #PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT status successfully (storeid=%s, total=%d, free=%d, used=%d)", $storeid, $total, $free, $used);
 
     return ($total, $free, $used, 1);
 }
@@ -180,8 +176,6 @@ sub alloc_image {
 
     # Proxmox passes size in kilobytes, convert to bytes
     my $size_bytes = $size * 1024;
-
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER alloc_image (storeid=%s, vmid=%s, name=%s, size=%d)", $storeid, $vmid, $name, $size_bytes);
 
     # Reject state/vmstate volumes - RAM snapshots not supported on block storage
     # State files must be stored on local directory storage, not on SAN
@@ -232,8 +226,6 @@ sub clone_image {
         $snapname = undef;
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Function clone_image invoked with __FULL_CLONE__ signal - forcing hardware full clone offload");
     }
-
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER clone_image (storeid=%s, source=%s, target_vmid=%s)", $storeid, $volname, $vmid);
 
     # Check if source is a template by two methods:
     # 1. Check if volume name starts with "base-"
@@ -322,8 +314,6 @@ sub clone_image {
     }
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Full clone created successfully (storeid=%s, source=%s, target=%s)", $storeid, $volname, $new_name);
-
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT clone_image successfully (storeid=%s, source=%s, target=%s)", $storeid, $volname, $new_name);
 
     return $new_name;
 }
@@ -423,15 +413,11 @@ sub rename_volume {
 sub volume_size_info {
     my ($class, $scfg, $storeid, $volname, $timeout) = @_;
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER volume_size_info (storeid=%s, volname=%s)", $storeid, $volname);
-
     my $vol_info = _get_volume_info($class, $scfg, $storeid, $volname);
     die "Volume '$volname' not found\n" unless $vol_info;
 
     my $size_bytes = $vol_info->{size} || 0;
     my $used_bytes = $vol_info->{used} || 0;
-
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT volume_size_info (storeid=%s, volname=%s, capacity=%d, used=%d)", $storeid, $volname, $size_bytes, $used_bytes);
 
     return wantarray ? ($size_bytes, 'raw', $used_bytes, undef) : $size_bytes;
 }
@@ -439,8 +425,6 @@ sub volume_size_info {
 # Resize a volume
 sub volume_resize {
     my ($class, $scfg, $storeid, $volname, $size, $running) = @_;
-
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER volume_resize (storeid=%s, volname=%s, size=%d)", $storeid, $volname, $size);
 
     # Proxmox passes size in bytes to volume_resize
     my $new_size_bytes = $size;
@@ -479,7 +463,6 @@ sub list_images {
 
     # vmid can be undef when listing all volumes
     my $vmid_display = defined($vmid) ? $vmid : 'all';
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER list_images (storeid=%s, vmid=%s)", $storeid, $vmid_display);
 
     my $pool_name = $scfg->{pool} or die "Pool not configured\n";
 
@@ -557,8 +540,6 @@ sub list_images {
         };
     }
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT list_images successfully (storeid=%s, count=%d)", $storeid, scalar(@$volumes));
-
     return $volumes;
 }
 
@@ -568,8 +549,6 @@ sub free_image {
 
     # Default isBase to 0 if undef
     $isBase //= 0;
-
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER free_image (storeid=%s, volname=%s, is_base=%d)", $storeid, $volname, $isBase);
 
     # Check if volume exists - return if not (Idempotency)
     if (!_get_volume_info($class, $scfg, $storeid, $volname)) {
@@ -620,8 +599,6 @@ sub free_image {
 # Activate volume (map to host)
 sub activate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
-
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER activate_volume (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname // 'undef');
 
     my $hostname = _get_hostname($class);
     my $vol_info = _get_volume_info($class, $scfg, $storeid, $volname);
@@ -676,8 +653,6 @@ sub activate_volume {
 # Deactivate volume (unmap from host)
 sub deactivate_volume {
     my ($class, $storeid, $scfg, $volname, $snapname, $cache) = @_;
-
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER deactivate_volume (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname // 'undef');
 
     my $hostname = _get_hostname($class);
 
@@ -758,8 +733,6 @@ sub deactivate_volume {
 # Get the device path for a volume
 sub path {
     my ($class, $scfg, $volname, $storeid, $snapname) = @_;
-
-    # For FlashCopy snapshots: always use base volume's device
     # Snapshots don't have separate FC mappings/devices on the host
     # The snapshot data is accessed through the base volume's device
     # Ignore $snapname parameter - it's only used for API calls elsewhere

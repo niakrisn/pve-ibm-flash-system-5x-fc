@@ -97,8 +97,6 @@ sub _volume_has_snapshot {
 sub volume_snapshot {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER volume_snapshot (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname);
-
     # PRE-OPERATION STATE CHECK: Clean up any orphaned state from previous runs
     _reconcile_volume_state($class, $scfg, $storeid, $volname);
 
@@ -214,7 +212,7 @@ sub volume_snapshot {
             $start_attempts++;
             my $error = $@;
 
-            # CMMVC5906E = mapping is in preparing state, wait and retry
+            # CMMVC5906E = mapping in preparing state, wait and retry
             if (PVE::Storage::Custom::IBMFlashSystem::Common::error_code_matches($class, $error, 'CMMVC5906E') && $start_attempts < $max_start_attempts) {
                 PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "Mapping in preparing state, waiting (fcmap_id=%s, attempt=%d)", $fcmap_id, $start_attempts);
                 sleep(1);
@@ -239,8 +237,6 @@ sub volume_snapshot {
     PVE::Storage::Custom::IBMFlashSystem::FCMap::wait_for_fcmap_state($class, $scfg, $storeid, $fcmap_id, ['copying', 'idle_or_copied'], 60);
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Snapshot created successfully (storeid=%s, volname=%s, snapname=%s, snapshot_name=%s)", $storeid, $volname, $snapname, $snapshot_name);
-
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT volume_snapshot successfully (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname);
 
     return $snapshot_name;
 }
@@ -282,8 +278,6 @@ sub volume_snapshot_rollback {
         # Clear the incomplete state - we'll try again
         PVE::Storage::Custom::IBMFlashSystem::Client::clear_rollback_state($class, $volname);
     }
-
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER volume_snapshot_rollback (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname);
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Rolling back to snapshot (manual reverse-sync, preserving other snapshots) (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname);
 
@@ -506,16 +500,12 @@ sub volume_snapshot_rollback {
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Rollback completed (other snapshots preserved) (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname);
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT volume_snapshot_rollback successfully (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname);
-
     return;
 }
 
 # Delete a snapshot with idempotency (success if already deleted)
 sub volume_snapshot_delete {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
-
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER volume_snapshot_delete (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname);
 
     # PRE-OPERATION STATE CHECK: Clean up any orphaned state from previous runs
     _reconcile_volume_state($class, $scfg, $storeid, $volname);
@@ -667,8 +657,6 @@ sub volume_snapshot_delete {
     }
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Snapshot deleted successfully (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname);
-
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT volume_snapshot_delete successfully (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname);
 
     return;
 }
