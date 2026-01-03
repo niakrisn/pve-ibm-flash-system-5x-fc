@@ -25,6 +25,37 @@ sub _get_hostname { return PVE::Storage::Custom::IBMFlashSystem::Common::_get_ho
 # Volume Helpers
 # ============================================================================
 
+# Parse volume name into components
+sub parse_volname {
+    my ($class, $volname) = @_;
+
+    # VM/CT disks: vm-<VMID>-disk-<INDEX> or vm-<VMID>-cloudinit
+    if ($volname =~ m/^vm-(\d+)-(?:disk-\d+|cloudinit)(?:\.\w+)?$/) {
+        my $vmid = $1;
+        my $extension = $2 // '';
+        my $format = $extension eq '.raw' || !$extension ? 'raw' : 'raw';
+        return ('images', $volname, $vmid, undef, undef, undef, $format);
+    }
+
+    # Template/base disks: base-<VMID>-disk-<INDEX> or base-<VMID>-cloudinit
+    if ($volname =~ m/^base-(\d+)-(?:disk-\d+|cloudinit)(?:\.\w+)?$/) {
+        my $vmid = $1;
+        my $extension = $2 // '';
+        my $format = $extension eq '.raw' || !$extension ? 'raw' : 'raw';
+        return ('images', $volname, $vmid, undef, undef, undef, $format);
+    }
+
+    # State snapshots are not supported on block storage
+    return;
+}
+
+# Check if volume is a base template (immutable)
+sub volume_is_base {
+    my ($class, $scfg, $volname) = @_;
+
+    return ($volname =~ m/^base-/) ? 1 : 0;
+}
+
 # Get volume info from storage array
 # Returns hashref { id, uid, size, used } or undef if volume doesn't exist
 sub _get_volume_info {

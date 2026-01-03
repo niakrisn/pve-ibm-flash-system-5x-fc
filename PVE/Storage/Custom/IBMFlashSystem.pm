@@ -155,25 +155,10 @@ sub properties {
 # Parse volume name into components
 sub parse_volname {
     my ($class, $volname) = @_;
-
-    # VM/CT disks: vm-<VMID>-disk-<INDEX> or vm-<VMID>-cloudinit
-    if ($volname =~ m/^vm-(\d+)-(?:disk-\d+|cloudinit)(?:\.\w+)?$/) {
-        my $vmid = $1;
-        my $extension = $2 // '';
-        my $format = $extension eq '.raw' || !$extension ? 'raw' : 'raw';
-        return ('images', $volname, $vmid, undef, undef, undef, $format);
-    }
-
-    # Template/base disks: base-<VMID>-disk-<INDEX> or base-<VMID>-cloudinit
-    if ($volname =~ m/^base-(\d+)-(?:disk-\d+|cloudinit)(?:\.\w+)?$/) {
-        my $vmid = $1;
-        my $extension = $2 // '';
-        my $format = $extension eq '.raw' || !$extension ? 'raw' : 'raw';
-        return ('images', $volname, $vmid, undef, undef, undef, $format);
-    }
-
-    # State snapshots are not supported on block storage
-    return;
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, undef, "ENTER parse_volname (volname=%s)", $volname);
+    my @res = PVE::Storage::Custom::IBMFlashSystem::Volume::parse_volname($class, $volname);
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, undef, "EXIT parse_volname (vmid=%s)", $res[2] // 'undef');
+    return @res;
 }
 
 # Find free diskname
@@ -189,8 +174,10 @@ sub find_free_diskname {
 # Check if volume is a base template (immutable)
 sub volume_is_base {
     my ($class, $scfg, $volname) = @_;
-
-    return ($volname =~ m/^base-/) ? 1 : 0;
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER volume_is_base (volname=%s)", $volname);
+    my $res = PVE::Storage::Custom::IBMFlashSystem::Volume::volume_is_base($class, $scfg, $volname);
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT volume_is_base (res=%d)", $res);
+    return $res;
 }
 
 # ============================================================================
