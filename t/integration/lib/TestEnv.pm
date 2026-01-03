@@ -95,6 +95,7 @@ sub setup {
     my $env = bless {
         scfg    => $scfg,
         storeid => $storeid,
+        local_storeid => 'local-lvm',
         token   => $token,
     }, $class;
 

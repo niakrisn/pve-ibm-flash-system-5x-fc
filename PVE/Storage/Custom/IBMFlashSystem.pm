@@ -91,9 +91,13 @@ sub volume_has_feature {
     if ($feature eq 'clone') {
         $res = undef;
     } elsif ($feature eq 'copy') {
-        $res = { base => { raw => 1 }, current => { raw => 1 }, snap => { raw => 1 } };
+        $res = { 
+            base => { raw => 1, offload => 1 }, 
+            current => { raw => 1, offload => 1 }, 
+            snap => { raw => 1 } 
+        };
     } elsif ($feature eq 'template') {
-        $res = { current => { raw => 1 } };
+        $res = { current => { raw => 1, offload => 1 } };
     } elsif ($feature eq 'sparseinit') {
         $res = { base => { raw => 1 }, current => { raw => 1 } };
     } elsif ($feature eq 'snapshot') {

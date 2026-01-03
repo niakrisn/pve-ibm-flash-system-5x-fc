@@ -12,6 +12,8 @@ use StateVerifier;
 
 our @EXPORT_OK = qw(
     create_q35_vm
+    create_vm_on_storage
+    convert_to_template
     verify_full_lifecycle
     cleanup_vm
 );
@@ -117,6 +119,46 @@ sub cleanup_vm {
     
     # Try to destroy VM
     eval { system('qm', 'destroy', $vmid, '--destroy-unreferenced-disks', '1') };
+}
+
+
+# Create VM on specific storage
+# Args: ($env, $vmid, $storeid, $scsi_disks_arrayref)
+sub create_vm_on_storage {
+    my ($env, $vmid, $storeid, $scsi_disks) = @_;
+    $scsi_disks //= [];
+    
+    my @cmd = (
+        'qm', 'create', $vmid,
+        '--bios', 'ovmf',
+        '--machine', 'q35',
+        '--scsihw', 'virtio-scsi-pci',
+        '--memory', '512',
+    );
+    
+    # Add SCSI disks
+    foreach my $disk (@$scsi_disks) {
+        my $slot = $disk->{slot};
+        my $size = $disk->{size};
+        $size =~ s/G$//i;
+        push @cmd, "--scsi$slot", "$storeid:$size";
+    }
+
+    # Add EFI disk if not on local-lvm
+    if ($storeid =~ /^fs-/) {
+        push @cmd, '--efidisk0', "$storeid:1,efitype=4m";
+    }
+    
+    my $result = system(@cmd);
+    return $result == 0 ? 1 : 0;
+}
+
+# Convert VM to template
+# Args: ($vmid)
+sub convert_to_template {
+    my ($vmid) = @_;
+    my $result = system('qm', 'template', $vmid);
+    return $result == 0 ? 1 : 0;
 }
 
 1;

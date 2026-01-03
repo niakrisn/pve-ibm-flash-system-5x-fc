@@ -1,90 +1,145 @@
---- PVE/API2/Qemu.pm	2025-12-31 19:26:49
-+++ PVE/API2/Qemu.pm	2026-01-01 11:52:34
-@@ -4520,7 +4520,18 @@
+--- PVE/API2/Qemu.pm	2026-01-03 13:49:28
++++ PVE/API2/Qemu.pm	2026-01-03 13:51:07
+@@ -4515,12 +4515,52 @@
+ 
+             my $newvollist = [];
+             my $jobs = {};
++            my $all_same_storage_offload = 0;
++            my @offload_volids = ();
+ 
+             eval {
                  local $SIG{INT} = local $SIG{TERM} = local $SIG{QUIT} = local $SIG{HUP} =
                      sub { die "interrupted by signal\n"; };
  
 -                PVE::Storage::activate_volumes($storecfg, $vollist, $snapname);
-+                # IBM FlashSystem: Optimization - only activate if storage-level clone/copy not supported
-+                my $need_source_activation = 0;
++                # Helper: check if volume has offload capability
++                my $volume_has_offload = sub {
++                    my ($volid) = @_;
++                    my $features = PVE::Storage::volume_has_feature($storecfg, 'copy', $volid, $snapname, $running);
++                    return 0 unless $features && ref($features) eq 'HASH';
++                    my (undef, $volname) = PVE::Storage::parse_volume_id($volid);
++                    my $isBase = ($volname =~ m/^base-/) ? 1 : 0;
++                    my $key = $snapname ? 'snap' : ($isBase ? 'base' : 'current');
++                    return $features->{$key}->{offload} ? 1 : 0;
++                };
++
++                # Check: all sources on same storage with offload?
++                $all_same_storage_offload = 1;
++                my $first_storeid = undef;
++                @offload_volids = ();
++
 +                foreach my $volid (@$vollist) {
-+                    my $has_clone = PVE::Storage::volume_has_feature($storecfg, 'clone', $volid, $snapname, $running);
-+                    my $has_copy = PVE::Storage::volume_has_feature($storecfg, 'copy', $volid, $snapname, $running);
-+                    if (!$has_clone && !$has_copy) {
-+                        $need_source_activation = 1;
-+                        last;
++                    my ($storeid) = PVE::Storage::parse_volume_id($volid);
++                    $first_storeid //= $storeid;
++
++                    if ($storeid ne $first_storeid) {
++                        $all_same_storage_offload = 0;
++                    }
++
++                    if ($volume_has_offload->($volid)) {
++                        push @offload_volids, $volid;
++                    } else {
++                        $all_same_storage_offload = 0;
 +                    }
 +                }
-+                PVE::Storage::activate_volumes($storecfg, $vollist, $snapname)
-+                    if $need_source_activation;
++
++                # Rule 1: don't activate if all offload on same storage AND target is the same
++                if ($storage && $first_storeid && $storage ne $first_storeid) {
++                    $all_same_storage_offload = 0;
++                }
++
++                unless ($all_same_storage_offload) {
++                    PVE::Storage::activate_volumes($storecfg, $vollist, $snapname);
++                }
  
                  my $bwlimit = extract_param($param, 'bwlimit');
  
-@@ -4606,7 +4617,15 @@
+@@ -4606,7 +4646,17 @@
  
                  PVE::AccessControl::add_vm_to_pool($newid, $pool) if $pool;
              };
 -            if (my $err = $@) {
 +            my $err = $@;
 +
-+            if (!$running) {
-+                # IBM FlashSystem: always cleanup source volumes to avoid orphans
-+                eval { PVE::Storage::deactivate_volumes($storecfg, $vollist, $snapname); };
-+                warn "Source volume cleanup failed: $@" if $@;
++            # Rule 2: deactivate offload volumes that were activated
++            if (!$all_same_storage_offload && !$running) {
++                foreach my $volid (@offload_volids) {
++                    eval { PVE::Storage::deactivate_volumes($storecfg, [$volid], $snapname); };
++                    warn "Deactivate failed for $volid: $@" if $@;
++                }
 +            }
 +
 +            if ($err) {
                  eval { PVE::QemuServer::BlockJob::qemu_blockjobs_cancel($vmid, $jobs) };
                  sleep 1; # some storage like rbd need to wait before release volume - really?
  
---- PVE/QemuServer.pm	2025-12-31 19:26:50
-+++ PVE/QemuServer.pm	2025-12-31 19:27:28
-@@ -7888,9 +7888,18 @@
+--- PVE/QemuServer.pm	2026-01-03 13:49:28
++++ PVE/QemuServer.pm	2026-01-03 13:51:21
+@@ -7888,8 +7888,30 @@
          $newvolid = PVE::Storage::vdisk_clone($storecfg, $drive->{file}, $newvmid, $snapname);
          push @$newvollist, $newvolid;
      } else {
-+        # IBM FlashSystem: Check if storage supports full clone offload
++        # Helper: check offload
++        my $volume_has_offload = sub {
++            my ($volid, $snap) = @_;
++            my $features = PVE::Storage::volume_has_feature($storecfg, 'copy', $volid, $snap, $running);
++            return 0 unless $features && ref($features) eq 'HASH';
++            my (undef, $volname) = PVE::Storage::parse_volume_id($volid);
++            my $isBase = ($volname =~ m/^base-/) ? 1 : 0;
++            my $key = $snap ? 'snap' : ($isBase ? 'base' : 'current');
++            return $features->{$key}->{offload} ? 1 : 0;
++        };
++
          my ($src_storeid) = PVE::Storage::parse_volume_id($drive->{file});
          my $storeid = $storage || $src_storeid;
- 
-+        # IBM FlashSystem: Optimization - Use vdisk_clone if storage supports 'copy' (Smart Clone / FlashCopy)
-+        if (PVE::Storage::volume_has_feature($storecfg, 'copy', $drive->{file}, $snapname, $running)) {
-+            print "Using storage driver support for full clone (copy)\n";
++
++        # Rule 1: offload clone if source and target on same storage
++        my $can_offload = $volume_has_offload->($drive->{file}, $snapname)
++                          && ($src_storeid eq $storeid);
++
++        if ($can_offload) {
++            print "Using storage offload for full clone\n";
 +            $newvolid = PVE::Storage::vdisk_clone($storecfg, $drive->{file}, $newvmid, undef);
 +            push @$newvollist, $newvolid;
 +            goto no_data_clone;
 +        }
-+
+ 
          my $dst_format = resolve_dst_disk_format($storecfg, $storeid, $drive->{file}, $format);
  
-         my $name = undef;
-@@ -7935,6 +7944,8 @@
+@@ -7934,6 +7956,10 @@
+                 PVE::QemuServer::BlockJob::qemu_drive_mirror_monitor(
                      $vmid, $newvmid, $jobs, $completion, $qga,
                  );
++            }
++            # Rule 2: deactivate offload target after cloudinit
++            if ($volume_has_offload->($newvolid, undef)) {
++                PVE::Storage::deactivate_volumes($storecfg, [$newvolid]);
              }
-+            # IBM FlashSystem: Deactivate configured cloudinit volume
-+            PVE::Storage::deactivate_volumes($storecfg, [$newvolid]);
              goto no_data_clone;
          }
- 
-@@ -7989,6 +8000,8 @@
+@@ -7988,6 +8014,10 @@
+                 };
                  PVE::QemuServer::QemuImage::convert($drive->{file}, $newvolid, $size, $opts);
              }
++        }
++        # Rule 2: deactivate offload target after data copy
++        if ($volume_has_offload->($newvolid, undef)) {
++            PVE::Storage::deactivate_volumes($storecfg, [$newvolid]);
          }
-+        # IBM FlashSystem: Deactivate volume after data copy defined
-+        PVE::Storage::deactivate_volumes($storecfg, [$newvolid]);
      }
  
- no_data_clone:
---- PVE/QemuServer/OVMF.pm	2025-12-31 19:26:50
-+++ PVE/QemuServer/OVMF.pm	2025-12-31 19:27:30
-@@ -178,6 +178,9 @@
+--- PVE/QemuServer/OVMF.pm	2026-01-03 13:49:29
++++ PVE/QemuServer/OVMF.pm	2026-01-03 13:51:27
+@@ -176,6 +176,12 @@
+     PVE::Storage::activate_volumes($storecfg, [$volid]);
+ 
      PVE::QemuServer::QemuImage::convert($ovmf_vars, $volid, $vars_size_b);
++
++    # Rule 2: deactivate offload EFI after data copy
++    my $features = PVE::Storage::volume_has_feature($storecfg, 'copy', $volid, undef, 0);
++    if ($features && ref($features) eq 'HASH' && $features->{current}->{offload}) {
++        PVE::Storage::deactivate_volumes($storecfg, [$volid]);
++    }
      my $size = PVE::Storage::volume_size_info($storecfg, $volid, 3);
  
-+    # IBM FlashSystem: Deactivate the volume to prevent orphan mapping
-+    PVE::Storage::deactivate_volumes($storecfg, [$volid]);
-+
      if ($efidisk->{'pre-enrolled-keys'} && is_ms_2023_cert_enrolled($ovmf_vars)) {
-         $efidisk->{'ms-cert'} = '2023';
-     }
