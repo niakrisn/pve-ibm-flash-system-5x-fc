@@ -756,7 +756,7 @@ sub deactivate_volume {
 }
 
 # Get the device path for a volume
-sub _path {
+sub path {
     my ($class, $scfg, $volname, $storeid, $snapname) = @_;
 
     # For FlashCopy snapshots: always use base volume's device

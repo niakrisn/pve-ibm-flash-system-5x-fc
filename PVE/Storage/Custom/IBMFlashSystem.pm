@@ -281,7 +281,7 @@ sub deactivate_volume {
 
 sub path {
     my ($class, $scfg, $volname, $storeid, $snapname) = @_;
-    return PVE::Storage::Custom::IBMFlashSystem::Volume::_path(
+    return PVE::Storage::Custom::IBMFlashSystem::Volume::path(
         $class, $scfg, $volname, $storeid, $snapname
     );
 }
