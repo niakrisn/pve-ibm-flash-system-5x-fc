@@ -7,7 +7,7 @@ case "$1" in
     remove|deconfigure)
         # Remove patches via patch manager
         if [ -x "$PATCH_MANAGER" ]; then
-            "$PATCH_MANAGER" remove
+            "$PATCH_MANAGER" remove || echo "[IBM FlashSystem Plugin] WARNING: patch-manager failed, patches may remain"
         fi
         ;;
 

@@ -1,4 +1,4 @@
-pve-ibm-fs5x-fc-plugin (@VERSION@) unstable; urgency=medium
+pve-ibm-fs5x-fc-plugin (1.1.17-1) unstable; urgency=medium
 
   * Renamed package to pve-ibm-fs5x-fc-plugin
   * Unified storage plugin and PVE patches in single package

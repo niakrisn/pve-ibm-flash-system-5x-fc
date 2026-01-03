@@ -5,7 +5,21 @@ APT_HOOK="/etc/apt/apt.conf.d/90-pve-ibm-fs5x-fc-plugin-hook"
 STORAGE_PLUGIN="/usr/share/perl5/PVE/Storage/Custom/IBMFlashSystem.pm"
 
 case "$1" in
+    remove)
+        # Fallback: try to remove patches if prerm didn't run or failed
+        PATCH_MANAGER="/usr/share/pve-ibm-fs5x-fc-plugin/scripts/patch-manager.sh"
+        if [ -x "$PATCH_MANAGER" ]; then
+            "$PATCH_MANAGER" remove || true
+        fi
+        ;;
+
     purge)
+        # Last resort: try patch-manager if still available
+        PATCH_MANAGER="/usr/share/pve-ibm-fs5x-fc-plugin/scripts/patch-manager.sh"
+        if [ -x "$PATCH_MANAGER" ]; then
+            "$PATCH_MANAGER" remove || true
+        fi
+
         # Remove APT hook
         if [ -f "$APT_HOOK" ]; then
             rm -f "$APT_HOOK"
@@ -18,17 +32,9 @@ case "$1" in
             echo "Removed storage plugin: $STORAGE_PLUGIN"
             systemctl try-reload-or-restart pvedaemon pveproxy 2>/dev/null || true
         fi
-
-        # Note: Patches should already be removed by prerm
-        # If marker still exists, try to remove it
-        if [ -f "/usr/share/perl5/PVE/API2/Qemu.pm" ] && \
-           grep -q "# IBM FlashSystem Patch" "/usr/share/perl5/PVE/API2/Qemu.pm"; then
-            sed -i '/# IBM FlashSystem Patch/d' "/usr/share/perl5/PVE/API2/Qemu.pm"
-            systemctl try-reload-or-restart pvedaemon pveproxy 2>/dev/null || true
-        fi
         ;;
 
-    remove|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+    upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
         ;;
 
     *)

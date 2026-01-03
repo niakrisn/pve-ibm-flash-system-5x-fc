@@ -1,0 +1,10 @@
+# Install test runner script and rename it to match naming convention if needed, 
+# but here we keep the name as is but place it in /usr/bin.
+scripts/pve-ibm-fs5x-test-runner usr/bin/
+
+# Install integration tests
+t/integration/scenarios/*.t usr/share/pve-ibm-fs5x-fc-plugin-tests/scenarios/
+t/integration/lib/*.pm usr/share/pve-ibm-fs5x-fc-plugin-tests/lib/
+
+# Install cleanup script
+scripts/cleanup_host_san.sh usr/share/pve-ibm-fs5x-fc-plugin-tests/

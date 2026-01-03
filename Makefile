@@ -1,23 +1,33 @@
-VERSION := $(shell cat VERSION 2>/dev/null || echo "1.0.0")
-PVE_VERSION := 9
+# IBM FlashSystem 5.x FC Plugin - Makefile
 PACKAGE_NAME := pve-ibm-fs5x-fc-plugin
 PLUGIN_FILE := PVE/Storage/Custom/IBMFlashSystem.pm
+VERSION := $(shell head -n 1 debian/changelog | cut -d'(' -f2 | cut -d')' -f1)
 
 .PHONY: all package package-docker clean install-plugin install-package install
 
 all: package
 
-# Build deb package using Docker (simple, no debhelper)
-package-docker:
-	@echo "Building $(PACKAGE_NAME)_$(VERSION)_all.deb in Docker..."
+# Build deb packages locally using dpkg-buildpackage
+package:
+	@echo "Building Debian packages..."
 	@mkdir -p output
-	@docker run --rm -v "$$(pwd):/build" -w /build \
+	debuild -us -uc -b
+	mv ../$(PACKAGE_NAME)_*.deb output/
+	mv ../$(PACKAGE_NAME)_*.changes output/
+	mv ../$(PACKAGE_NAME)_*.buildinfo output/
+	@echo "✓ Built: output/"
+
+# Build deb package using Docker with standard debhelper tools
+package-docker:
+	@echo "Building packages in Docker..."
+	@mkdir -p output
+	@docker run --rm -v "$$(pwd):/build/source" -w /build/source \
 		debian:bookworm bash -c \
-		"apt-get update -qq && apt-get install -y dpkg patch perl && \
-		 bash scripts/build-deb.sh"
-	@echo ""
-	@ls -la output/*.deb 2>/dev/null || echo "Package built in output/"
-	@echo "✓ Built: output/$(PACKAGE_NAME)_$(VERSION)_all.deb"
+		"apt-get update && apt-get install -y debhelper devscripts build-essential patch perl lintian && \
+		 debuild -us -uc -b && \
+		 mkdir -p /build/source/output && \
+		 mv ../$(PACKAGE_NAME)* /build/source/output/"
+	@echo "✓ Built: output/"
 
 # Install plugin only (for development)
 install-plugin:
@@ -35,15 +45,20 @@ install-package: package-docker
 	@echo "Installing package..."
 	@read -p "SSH host (default: 10.4.0.122): " host; \
 	host=$${host:-10.4.0.122}; \
-	scp output/$(PACKAGE_NAME)_$(VERSION)_all.deb root@$$host:/tmp/ && \
-	ssh root@$$host "dpkg -i /tmp/$(PACKAGE_NAME)_$(VERSION)_all.deb"
+	LATEST_DEB=$$(ls -t output/$(PACKAGE_NAME)_*.deb | head -n 1); \
+	scp $$LATEST_DEB root@$$host:/tmp/ && \
+	DEB_NAME=$$(basename $$LATEST_DEB); \
+	ssh root@$$host "dpkg -i /tmp/$$DEB_NAME"
 	@echo "✓ Package installed"
 
-# Install both plugin and package
 install: install-package
 
 clean:
-	dh clean || true
-	rm -f ../$(PACKAGE_NAME)_*.deb ../$(PACKAGE_NAME)_*.changes ../$(PACKAGE_NAME)_*.buildinfo
-	rm -f ../$(PACKAGE_NAME)_*.tar.gz ../$(PACKAGE_NAME)_*.dsc
 	rm -rf output
+	rm -rf debian/pve-ibm-fs5x-fc-plugin
+	rm -rf debian/pve-ibm-fs5x-fc-plugin-tests
+	rm -rf debian/.debhelper
+	rm -f debian/files
+	rm -f debian/*.substvars
+	rm -f debian/*.debhelper*
+	rm -f ../$(PACKAGE_NAME)_*

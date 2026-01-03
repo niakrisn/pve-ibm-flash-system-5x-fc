@@ -46,7 +46,8 @@ done
 # 3. Cleanup Host Devices (Multipath & SCSI)
 echo "Phase 3: Cleaning up host devices..."
 # Удаляем сиротливые устройства (без томов на СХД)
-perl -I. -MVMHelpers -MTestEnv -e '
+# Добавляем пути для поиска библиотек как в dev так и в installed окружении
+perl -I. -I/usr/share/pve-ibm-fs5x-fc-plugin-tests/lib -MVMHelpers -MTestEnv -e '
     $env = TestEnv->setup();
     VMHelpers::cleanup_orphan_fc_devices($env);
 ' 2>/dev/null

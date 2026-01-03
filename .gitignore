@@ -1,5 +1,15 @@
 output/
-.DS_Store
+debian/pve-ibm-fs5x-fc-plugin/
+debian/pve-ibm-fs5x-fc-plugin-tests/
+debian/.debhelper/
+debian/files
+debian/*.substvars
+debian/*.debhelper*
+debian/debhelper-build-stamp
+*.deb
+*.changes
+*.buildinfo
+*.dsc
+*.tar.gz
 *.swp
-*.txt
 .DS_Store

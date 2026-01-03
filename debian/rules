@@ -1,12 +1,23 @@
 #!/usr/bin/make -f
 
+# Main build rule
 %:
 	dh $@
 
+# No compilation needed for Perl plugin
 override_dh_auto_build:
 	# Nothing to build
 
+# We don't need dh_auto_install because we use .install files
 override_dh_auto_install:
-	# Install patches to /usr/share
-	install -d debian/pve-ibm-flashsystem-patches/usr/share/pve-ibm-flashsystem-patches/patches
-	install -m 644 debian/patches/*.patch debian/pve-ibm-flashsystem-patches/usr/share/pve-ibm-flashsystem-patches/patches/
+	# Nothing to do here, dh_install will handle it
+
+# We use .install files for each package, so dh_install works automatically
+override_dh_install:
+	dh_install
+	# Rename cleanup script for convenience in the tests package
+	if [ -f debian/pve-ibm-fs5x-fc-plugin-tests/usr/share/pve-ibm-fs5x-fc-plugin-tests/cleanup_host_san.sh ]; then \
+		mv debian/pve-ibm-fs5x-fc-plugin-tests/usr/share/pve-ibm-fs5x-fc-plugin-tests/cleanup_host_san.sh \
+		   debian/pve-ibm-fs5x-fc-plugin-tests/usr/share/pve-ibm-fs5x-fc-plugin-tests/cleanup.sh; \
+		chmod +x debian/pve-ibm-fs5x-fc-plugin-tests/usr/share/pve-ibm-fs5x-fc-plugin-tests/cleanup.sh; \
+	fi

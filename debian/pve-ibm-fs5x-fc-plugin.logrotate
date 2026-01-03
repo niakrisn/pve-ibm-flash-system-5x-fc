@@ -1,0 +1,15 @@
+/var/log/pve-storage-ibm.log {
+    daily
+    rotate 14
+    notifempty
+    delaycompress
+    compress
+    dateext
+    dateformat -%Y%m%d
+    create 0640 root adm
+    missingok
+    postrotate
+        # Optional: signal hup to services if needed, but plugin usually logs via syslog or directly
+        # systemctl reload pvedaemon pveproxy > /dev/null 2>&1 || true
+    endscript
+}
