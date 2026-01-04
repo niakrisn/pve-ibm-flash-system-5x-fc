@@ -173,7 +173,12 @@ sub flush_device {
 
 # Remove multipath device
 sub remove_device {
-    my ($class, $device_name) = @_;
+    my ($class, $scfg, $device_name) = @_;
+
+    # Untaint device name for Proxmox Taint mode (-T)
+    if ($device_name =~ m/^([a-z0-9_-]+)$/i) {
+        $device_name = $1;
+    }
 
     my $mpath_device = "/dev/mapper/$device_name";
 
@@ -183,6 +188,9 @@ sub remove_device {
             eval {
                 run_command(['/usr/sbin/multipath', '-f', $device_name], timeout => 10);
             };
+            if ($@) {
+                PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "multipath -f %s failed (attempt %d): %s", $device_name, $i + 1, $@);
+            }
             last unless -e $mpath_device;
             sleep(1);
         }
@@ -192,6 +200,9 @@ sub remove_device {
             eval {
                 run_command(['/sbin/dmsetup', 'remove', '-f', $device_name], timeout => 5);
             };
+            if ($@) {
+                 PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg, "dmsetup remove -f %s failed: %s", $device_name, $@);
+            }
         }
     }
 
@@ -200,7 +211,7 @@ sub remove_device {
 
 # Remove SCSI devices for a given vdisk UID
 sub remove_scsi_devices {
-    my ($class, $uid) = @_;
+    my ($class, $scfg, $uid) = @_;
 
     # Find all SCSI devices with this WWN via sysfs
     # FC devices have wwid files in /sys/block/sdX/device/wwid
@@ -209,7 +220,9 @@ sub remove_scsi_devices {
     # Convert UID to NAA format (naa.60050763...)
     my $uid_lower = lc($uid);
     my $naa_wwid = "naa.$uid_lower";
-    
+
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "Scanning for SCSI devices with WWID %s", $naa_wwid);
+
     # Scan all sd* block devices
     if (opendir(my $dh, '/sys/block')) {
         while (my $entry = readdir($dh)) {
@@ -232,20 +245,33 @@ sub remove_scsi_devices {
     }
 
     if (@devices) {
-         PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, undef, "Deleting SCSI devices for UID $uid: " . join(", ", @devices));
+         PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Deleting SCSI devices for UID %s: %s", $uid, join(", ", @devices));
     } else {
-         PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, undef, "No SCSI devices found for UID $uid (WWID: $naa_wwid)");
+         PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "No SCSI devices found for UID %s (WWID: %s)", $uid, $naa_wwid);
     }
 
     # Delete each SCSI device via sysfs
     for my $dev (@devices) {
+        # Untaint device name for Proxmox Taint mode (-T)
+        if ($dev =~ m/^([a-z0-9]+)$/) {
+            $dev = $1;
+        } else {
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg, "Skipping invalid device name for deletion: %s", $dev);
+            next;
+        }
+
         my $delete_file = "/sys/block/$dev/device/delete";
         if (-f $delete_file) {
             eval {
-                open(my $fh, '>', $delete_file);
-                print $fh "1";
+                # Use sysopen to bypass some Taint checks and ensure direct write
+                sysopen(my $fh, $delete_file, O_WRONLY) or die "Cannot open $delete_file: $!";
+                syswrite($fh, "1\n");
                 close($fh);
+                PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "Command executed: echo 1 > %s", $delete_file);
             };
+            if ($@) {
+                PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg, "Failed to delete SCSI device %s: %s", $dev, $@);
+            }
         }
     }
 
