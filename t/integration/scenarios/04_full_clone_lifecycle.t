@@ -20,6 +20,7 @@ my $source_vmid = 9999;
 my $clone_vmid = 9998;
 
 
+
 subtest 'Full Clone VM Lifecycle (EFI + 1 SCSI)' => sub {
     
     # Step 1: Create source VM with q35 + EFI + 1 SCSI disk

@@ -18,13 +18,15 @@ package:
 	@echo "✓ Built: output/"
 
 # Build deb package using Docker with standard debhelper tools
-package-docker:
+docker-image:
+	@docker build -t $(PACKAGE_NAME)-builder -f Dockerfile.build .
+
+package-docker: docker-image
 	@echo "Building packages in Docker..."
 	@mkdir -p output
 	@docker run --rm -v "$$(pwd):/build/source" -w /build/source \
-		debian:bookworm bash -c \
-		"apt-get update && apt-get install -y debhelper devscripts build-essential patch perl lintian && \
-		 debuild -us -uc -b && \
+		$(PACKAGE_NAME)-builder bash -c \
+		"debuild -us -uc -b && \
 		 mkdir -p /build/source/output && \
 		 mv ../$(PACKAGE_NAME)* /build/source/output/"
 	@echo "✓ Built: output/"

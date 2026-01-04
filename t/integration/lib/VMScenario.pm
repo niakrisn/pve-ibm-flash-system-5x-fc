@@ -109,16 +109,24 @@ sub verify_full_lifecycle {
     return 1;
 }
 
-# Cleanup VM (best-effort, used in test cleanup blocks)
+# Cleanup VM (silent and idempotent, used in test setup and cleanup blocks)
 # Args: ($vmid)
 sub cleanup_vm {
     my ($vmid) = @_;
-    
-    # Try to stop VM
-    eval { system('qm', 'stop', $vmid) };
-    
-    # Try to destroy VM
-    eval { system('qm', 'destroy', $vmid, '--destroy-unreferenced-disks', '1') };
+    return unless $vmid;
+
+    # Check if VM configuration exists before doing anything
+    # This prevents "unable to find configuration file" errors in PVE tasks
+    if (-f "/etc/pve/qemu-server/$vmid.conf") {
+        # Check status and only stop if running
+        my $status = `qm status $vmid 2>/dev/null`;
+        if ($status && $status =~ /status: running/i) {
+            system('qm', 'stop', $vmid, '--skiplock');
+        }
+        
+        # Destroy VM with purge to be sure
+        system('qm', 'destroy', $vmid, '--destroy-unreferenced-disks', '1');
+    }
 }
 
 
@@ -144,10 +152,8 @@ sub create_vm_on_storage {
         push @cmd, "--scsi$slot", "$storeid:$size";
     }
 
-    # Add EFI disk if not on local-lvm
-    if ($storeid =~ /^fs-/) {
-        push @cmd, '--efidisk0', "$storeid:1,efitype=4m";
-    }
+    # Always add EFI disk for OVMF (standard practice)
+    push @cmd, '--efidisk0', "$storeid:1,efitype=4m";
     
     my $result = system(@cmd);
     return $result == 0 ? 1 : 0;

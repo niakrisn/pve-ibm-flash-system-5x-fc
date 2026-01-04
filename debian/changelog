@@ -1,3 +1,15 @@
+pve-ibm-fs5x-fc-plugin (1.1.19-3) unstable; urgency=medium
+
+  * Refactor integration test cleanup to be idempotent and silent
+  * Move initial cleanup to the beginning of each test scenario
+  * Fix Taint mode violations in FC protocol handler
+  * Add Global Cleanup for orphaned FlashCopy mappings
+  * Fix plugin schema to allow optional password (secure storage support)
+  * Update test runner to use Fail-Fast mode and sequential execution
+  * Standardize test helpers to always use EFI disks for OVMF VMs
+
+ -- Nikita Kozlov <niakrisn@gmail.com>  Sat, 03 Jan 2026 17:30:00 +0300
+
 pve-ibm-fs5x-fc-plugin (1.1.18-1) unstable; urgency=medium
 
   * Add support for $snapname in activate_volume, path, and deactivate_volume

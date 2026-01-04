@@ -16,6 +16,7 @@ skip_without_fc('FC connectivity required');
 
 my $env = TestEnv->setup();
 my $vmid = 9999;
+my $clone_vmid = 9998;
 
 
 subtest 'Basic VM Lifecycle (EFI only)' => sub {

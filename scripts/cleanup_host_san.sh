@@ -37,6 +37,18 @@ for vmid in 9999 9200 9100 9101; do
     echo "Scanning for residual volumes belonging to VM $vmid..."
     # Find all volumes for this VMID in the storage
     VOLS=$(pvesm list "$STOREID" --vmid "$vmid" | awk 'NR>1 {print $1}')
+    
+    # NEW: Cleanup FlashCopy mappings using the plugin's own library
+    # This reuses the logic from Volume.pm/Snapshot.pm which now correctly handles FC maps
+    echo "Scanning for orphaned FlashCopy mappings for VM $vmid..."
+    perl -I. -I/usr/share/pve-ibm-fs5x-fc-plugin-tests/lib -MPVE::Storage::Custom::IBMFlashSystem::FCMap -MTestEnv -e '
+        my $vmid = "'"$vmid"'";
+        my $env = TestEnv->setup();
+        # We use a pattern match to find and remove mappings relevant to this VM
+        # This is safer than reimplementing the logic here
+        PVE::Storage::Custom::IBMFlashSystem::FCMap::remove_fcmaps_for_vm_volumes("PVE::Storage::Custom::IBMFlashSystem", $env->{scfg}, $env->{storeid}, $vmid);
+    ' 2>/dev/null
+
     for volid in $VOLS; do
         echo "Removing residual volume: $volid"
         pvesm free "$volid" 2>/dev/null

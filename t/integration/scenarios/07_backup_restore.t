@@ -8,7 +8,7 @@ use Test::More;
 use lib qw(t/unit/lib t/integration/lib);
 
 use TestEnv;
-use VMScenario qw(create_q35_vm cleanup_vm);
+use VMScenario qw(create_q35_vm create_vm_on_storage verify_full_lifecycle cleanup_vm);
 use StateVerifier;
 use StorageHelpers;
 use FCHelpers qw(skip_without_fc);
@@ -20,6 +20,7 @@ my $env = TestEnv->setup();
 my $vmid = 9999;
 my $restore_vmid = 9998;
 my $backup_storage = 'local';
+
 
 subtest 'vzdump Backup and Restore' => sub {
     

@@ -28,5 +28,20 @@ if [ ! -f "/etc/pve/ibm-fs5x-tests.conf" ]; then
     echo 'echo "{\"flashsystem_storage\": \"fs-01\", \"local_storage\": \"local-lvm\"}" > /etc/pve/ibm-fs5x-tests.conf'
 fi
 
+# Run global cleanup before tests
+if [ -x "${TEST_BASE}/cleanup.sh" ]; then
+    echo "Running global environment cleanup..."
+    "${TEST_BASE}/cleanup.sh"
+else
+    echo "WARNING: cleanup.sh not found in ${TEST_BASE}"
+fi
+
 # Run tests using prove
-prove -v "${SCENARIO_DIR}"/*.t
+# Run tests sequentially to enforce Fail-Fast
+# because set -e is active, any failed prove command will immediately exit the script
+for test_script in "${SCENARIO_DIR}"/*.t; do
+    echo "----------------------------------------------------------------"
+    echo "Running Scenario: $(basename "$test_script")"
+    echo "----------------------------------------------------------------"
+    prove -v "$test_script"
+done

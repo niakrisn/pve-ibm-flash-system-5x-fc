@@ -2,20 +2,12 @@ FROM debian:bookworm
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
-    dpkg-dev \
     debhelper \
+    devscripts \
+    build-essential \
     patch \
     perl \
+    lintian \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
 WORKDIR /build
-
-# Copy source files
-COPY debian/ debian/
-COPY Makefile .
-
-# Build package
-RUN dpkg-buildpackage -b -us -uc
-
-# Output directory will be mounted as volume

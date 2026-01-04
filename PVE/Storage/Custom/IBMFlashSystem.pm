@@ -41,7 +41,7 @@ sub options {
         pool => {},
         hostcluster => {},
         username => {},
-        password => {},
+        password => { optional => 1 },
         timeout => { optional => 1 },
         verify_ssl => { optional => 1 },
         max_retries => { optional => 1 },

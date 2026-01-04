@@ -18,6 +18,11 @@ skip_without_fc('FC connectivity required');
 
 my $env = TestEnv->setup();
 my $vmid = 9999;
+cleanup_vm($vmid);
+my $clone_vmid = 9998;
+
+cleanup_vm($vmid);
+cleanup_vm($clone_vmid);
 
 
 subtest 'Snapshot VM Lifecycle (EFI + 1 SCSI)' => sub {
