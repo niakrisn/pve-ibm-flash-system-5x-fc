@@ -1,3 +1,12 @@
+pve-ibm-fs5x-fc-plugin (1.1.18-1) unstable; urgency=medium
+
+  * Add support for $snapname in activate_volume, path, and deactivate_volume
+  * Fix backup functionality by correctly resolving snapshot device paths
+  * Add integration test for backup and restore
+  * Fix redundant subroutine redefinitions and increase multipath timeout
+
+ -- Nikita Kozlov <niakrisn@gmail.com>  Sat, 03 Jan 2026 15:50:00 +0300
+
 pve-ibm-fs5x-fc-plugin (1.1.17-1) unstable; urgency=medium
 
   * Renamed package to pve-ibm-fs5x-fc-plugin

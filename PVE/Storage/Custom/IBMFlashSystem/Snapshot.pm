@@ -21,35 +21,12 @@ sub _get_hostname { return PVE::Storage::Custom::IBMFlashSystem::Common::_get_ho
 sub _get_volume_info { return PVE::Storage::Custom::IBMFlashSystem::Volume::_get_volume_info(@_); }
 sub wait_for_vdisk_state { return PVE::Storage::Custom::IBMFlashSystem::Volume::wait_for_vdisk_state(@_); }
 sub safe_delete_volume { return PVE::Storage::Custom::IBMFlashSystem::Volume::safe_delete_volume(@_); }
+sub _snapshot_name { return PVE::Storage::Custom::IBMFlashSystem::Common::_snapshot_name(@_); }
 
 # ============================================================================
 # Snapshot Operations
 # ============================================================================
 
-# Get snapshot vdisk name
-# Uses snap- prefix for easy identification in IBM storage GUI
-sub _snapshot_name {
-    my ($class, $volname, $snapname) = @_;
-
-    # Sanitize snapshot name: replace special chars with underscore
-    my $safe_snapname = $snapname;
-    $safe_snapname =~ s/[^a-zA-Z0-9._-]/_/g;
-
-    # IBM FlashSystem has a 63-character limit for volume names
-    # Format: snap-{volname}-{snapname}
-    # If too long, truncate volname to fit
-    my $max_len = 63;
-    my $prefix = 'snap-';
-    my $suffix = '-' . $safe_snapname;
-
-    my $available = $max_len - length($prefix) - length($suffix);
-
-    if (length($volname) > $available) {
-        $volname = substr($volname, 0, $available);
-    }
-
-    return "${prefix}${volname}${suffix}";
-}
 
 # Discover all snapshot volumes for a given base volume by name pattern
 # This is used for recovery when mappings exist but snapshot listing is not available

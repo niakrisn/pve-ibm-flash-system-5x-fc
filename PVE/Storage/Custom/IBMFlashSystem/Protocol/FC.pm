@@ -106,7 +106,7 @@ sub convert_uid_to_device {
 sub wait_for_device {
     my ($class, $scfg, $vdisk_uid, $timeout) = @_;
 
-    $timeout ||= 30;
+    $timeout ||= 60;
     my $mpath = $class->convert_uid_to_device($vdisk_uid);
     my $device_path = "/dev/mapper/$mpath";
 
@@ -178,14 +178,19 @@ sub remove_device {
     my $mpath_device = "/dev/mapper/$device_name";
 
     if (-e $mpath_device) {
-        eval {
-            # Try multipath -f first
-            run_command(['/usr/sbin/multipath', '-f', $device_name], timeout => 10);
-        };
-        if ($@) {
-            # If multipath -f fails, try dmsetup remove
+        # Try multiple attempts to remove multipath map
+        for (my $i = 0; $i < 3; $i++) {
             eval {
-                run_command(['/sbin/dmsetup', 'remove', $device_name], timeout => 5);
+                run_command(['/usr/sbin/multipath', '-f', $device_name], timeout => 10);
+            };
+            last unless -e $mpath_device;
+            sleep(1);
+        }
+
+        # Force removal with dmsetup if still present
+        if (-e $mpath_device) {
+            eval {
+                run_command(['/sbin/dmsetup', 'remove', '-f', $device_name], timeout => 5);
             };
         }
     }

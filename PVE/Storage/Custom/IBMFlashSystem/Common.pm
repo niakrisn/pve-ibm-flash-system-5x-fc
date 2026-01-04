@@ -9,7 +9,7 @@ use warnings;
 use PVE::Storage::Custom::IBMFlashSystem::Logger;
 
 use Exporter 'import';
-our @EXPORT_OK = qw(_get_hostname error_code_matches is_already_exists_error is_not_found_error is_resource_busy_error is_mapping_stopped_error is_object_not_found_error);
+our @EXPORT_OK = qw(_get_hostname _snapshot_name error_code_matches is_already_exists_error is_not_found_error is_resource_busy_error is_mapping_stopped_error is_object_not_found_error);
 
 # ============================================================================
 # Hostname Utility
@@ -21,6 +21,35 @@ sub _get_hostname {
     my $hostname = `hostname -f 2>/dev/null || hostname`;
     chomp $hostname;
     return $hostname;
+}
+
+# ============================================================================
+# Snapshot Helpers
+# ============================================================================
+
+# Get snapshot vdisk name
+# Uses snap- prefix for easy identification in IBM storage GUI
+sub _snapshot_name {
+    my ($class, $volname, $snapname) = @_;
+
+    # Sanitize snapshot name: replace special chars with underscore
+    my $safe_snapname = $snapname;
+    $safe_snapname =~ s/[^a-zA-Z0-9._-]/_/g;
+
+    # IBM FlashSystem has a 63-character limit for volume names
+    # Format: snap-{volname}-{snapname}
+    # If too long, truncate volname to fit
+    my $max_len = 63;
+    my $prefix = 'snap-';
+    my $suffix = '-' . $safe_snapname;
+
+    my $available = $max_len - length($prefix) - length($suffix);
+
+    if (length($volname) > $available) {
+        $volname = substr($volname, 0, $available);
+    }
+
+    return "${prefix}${volname}${suffix}";
 }
 
 # ============================================================================
