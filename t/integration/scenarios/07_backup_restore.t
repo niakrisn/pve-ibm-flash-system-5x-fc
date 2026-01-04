@@ -44,6 +44,7 @@ subtest 'vzdump Backup and Restore' => sub {
         system("cat /tmp/vzdump.log");
     }
     ok($vzdump_res == 0, "vzdump completed successfully");
+    ok(StateVerifier::verify_created($env, $vmid, $disks), "VM $vmid is still CREATED after vzdump");
     
     # Step 3: Find the backup file
     diag("Locating backup file...");
@@ -79,7 +80,9 @@ subtest 'vzdump Backup and Restore' => sub {
     # Cleanup
     diag("Cleaning up...");
     ok(system('qm', 'stop', $restore_vmid) == 0, "Restored VM $restore_vmid stopped");
+    ok(StateVerifier::verify_deactivated($env, $restore_vmid, $restore_disks), "Restored VM $restore_vmid is DEACTIVATED");
     ok(system('qm', 'destroy', $restore_vmid, '--destroy-unreferenced-disks', '1') == 0, "Restored VM $restore_vmid destroyed");
+    ok(StateVerifier::verify_destroyed($env, $restore_vmid, $restore_disks), "Restored VM $restore_vmid storage cleaned up");
     unlink $backup_file if $backup_file;
 };
 

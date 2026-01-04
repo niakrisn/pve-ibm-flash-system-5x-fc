@@ -57,6 +57,9 @@ subtest 'Snapshot VM Lifecycle (EFI + 1 SCSI)' => sub {
     # Step 6: Rollback to snap1
     diag("Rolling back to snap1...");
     ok(system('qm', 'rollback', $vmid, 'snap1') == 0, "Rolled back to snap1");
+    ok(system('qm', 'start', $vmid) == 0, "VM $vmid started after rollback");
+    ok(StateVerifier::verify_activated($env, $vmid, $disks), "VM $vmid is ACTIVATED after rollback");
+    ok(StateVerifier::verify_snapshot($env, $vmid, 'snap1', $disks), "Snapshot 'snap1' still valid after rollback");
     
     # Step 7: Delete snap2
     diag("Deleting snapshot 'snap2'...");
@@ -64,6 +67,15 @@ subtest 'Snapshot VM Lifecycle (EFI + 1 SCSI)' => sub {
 
     # Verify snap2 FlashCopy mapping and volume are removed
     ok(!StorageHelpers::volume_exists($env, "snap-$disks->[1]-snap2"), "Snapshot volume snap2 removed from storage");
+    my $snap2_maps = StorageHelpers::get_flashcopy_mappings($env, $disks->[1]);
+    my $snap2_map_found = 0;
+    for my $m (@$snap2_maps) {
+        if ($m->{target_vdisk_name} && $m->{target_vdisk_name} eq "snap-$disks->[1]-snap2") {
+            $snap2_map_found = 1;
+            last;
+        }
+    }
+    ok(!$snap2_map_found, "FlashCopy mapping for snap2 removed from storage");
     
     # Step 8: Stop VM
     diag("Stopping VM $vmid...");
@@ -76,6 +88,15 @@ subtest 'Snapshot VM Lifecycle (EFI + 1 SCSI)' => sub {
 
     # Verify snap1 FlashCopy mapping and volume are removed
     ok(!StorageHelpers::volume_exists($env, "snap-$disks->[1]-snap1"), "Snapshot volume snap1 removed from storage");
+    my $snap1_maps = StorageHelpers::get_flashcopy_mappings($env, $disks->[1]);
+    my $snap1_map_found = 0;
+    for my $m (@$snap1_maps) {
+        if ($m->{target_vdisk_name} && $m->{target_vdisk_name} eq "snap-$disks->[1]-snap1") {
+            $snap1_map_found = 1;
+            last;
+        }
+    }
+    ok(!$snap1_map_found, "FlashCopy mapping for snap1 removed from storage");
     
     # Step 10: Destroy VM
     diag("Destroying VM $vmid...");

@@ -9,7 +9,7 @@ use warnings;
 use Exporter 'import';
 use JSON;
 
-our @EXPORT_OK = qw(volume_exists volume_exists_by_wwn cleanup_volume get_volume_info get_volume_uid get_host_mappings get_flashcopy_mappings volume_is_accessible);
+our @EXPORT_OK = qw(volume_exists volume_exists_by_wwn cleanup_volume get_volume_info get_volume_uid get_host_mappings get_flashcopy_mappings volume_is_accessible local_volume_exists local_volume_path_exists);
 
 # Add plugin paths (rely on PERL5LIB for system-installed modules)
 # use lib 'PVE/Storage/Custom', 'PVE/Storage/Custom/IBMFlashSystem';
@@ -137,6 +137,27 @@ sub volume_is_accessible {
     };
 
     return $@ ? 0 : 1;
+}
+
+# Check if a volume exists on a local storage by querying pvesm list
+sub local_volume_exists {
+    my ($storeid, $volname) = @_;
+    return 0 unless $storeid && $volname;
+
+    my $list = `pvesm list $storeid 2>/dev/null`;
+    return 0 unless $list;
+
+    return $list =~ /\Q$storeid:$volname\E/ ? 1 : 0;
+}
+
+# Check if a local storage volume path exists on host
+sub local_volume_path_exists {
+    my ($storeid, $volname) = @_;
+    return 0 unless $storeid && $volname;
+
+    my $path = `pvesm path $storeid:$volname 2>/dev/null`;
+    chomp $path if $path;
+    return ($path && -e $path) ? 1 : 0;
 }
 
 # Get host mappings for a volume

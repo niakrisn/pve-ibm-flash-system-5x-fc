@@ -11,6 +11,7 @@ use lib qw(t/unit/lib t/integration/lib);
 use TestEnv;
 use VMScenario qw(create_vm_on_storage cleanup_vm);
 use StateVerifier;
+use StorageHelpers qw(local_volume_exists local_volume_path_exists);
 use FCHelpers qw(skip_without_fc);
 
 # Skip if no FC connectivity
@@ -19,6 +20,31 @@ skip_without_fc('FC connectivity required');
 my $env = TestEnv->setup();
 my $source_vmid = 9997;
 my $clone_vmid = 9996;
+
+sub get_local_vm_volumes {
+    my ($storeid, $vmid) = @_;
+    my $conf = `qm config $vmid 2>/dev/null`;
+    ok($conf, "QM: Config for VM $vmid exists") or return 0;
+
+    my @vols;
+    while ($conf =~ /\Q$storeid\E:([^\s,]+)/g) {
+        push @vols, $1;
+    }
+    ok(@vols > 0, "Storage: Found volumes for VM $vmid on $storeid") or return [];
+    return \@vols;
+}
+
+sub verify_local_vm_volumes {
+    my ($storeid, $vmid) = @_;
+    my $vols = get_local_vm_volumes($storeid, $vmid);
+    return 0 unless $vols && @$vols;
+
+    for my $vol (@$vols) {
+        ok(local_volume_exists($storeid, $vol), "Storage: Local volume $vol exists on $storeid") or return 0;
+        ok(local_volume_path_exists($storeid, $vol), "Host: Local volume path for $vol exists") or return 0;
+    }
+    return 1;
+}
 
 
 subtest 'Mixed Clone local-lvm -> fs-01' => sub {
@@ -29,6 +55,8 @@ subtest 'Mixed Clone local-lvm -> fs-01' => sub {
         { size => '1G', slot => 0 }, 
     ];
     ok(create_vm_on_storage($env, $source_vmid, $env->{local_storeid}, $scsi_disks), "Source VM $source_vmid created on $env->{local_storeid}");
+    ok(verify_local_vm_volumes($env->{local_storeid}, $source_vmid), "Source VM volumes verified on $env->{local_storeid}");
+    my $source_local_vols = get_local_vm_volumes($env->{local_storeid}, $source_vmid);
     
     # Step 2: Full clone to fs-01
     diag("Cloning $source_vmid ($env->{local_storeid}) to $clone_vmid ($env->{storeid})...");
@@ -60,6 +88,11 @@ subtest 'Mixed Clone local-lvm -> fs-01' => sub {
     cleanup_vm($source_vmid);
     
     ok(StateVerifier::verify_destroyed($env, $clone_vmid, $clone_disks), "Clone VM $clone_vmid is DESTROYED");
+    if ($source_local_vols && @$source_local_vols) {
+        for my $vol (@$source_local_vols) {
+            ok(!local_volume_exists($env->{local_storeid}, $vol), "Storage: Local volume $vol removed from $env->{local_storeid}");
+        }
+    }
 };
 
 done_testing();

@@ -11,6 +11,7 @@ use lib qw(t/unit/lib t/integration/lib);
 use TestEnv;
 use VMScenario qw(create_q35_vm create_vm_on_storage cleanup_vm);
 use StateVerifier;
+use StorageHelpers qw(local_volume_exists local_volume_path_exists);
 use FCHelpers qw(skip_without_fc);
 
 # Skip if no FC connectivity
@@ -20,6 +21,30 @@ my $env = TestEnv->setup();
 my $source_vmid = 9999;
 my $clone_vmid = 9998;
 
+sub get_local_vm_volumes {
+    my ($storeid, $vmid) = @_;
+    my $conf = `qm config $vmid 2>/dev/null`;
+    ok($conf, "QM: Config for VM $vmid exists") or return 0;
+
+    my @vols;
+    while ($conf =~ /\Q$storeid\E:([^\s,]+)/g) {
+        push @vols, $1;
+    }
+    ok(@vols > 0, "Storage: Found volumes for VM $vmid on $storeid") or return [];
+    return \@vols;
+}
+
+sub verify_local_vm_volumes {
+    my ($storeid, $vmid) = @_;
+    my $vols = get_local_vm_volumes($storeid, $vmid);
+    return 0 unless $vols && @$vols;
+
+    for my $vol (@$vols) {
+        ok(local_volume_exists($storeid, $vol), "Storage: Local volume $vol exists on $storeid") or return 0;
+        ok(local_volume_path_exists($storeid, $vol), "Host: Local volume path for $vol exists") or return 0;
+    }
+    return 1;
+}
 
 subtest 'Mixed Clone fs-01 -> local-lvm' => sub {
     
@@ -31,6 +56,7 @@ subtest 'Mixed Clone fs-01 -> local-lvm' => sub {
     ok(create_q35_vm($env, $source_vmid, $scsi_disks), "Source VM $source_vmid created on $env->{storeid}");
     
     my $source_disks = ["vm-$source_vmid-disk-0", "vm-$source_vmid-disk-1"]; # EFI + SCSI
+    ok(StateVerifier::verify_created($env, $source_vmid, $source_disks), "Source VM $source_vmid is CREATED");
     
     # Step 2: Verify source is DEACTIVATED initially
     ok(StateVerifier::verify_deactivated($env, $source_vmid, $source_disks), "Source VM $source_vmid is DEACTIVATED");
@@ -51,11 +77,15 @@ subtest 'Mixed Clone fs-01 -> local-lvm' => sub {
     # qm config shows where disks are
     my $config = `qm config $clone_vmid`;
     like($config, qr/$env->{local_storeid}:vm-$clone_vmid-disk-0/, "Clone disk is on $env->{local_storeid}");
+    ok(verify_local_vm_volumes($env->{local_storeid}, $clone_vmid), "Clone VM volumes exist on $env->{local_storeid}");
+    my $clone_local_vols = get_local_vm_volumes($env->{local_storeid}, $clone_vmid);
 
     # Step 5: Start/Stop clone to ensure it's functional
     diag("Starting clone VM $clone_vmid...");
     ok(system('qm', 'start', $clone_vmid) == 0, "Clone VM $clone_vmid started");
     ok(system('qm', 'stop', $clone_vmid) == 0, "Clone VM $clone_vmid stopped");
+    ok(verify_local_vm_volumes($env->{local_storeid}, $clone_vmid), "Clone VM volumes still present after stop");
+    ok(StateVerifier::verify_deactivated($env, $source_vmid, $source_disks), "Source VM $source_vmid remains DEACTIVATED after clone start/stop");
     
     # Step 6: Cleanup
     diag("Cleaning up...");
@@ -63,6 +93,11 @@ subtest 'Mixed Clone fs-01 -> local-lvm' => sub {
     cleanup_vm($source_vmid);
     
     ok(StateVerifier::verify_destroyed($env, $source_vmid, $source_disks), "Source VM $source_vmid is DESTROYED");
+    if ($clone_local_vols && @$clone_local_vols) {
+        for my $vol (@$clone_local_vols) {
+            ok(!local_volume_exists($env->{local_storeid}, $vol), "Storage: Local volume $vol removed from $env->{local_storeid}");
+        }
+    }
 };
 
 done_testing();
