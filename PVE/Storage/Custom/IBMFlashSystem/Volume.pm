@@ -7,8 +7,6 @@ use strict;
 use warnings;
 use JSON;
 use POSIX qw(strtod);
-use Fcntl qw(O_WRONLY);
-use PVE::Tools qw(run_command);
 
 use PVE::Storage::Custom::IBMFlashSystem::Client;
 use PVE::Storage::Custom::IBMFlashSystem::Logger;
@@ -79,6 +77,57 @@ sub _get_volume_info {
         size => $info->{capacity},
         used => $info->{used_capacity} || 0,
     };
+}
+
+# Align size to 512-byte blocks (SVC requirement)
+sub _align_size_bytes {
+    my ($class, $size_bytes) = @_;
+    return $size_bytes if !$size_bytes || $size_bytes % 512 == 0;
+    return $size_bytes - ($size_bytes % 512) + 512;
+}
+
+sub _expand_volume_by_delta {
+    my ($class, $scfg, $storeid, $volname, $delta_bytes) = @_;
+    PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/expandvdisksize/$volname", {
+        size => $delta_bytes,
+        unit => 'b',
+    });
+    return;
+}
+
+sub _remove_hostmaps_for_volume {
+    my ($class, $scfg, $storeid, $volname) = @_;
+
+    my $hostmaps = eval {
+        PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/lsvdiskhostmap/$volname", {});
+    };
+    if ($@) {
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
+            "Failed to list host mappings (volname=%s, error=%s)", $volname, $@);
+        return;
+    }
+
+    $hostmaps = [] if ref($hostmaps) ne 'ARRAY';
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg,
+        "Found host mappings for volume (volname=%s, count=%d)", $volname, scalar(@$hostmaps));
+
+    for my $map (@$hostmaps) {
+        my $host = $map->{host_name} || $map->{host} || '';
+        next if !$host;
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg,
+            "Removing host mapping (volname=%s, host=%s)", $volname, $host);
+        eval {
+            PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/rmvdiskhostmap/$volname", {
+                host => $host,
+            });
+        };
+        if ($@) {
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
+                "Failed to remove host mapping (volname=%s, host=%s, error=%s)", $volname, $host, $@);
+        }
+    }
+
+    return;
 }
 
 # Wait for vdisk to reach a specific state: 'exists', 'absent', 'online', 'unmapped'
@@ -208,6 +257,7 @@ sub alloc_image {
 
     # Proxmox passes size in kilobytes, convert to bytes
     my $size_bytes = $size * 1024;
+    $size_bytes = _align_size_bytes($class, $size_bytes);
 
     # Reject state/vmstate volumes - RAM snapshots not supported on block storage
     # State files must be stored on local directory storage, not on SAN
@@ -318,8 +368,8 @@ sub clone_image {
         });
         $volume_created = 1;
 
-        # Step 2: Create FlashCopy mapping with copyrate 100 (full copy)
-        $fcmap_id = PVE::Storage::Custom::IBMFlashSystem::FCMap::create_fcmap($class, $scfg, $storeid, $volname, $new_name, 100);
+        # Step 2: Create FlashCopy mapping with copyrate 100 (full copy) and autodelete
+        $fcmap_id = PVE::Storage::Custom::IBMFlashSystem::FCMap::create_fcmap($class, $scfg, $storeid, $volname, $new_name, 100, 1);
 
         # Step 3: Start the FlashCopy mapping
         PVE::Storage::Custom::IBMFlashSystem::FCMap::start_fcmap($class, $scfg, $storeid, $fcmap_id);
@@ -331,8 +381,7 @@ sub clone_image {
         # Compensating transaction: cleanup any partially created resources
         if (defined $fcmap_id) {
             eval {
-                PVE::Storage::Custom::IBMFlashSystem::FCMap::stop_fcmap($class, $scfg, $storeid, $fcmap_id);
-                PVE::Storage::Custom::IBMFlashSystem::FCMap::remove_fcmap($class, $scfg, $storeid, $fcmap_id, 1);
+                PVE::Storage::Custom::IBMFlashSystem::FCMap::remove_fcmap_with_wait($class, $scfg, $storeid, $fcmap_id);
             };
         }
 
@@ -459,7 +508,7 @@ sub volume_resize {
     my ($class, $scfg, $storeid, $volname, $size, $running) = @_;
 
     # Proxmox passes size in bytes to volume_resize
-    my $new_size_bytes = $size;
+    my $new_size_bytes = _align_size_bytes($class, $size);
 
     # Get current size from storage array
     my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/lsvdisk/$volname", { bytes => JSON::true });
@@ -478,11 +527,58 @@ sub volume_resize {
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Resizing volume (storeid=%s, volname=%s, current=%d, new=%d, delta=%d)", $storeid, $volname, $current_size_bytes, $new_size_bytes, $delta_bytes);
 
-    # Expand volume using volname directly
-    PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/expandvdisksize/$volname", {
-        size => $delta_bytes,
-        unit => 'b',
-    });
+    my $retry_with_stop = 0;
+    my $apply_resize = sub {
+        my $fcmaps = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/lsfcmap', {});
+        $fcmaps = [] if ref($fcmaps) ne 'ARRAY';
+
+        my %targets;
+        my @active_fcmaps;
+
+        for my $fcmap (@$fcmaps) {
+            next unless $fcmap->{source_vdisk_name} && $fcmap->{target_vdisk_name};
+            next unless $fcmap->{source_vdisk_name} eq $volname;
+            $targets{$fcmap->{target_vdisk_name}} = 1;
+
+            my $status = $fcmap->{status} // '';
+            if ($status !~ /^(stopped|idle|idle_or_copied)$/) {
+                push @active_fcmaps, $fcmap->{id};
+            }
+        }
+
+        if ($retry_with_stop) {
+            for my $fcmap_id (@active_fcmaps) {
+                PVE::Storage::Custom::IBMFlashSystem::FCMap::stop_fcmap($class, $scfg, $storeid, $fcmap_id);
+                PVE::Storage::Custom::IBMFlashSystem::FCMap::wait_for_fcmap_state($class, $scfg, $storeid, $fcmap_id, ['stopped', 'idle', 'idle_or_copied'], 60);
+            }
+        }
+
+        _expand_volume_by_delta($class, $scfg, $storeid, $volname, $delta_bytes);
+        for my $target (sort keys %targets) {
+            _expand_volume_by_delta($class, $scfg, $storeid, $target, $delta_bytes);
+        }
+
+        if ($retry_with_stop) {
+            for my $fcmap_id (@active_fcmaps) {
+                PVE::Storage::Custom::IBMFlashSystem::FCMap::start_fcmap($class, $scfg, $storeid, $fcmap_id);
+            }
+        }
+    };
+
+    eval { $apply_resize->(); };
+    if ($@) {
+        my $error = $@;
+        my $is_busy = PVE::Storage::Custom::IBMFlashSystem::Common::is_resource_busy_error($class, $error)
+            || PVE::Storage::Custom::IBMFlashSystem::Common::error_code_matches($class, $error,
+                'CMMVC6048E', 'CMMVC6050E', 'CMMVC6021E', 'CMMVC6022E', 'CMMVC6023E');
+
+        if ($is_busy && !$retry_with_stop) {
+            $retry_with_stop = 1;
+            $apply_resize->();
+        } else {
+            die $error;
+        }
+    }
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Volume resized successfully (storeid=%s, volname=%s, new_bytes=%d)", $storeid, $volname, $new_size_bytes);
 
@@ -590,30 +686,13 @@ sub free_image {
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Deleting volume (storeid=%s, volname=%s, is_base=%d)", $storeid, $volname, $isBase);
 
-    # Step 1: Remove all FlashCopy mappings for this volume
-    eval {
-        my $fcmaps = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/lsfcmap', {});
-        $fcmaps = [] if ref($fcmaps) ne 'ARRAY';
+    # Step 1: Remove host mappings for this volume (all hosts)
+    _remove_hostmaps_for_volume($class, $scfg, $storeid, $volname);
 
-        for my $fcmap (@$fcmaps) {
-            my $source = $fcmap->{source_vdisk_name} || '';
-            my $target = $fcmap->{target_vdisk_name} || '';
+    # Step 2: Remove all FlashCopy mappings for this volume
+    PVE::Storage::Custom::IBMFlashSystem::FCMap::remove_fcmaps_for_volume($class, $scfg, $storeid, $volname);
 
-            if ($source eq $volname || $target eq $volname) {
-                my $fcmap_id = $fcmap->{id};
-
-                # Stop the mapping first (ignore errors if already stopped)
-                # Stop and remove the mapping
-                eval {
-                    PVE::Storage::Custom::IBMFlashSystem::FCMap::stop_fcmap($class, $scfg, $storeid, $fcmap_id);
-                    sleep(1);  # Brief wait for mapping to reach stopped state
-                    PVE::Storage::Custom::IBMFlashSystem::FCMap::remove_fcmap($class, $scfg, $storeid, $fcmap_id, 1);
-                };
-            }
-        }
-    };
-
-    # Step 2: Delete the volume using volname directly
+    # Step 3: Delete the volume using volname directly
     PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/rmvdisk/$volname", {
         force => JSON::true,
     });
@@ -670,14 +749,14 @@ sub activate_volume {
         }
     }
 
-    # 2. Wait for device discovery
+    # 2. Wait for device discovery and readiness (up to 30s)
     eval {
         my $protocol = PVE::Storage::Custom::IBMFlashSystem::Protocol->get_handler($scfg);
-        $protocol->wait_for_device($scfg, $vdisk_uid, 60);
+        $protocol->wait_for_device_ready($scfg, $vdisk_uid, 30);
     };
     if ($@) {
-         PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg, "Device discovery timed out for vdisk_uid=%s", $vdisk_uid);
-         die $@;
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg, "Device discovery timed out for vdisk_uid=%s", $vdisk_uid);
+        die $@;
     }
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Volume activated (storeid=%s, volname=%s, vdisk_uid=%s)", $storeid, $target_volname, $vdisk_uid);

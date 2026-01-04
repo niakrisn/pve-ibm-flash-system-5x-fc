@@ -73,6 +73,14 @@ sub wait_for_device {
     die "Abstract method wait_for_device() must be implemented by subclass\n";
 }
 
+# Wait for device to appear and be ready for RW access
+# Args: $scfg - storage config, $uid - volume UID, $timeout - seconds
+# Returns: 1 on success, dies on timeout
+sub wait_for_device_ready {
+    my ($class, $scfg, $uid, $timeout) = @_;
+    die "Abstract method wait_for_device_ready() must be implemented by subclass\n";
+}
+
 # Get device path for a volume
 # Args: $uid - volume UID
 # Returns: device path string (e.g., /dev/mapper/xxx)

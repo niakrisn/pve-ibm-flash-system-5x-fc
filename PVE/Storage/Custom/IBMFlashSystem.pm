@@ -36,12 +36,12 @@ sub api {
 # Configuration options
 sub options {
     return {
-        portal => { optional => 1 },
+        portal => {},
         port => { optional => 1 },
-        pool => { optional => 1 },
-        hostcluster => { optional => 1 },
-        username => { optional => 1 },
-        password => { optional => 1 },
+        pool => {},
+        hostcluster => {},
+        username => {},
+        password => {},
         timeout => { optional => 1 },
         verify_ssl => { optional => 1 },
         max_retries => { optional => 1 },

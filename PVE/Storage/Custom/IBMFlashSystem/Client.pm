@@ -469,70 +469,86 @@ sub _api_request {
     my $retry_delay = $scfg->{retry_delay} || 1;
     my $attempts = 0;
     my $response;
+    my $busy_attempts = 0;
+    my $max_busy_retries = 5;
 
-    while ($attempts <= $max_retries) {
-        my $token = _get_cached_token($class, $storeid);
+    REQUEST_LOOP: while (1) {
+        $attempts = 0;
+        while ($attempts <= $max_retries) {
+            my $token = _get_cached_token($class, $storeid);
 
-        # If no token, authenticate first
-        unless ($token) {
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
-                "No cached token, authenticating (storeid=%s)", $storeid);
-            $token = _authenticate($class, $scfg, $storeid);
+            # If no token, authenticate first
+            unless ($token) {
+                PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
+                    "No cached token, authenticating (storeid=%s)", $storeid);
+                $token = _authenticate($class, $scfg, $storeid);
+            }
+
+            # Build request
+            my $request = HTTP::Request->new($method => $url);
+            $request->header('X-Auth-Token' => $token);
+            $request->header('Content-Type' => 'application/json');
+
+            if ($data && $method ne 'GET') {
+                my $json_body = encode_json($data);
+                $request->content($json_body);
+            }
+
+            $response = $ua->request($request);
+
+            # Check for authentication errors
+            my $status_code = $response->code;
+            my $content = $response->decoded_content || '';
+
+            if ($status_code == 401 || $status_code == 403 || $content =~ /InvalidToken/i) {
+                PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
+                    "Token expired, re-authenticating (storeid=%s, endpoint=%s, status=%d, attempt=%d)",
+                    $storeid, $endpoint, $status_code, $attempts + 1);
+
+                # Clear cache and re-authenticate
+                _clear_cached_token($class, $storeid);
+                $token = _authenticate($class, $scfg, $storeid);
+
+                $attempts++;
+                sleep($retry_delay) if $attempts <= $max_retries;
+                next;
+            }
+
+            # Not an auth error - return result (success or other error)
+            last;
         }
 
-        # Build request
-        my $request = HTTP::Request->new($method => $url);
-        $request->header('X-Auth-Token' => $token);
-        $request->header('Content-Type' => 'application/json');
-
-        if ($data && $method ne 'GET') {
-            my $json_body = encode_json($data);
-            $request->content($json_body);
+        # Check if we exhausted retries
+        if ($attempts > $max_retries) {
+            my $duration = (time - $start_time) * 1000;
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg,
+                "API request failed after %d authentication retries (storeid=%s, endpoint=%s, duration=%dms)",
+                $max_retries, $storeid, $endpoint, int($duration));
+            die "API request failed (endpoint=$endpoint) after $max_retries authentication retries\n";
         }
 
-        $response = $ua->request($request);
+        # Parse response
+        unless ($response->is_success) {
+            my $status = $response->status_line;
+            my $content = $response->decoded_content || '';
 
-        # Check for authentication errors
-        my $status_code = $response->code;
-        my $content = $response->decoded_content || '';
+            if ($content =~ /CMMVC(?:6048E|6050E|6021E|6022E|6023E)/i && $busy_attempts < $max_busy_retries) {
+                $busy_attempts++;
+                PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
+                    "API request failed with BUSY code, retrying (storeid=%s, endpoint=%s, attempt=%d/%d)",
+                    $storeid, $endpoint, $busy_attempts, $max_busy_retries);
+                sleep(1);
+                next REQUEST_LOOP;
+            }
 
-        if ($status_code == 401 || $status_code == 403 || $content =~ /InvalidToken/i) {
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
-                "Token expired, re-authenticating (storeid=%s, endpoint=%s, status=%d, attempt=%d)",
-                $storeid, $endpoint, $status_code, $attempts + 1);
-
-            # Clear cache and re-authenticate
-            _clear_cached_token($class, $storeid);
-            $token = _authenticate($class, $scfg, $storeid);
-
-            $attempts++;
-            sleep($retry_delay) if $attempts <= $max_retries;
-            next;
+            my $duration = (time - $start_time) * 1000;
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg,
+                "API request failed (storeid=%s, endpoint=%s, method=%s, status=%s, duration=%dms)",
+                $storeid, $endpoint, $method, $status, int($duration));
+            die "API request failed (endpoint=$endpoint, method=$method): $status - $content\n";
         }
 
-        # Not an auth error - return result (success or other error)
         last;
-    }
-
-    # Check if we exhausted retries
-    if ($attempts > $max_retries) {
-        my $duration = (time - $start_time) * 1000;
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg,
-            "API request failed after %d authentication retries (storeid=%s, endpoint=%s, duration=%dms)",
-            $max_retries, $storeid, $endpoint, int($duration));
-        die "API request failed (endpoint=$endpoint) after $max_retries authentication retries\n";
-    }
-
-    # Parse response
-    unless ($response->is_success) {
-        my $status = $response->status_line;
-        my $content = $response->decoded_content;
-        my $duration = (time - $start_time) * 1000;
-
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg,
-            "API request failed (storeid=%s, endpoint=%s, method=%s, status=%s, duration=%dms)",
-            $storeid, $endpoint, $method, $status, int($duration));
-        die "API request failed (endpoint=$endpoint, method=$method): $status - $content\n";
     }
 
     my $content = $response->decoded_content;

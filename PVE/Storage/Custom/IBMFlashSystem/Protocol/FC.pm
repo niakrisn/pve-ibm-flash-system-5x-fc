@@ -5,7 +5,7 @@ package PVE::Storage::Custom::IBMFlashSystem::Protocol::FC;
 
 use strict;
 use warnings;
-use Fcntl qw(O_WRONLY);
+use Fcntl qw(O_WRONLY O_RDWR);
 use PVE::Tools qw(run_command);
 
 use base qw(PVE::Storage::Custom::IBMFlashSystem::Protocol);
@@ -143,6 +143,42 @@ sub wait_for_device {
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg, "Timeout waiting for multipath device (vdisk_uid=%s, device=%s, timeout=%d)", $vdisk_uid, $device_path, $timeout);
 
     die "Timeout waiting for multipath device '$device_path'\n";
+}
+
+# Wait for multipath device to appear and be ready for RW access
+sub wait_for_device_ready {
+    my ($class, $scfg, $vdisk_uid, $timeout) = @_;
+
+    $timeout ||= 30;
+    my $mpath = $class->convert_uid_to_device($vdisk_uid);
+    my $device_path = "/dev/mapper/$mpath";
+    my $start_time = time();
+    my $mpath_triggered = 0;
+
+    while (time() - $start_time < $timeout) {
+        $class->scan_for_devices($scfg);
+
+        my $elapsed = time() - $start_time;
+        if (!$mpath_triggered && $elapsed >= 5) {
+            $mpath_triggered = 1;
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg,
+                "Triggering multipath -v2 to speed up discovery (vdisk_uid=%s)", $vdisk_uid);
+            eval {
+                run_command(['/usr/sbin/multipath', '-v2'], timeout => 10);
+            };
+        }
+
+        if (-e $device_path) {
+            if (sysopen(my $fh, $device_path, O_RDWR)) {
+                close($fh);
+                return 1;
+            }
+        }
+
+        select(undef, undef, undef, 0.5);
+    }
+
+    die "Timeout waiting for multipath device '$device_path' to become ready\n";
 }
 
 # Get device path for a volume

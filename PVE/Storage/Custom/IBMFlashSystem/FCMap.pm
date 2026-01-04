@@ -139,14 +139,19 @@ sub wait_for_resource_cleanup {
 # Create FlashCopy mapping
 # Returns: mapping ID
 sub create_fcmap {
-    my ($class, $scfg, $storeid, $source, $target, $copyrate) = @_;
+    my ($class, $scfg, $storeid, $source, $target, $copyrate, $autodelete) = @_;
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "Creating FlashCopy mapping (source=%s, target=%s, copyrate=%d)", $source, $target, $copyrate);
 
-    my $fcmap_result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/mkfcmap', {
+    my $params = {
         source => $source,
         target => $target,
         copyrate => $copyrate,
+    };
+    $params->{autodelete} = JSON::true if $autodelete;
+
+    my $fcmap_result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/mkfcmap', {
+        %$params,
     });
 
     # Extract mapping ID from response
@@ -244,6 +249,68 @@ sub remove_fcmap {
     return;
 }
 
+# Stop, wait, and remove a FlashCopy mapping with force
+sub remove_fcmap_with_wait {
+    my ($class, $scfg, $storeid, $fcmap_id) = @_;
+
+    stop_fcmap($class, $scfg, $storeid, $fcmap_id);
+    wait_for_fcmap_state($class, $scfg, $storeid, $fcmap_id, ['stopped', 'idle', 'idle_or_copied'], 60);
+    remove_fcmap($class, $scfg, $storeid, $fcmap_id, 1);
+
+    return;
+}
+
+# Remove a list of FlashCopy mappings with stop + wait + remove (force)
+sub _remove_fcmaps_list {
+    my ($class, $scfg, $storeid, $fcmaps) = @_;
+
+    my @removed_ids;
+    for my $fcmap (@$fcmaps) {
+        my $id = $fcmap->{id};
+        my $source = $fcmap->{source_vdisk_name} || '';
+        my $target = $fcmap->{target_vdisk_name} || '';
+        next unless defined $id;
+
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg,
+            "Removing FlashCopy mapping (fcmap_id=%s, source=%s, target=%s)", $id, $source, $target);
+
+        eval {
+            remove_fcmap_with_wait($class, $scfg, $storeid, $id);
+            push @removed_ids, $id;
+        };
+        if ($@) {
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
+                "Failed to remove FlashCopy mapping (fcmap_id=%s, endpoint=/rest/rmfcmap, error=%s)", $id, $@);
+        }
+    }
+
+    return \@removed_ids;
+}
+
+# Remove all FlashCopy mappings where the specified volume is source or target
+# Uses stop + wait + remove with force to ensure cleanup
+sub remove_fcmaps_for_volume {
+    my ($class, $scfg, $storeid, $volname) = @_;
+
+    my $fcmaps = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/lsfcmap', {});
+    $fcmaps = [] if ref($fcmaps) ne 'ARRAY';
+
+    my @to_remove;
+    for my $fcmap (@$fcmaps) {
+        my $source = $fcmap->{source_vdisk_name} || '';
+        my $target = $fcmap->{target_vdisk_name} || '';
+        next unless $source eq $volname || $target eq $volname;
+        push @to_remove, $fcmap;
+    }
+
+    my $removed_ids = _remove_fcmaps_list($class, $scfg, $storeid, \@to_remove);
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
+        "Removed FlashCopy mappings for volume (volname=%s, count=%d, removed_ids=%s)",
+        $volname, scalar(@$removed_ids), join(', ', @$removed_ids)) if @$removed_ids;
+
+    return;
+}
+
 # Remove all FlashCopy mappings where the specified volume is the source
 # This is needed for rollback to prevent CMMVC9055E error:
 # "The command failed because a target volume has dependent FlashCopy mappings"
@@ -253,28 +320,17 @@ sub remove_all_fcmaps_as_source {
     my $fcmaps = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/lsfcmap', {});
     $fcmaps = [] if ref($fcmaps) ne 'ARRAY';
 
-    my @removed_ids;
+    my @to_remove;
     for my $fcmap (@$fcmaps) {
         if ($fcmap->{source_vdisk_name} eq $volname) {
-            my $id = $fcmap->{id};
-            eval {
-                # Stop the mapping first
-                stop_fcmap($class, $scfg, $storeid, $id);
-            };
-            # Ignore stop errors (may already be stopped)
-
-            eval {
-                # Remove the mapping with force flag
-                remove_fcmap($class, $scfg, $storeid, $id, 1);
-                push @removed_ids, $id;
-            };
-            if ($@) {
-                PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg, "Failed to remove FlashCopy mapping (fcmap_id=%s, endpoint=/rest/rmfcmap, source=%s, target=%s, error=%s)", $id, $fcmap->{source_vdisk_name}, $fcmap->{target_vdisk_name}, $@);
-            }
+            push @to_remove, $fcmap;
         }
     }
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Removed all FlashCopy mappings for volume (volname=%s, count=%d, removed_ids=%s)", $volname, scalar(@removed_ids), join(', ', @removed_ids)) if @removed_ids;
+    my $removed_ids = _remove_fcmaps_list($class, $scfg, $storeid, \@to_remove);
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
+        "Removed FlashCopy mappings for volume as source (volname=%s, count=%d, removed_ids=%s)",
+        $volname, scalar(@$removed_ids), join(', ', @$removed_ids)) if @$removed_ids;
 
     return;
 }

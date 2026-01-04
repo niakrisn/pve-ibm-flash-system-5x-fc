@@ -16,7 +16,7 @@ Fibre Channel SAN → Host Clusters → Volumes
 
 ### Token Management (Lazy Invalidation)
 
-- Token cached in `/run/pve-storage-ibm.token` (mode 0600)
+- Token cached in `/run/pve-storage-ibm-${storeid}.token` (mode 0600)
 - On `401`, `403`, or JSON response containing `InvalidToken`:
   1. Delete cached token file
   2. Re-authenticate via `POST /rest/auth`
@@ -78,12 +78,12 @@ scp t/unit/volume/*.t root@10.4.0.122:/root/pve-ibm-flash-system-5x-fc/t/unit/vo
 1. **HTTP Client (`LWP::UserAgent`):**
    - Config: `timeout` from config, `ssl_opts` for SSL verification (optional)
 2. **`_api_request` method:**
-   - Check token cache in `/run/pve-storage-ibm.token`, call `_authenticate` if missing
+   - Check token cache in `/run/pve-storage-ibm-${storeid}.token`, call `_authenticate` if missing
    - Execute request with `X-Auth-Token` header
    - On `401`, `403`, or `InvalidToken` in JSON response: delete cache, re-auth, retry
 3. **`_authenticate` method:**
    - `POST /rest/auth` with `X-Auth-Username` and `X-Auth-Password` headers
-   - Save token to `/run/pve-storage-ibm.token` with mode `0600`
+   - Save token to `/run/pve-storage-ibm-${storeid}.token with mode `0600`
 
 ### Stage 2: Proxmox API v13 Integration
 
@@ -130,8 +130,8 @@ scp t/unit/volume/*.t root@10.4.0.122:/root/pve-ibm-flash-system-5x-fc/t/unit/vo
 *   **Действие**: Удаление тома.
 *   **Критическое поведение (State-Based Cleanup)**: Чтобы избежать ошибок блокировки (`CMMVC8698E`):
     1. Вызвать `POST /rest/lsvdiskhostmap` для этого тома. Снять маппинги со **всех** хостов кластера (использовать цикл по результатам).
-    2. Найти и удалить все связанные FlashCopy маппинги (`lsfcmap` -> `stop` -> `rmfcmap`).
-    3. Только после этого вызывать `rmvdisk`.
+    2. Найти и удалить все связанные FlashCopy маппинги (`lsfcmap` -> `stop` -> `lsfcmap` (ожидание статуса) -> `rmfcmap`). Фиксированные `sleep()` запрещены.
+    3. Только после этого вызывать `rmvdisk` (после явной очистки маппингов).
 
 ### `volume_size_info($class, $scfg, $storeid, $volname, $timeout)`
 *   **Действие**: Получение актуального размера.
@@ -191,7 +191,7 @@ scp t/unit/volume/*.t root@10.4.0.122:/root/pve-ibm-flash-system-5x-fc/t/unit/vo
 *   **Действие**: Аппаратное клонирование.
 *   **Критическое поведение**: Реализовать как **Hardware Full Copy**.
     1. Создать новый том через `mkvolume`.
-    2. Создать маппинг с **`copyrate: 150`** и **`autodelete: true`**.
+    2. Создать маппинг с **`copyrate: 100`** и **`autodelete: true`**.
     3. Это гарантирует, что диск станет независимым автоматически, а Proxmox получит управление мгновенно.
 
 ### `volume_snapshot($class, $scfg, $storeid, $volname, $snapname)`
@@ -346,4 +346,3 @@ IBM FlashSystem 5.x предоставляет REST API для управлен�
 8. Использовать `force: true` для операций очистки
 9. Ждать появления устройства до 30 секунд после маппинга
 10. Кешировать токены до HTTP 401/403
-
