@@ -11,7 +11,7 @@ use lib qw(t/unit/lib t/integration/lib);
 use TestEnv;
 use VMScenario qw(create_q35_vm create_vm_on_storage cleanup_vm);
 use StateVerifier;
-use StorageHelpers qw(local_volume_exists local_volume_path_exists);
+use StorageHelpers qw(local_volume_exists local_volume_path_exists get_local_vm_volumes verify_local_vm_volumes);
 use FCHelpers qw(skip_without_fc);
 
 # Skip if no FC connectivity
@@ -21,30 +21,6 @@ my $env = TestEnv->setup();
 my $source_vmid = 9999;
 my $clone_vmid = 9998;
 
-sub get_local_vm_volumes {
-    my ($storeid, $vmid) = @_;
-    my $conf = `qm config $vmid 2>/dev/null`;
-    ok($conf, "QM: Config for VM $vmid exists") or return 0;
-
-    my @vols;
-    while ($conf =~ /\Q$storeid\E:([^\s,]+)/g) {
-        push @vols, $1;
-    }
-    ok(@vols > 0, "Storage: Found volumes for VM $vmid on $storeid") or return [];
-    return \@vols;
-}
-
-sub verify_local_vm_volumes {
-    my ($storeid, $vmid) = @_;
-    my $vols = get_local_vm_volumes($storeid, $vmid);
-    return 0 unless $vols && @$vols;
-
-    for my $vol (@$vols) {
-        ok(local_volume_exists($storeid, $vol), "Storage: Local volume $vol exists on $storeid") or return 0;
-        ok(local_volume_path_exists($storeid, $vol), "Host: Local volume path for $vol exists") or return 0;
-    }
-    return 1;
-}
 
 subtest 'Mixed Clone fs-01 -> local-lvm' => sub {
     

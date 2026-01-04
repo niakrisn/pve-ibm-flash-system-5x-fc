@@ -18,11 +18,6 @@ skip_without_fc('FC connectivity required');
 
 my $env = TestEnv->setup();
 my $vmid = 9999;
-cleanup_vm($vmid);
-my $clone_vmid = 9998;
-
-cleanup_vm($vmid);
-cleanup_vm($clone_vmid);
 
 
 subtest 'Snapshot VM Lifecycle (EFI + 1 SCSI)' => sub {
@@ -67,15 +62,7 @@ subtest 'Snapshot VM Lifecycle (EFI + 1 SCSI)' => sub {
 
     # Verify snap2 FlashCopy mapping and volume are removed
     ok(!StorageHelpers::volume_exists($env, "snap-$disks->[1]-snap2"), "Snapshot volume snap2 removed from storage");
-    my $snap2_maps = StorageHelpers::get_flashcopy_mappings($env, $disks->[1]);
-    my $snap2_map_found = 0;
-    for my $m (@$snap2_maps) {
-        if ($m->{target_vdisk_name} && $m->{target_vdisk_name} eq "snap-$disks->[1]-snap2") {
-            $snap2_map_found = 1;
-            last;
-        }
-    }
-    ok(!$snap2_map_found, "FlashCopy mapping for snap2 removed from storage");
+    ok(StateVerifier::verify_fcmap_removed($env, $disks->[1], "snap2"), "FlashCopy mapping for snap2 removed from storage");
     
     # Step 8: Stop VM
     diag("Stopping VM $vmid...");
@@ -88,15 +75,7 @@ subtest 'Snapshot VM Lifecycle (EFI + 1 SCSI)' => sub {
 
     # Verify snap1 FlashCopy mapping and volume are removed
     ok(!StorageHelpers::volume_exists($env, "snap-$disks->[1]-snap1"), "Snapshot volume snap1 removed from storage");
-    my $snap1_maps = StorageHelpers::get_flashcopy_mappings($env, $disks->[1]);
-    my $snap1_map_found = 0;
-    for my $m (@$snap1_maps) {
-        if ($m->{target_vdisk_name} && $m->{target_vdisk_name} eq "snap-$disks->[1]-snap1") {
-            $snap1_map_found = 1;
-            last;
-        }
-    }
-    ok(!$snap1_map_found, "FlashCopy mapping for snap1 removed from storage");
+    ok(StateVerifier::verify_fcmap_removed($env, $disks->[1], "snap1"), "FlashCopy mapping for snap1 removed from storage");
     
     # Step 10: Destroy VM
     diag("Destroying VM $vmid...");

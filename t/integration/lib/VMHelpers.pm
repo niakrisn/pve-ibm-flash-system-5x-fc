@@ -13,7 +13,6 @@ our @EXPORT_OK = qw(
     cleanup_orphan_fc_devices
     device_is_writable
     no_orphan_fc_devices
-    volume_is_accessible
     show_relevant_logs
     check_orphans_after_test
 );
@@ -22,6 +21,8 @@ our @EXPORT_OK = qw(
 use lib 'PVE/Storage/Custom', 'PVE/Storage/Custom/IBMFlashSystem';
 
 use PVE::Storage::Custom::IBMFlashSystem::Client;
+use StorageHelpers qw(volume_exists_by_wwn);
+
 
 # ============================================================================
 # Public API
@@ -49,7 +50,7 @@ sub cleanup_orphan_fc_devices {
         $wwn =~ s/^0x//; 
         
         # Check if the volume actually exists on the SAN
-        my $exists = _volume_exists_by_wwn($env, $wwn);
+        my $exists = StorageHelpers::volume_exists_by_wwn($env, $wwn);
 
         if (!$exists) {
             print STDERR "Cleaning up orphan SCSI device: $dev->{name} (WWN: $wwn, State: $dev->{state})\n";
@@ -61,7 +62,7 @@ sub cleanup_orphan_fc_devices {
     my $mpath_output = `multipath -ll 2>/dev/null`;
     while ($mpath_output =~ /^([0-9a-f]{33})\s+/gm) {
         my $mpath = $1;
-        my $exists = _volume_exists_by_wwn($env, $mpath);
+        my $exists = StorageHelpers::volume_exists_by_wwn($env, $mpath);
         if (!$exists) {
              print STDERR "Cleaning up orphan multipath device: $mpath\n";
              _remove_multipath_device($mpath);
@@ -100,31 +101,13 @@ sub no_orphan_fc_devices {
     # Check each WWN
     while ($mpath_output =~ /^([0-9a-f]{33})\s+/gm) {
         my $wwn = $1;
-        my $exists = _volume_exists_by_wwn($env, $wwn);
+        my $exists = StorageHelpers::volume_exists_by_wwn($env, $wwn);
         return 0 unless $exists;  # Found an orphan
     }
 
     return 1;  # No orphans found
 }
 
-# Check if a volume is accessible on the storage
-# Returns: 1 if accessible, 0 otherwise
-sub volume_is_accessible {
-    my ($env, $volname) = @_;
-
-    return 0 unless $env && $volname;
-
-    my $info = eval {
-        PVE::Storage::Custom::IBMFlashSystem::volume_size_info(
-            'PVE::Storage::Custom::IBMFlashSystem',
-            $env->scfg,
-            $env->storeid,
-            $volname,
-        );
-    };
-
-    return $@ ? 0 : 1;
-}
 
 # Show relevant logs for debugging test failures
 # Displays plugin logs and Proxmox daemon logs
@@ -165,7 +148,7 @@ sub check_orphans_after_test {
     my @orphan_wwns;
     while ($mpath_output =~ /^([0-9a-f]{33})\s+/gm) {
         my $wwn = $1;
-        my $exists = _volume_exists_by_wwn($env, $wwn);
+        my $exists = StorageHelpers::volume_exists_by_wwn($env, $wwn);
         push @orphan_wwns, $wwn unless $exists;
     }
 
@@ -184,37 +167,6 @@ sub check_orphans_after_test {
 # Internal Functions
 # ============================================================================
 
-# Check if volume exists on storage by WWN
-sub _volume_exists_by_wwn {
-    my ($env, $wwn) = @_;
-
-    return 0 unless $env && $wwn;
-
-    # Query storage for volume with this UID/WWN
-    my $result = eval {
-        PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
-            'PVE::Storage::Custom::IBMFlashSystem',
-            $env->scfg,
-            $env->storeid,
-            'POST',
-            '/lsvdisk',
-            { filtervalue => "vdisk_UID=$wwn" },
-        );
-    };
-
-    return 0 if $@ || !$result;
-
-    # Check if we got any results
-    if (ref($result) eq 'ARRAY') {
-        return scalar(@$result) > 0;
-    } elsif (ref($result) eq 'HASH') {
-        # Single volume returned
-        my @keys = keys %$result;
-        return @keys > 0;
-    }
-
-    return 0;
-}
 
 # Remove FC device by WWN
 sub _remove_fc_device_by_wwn {

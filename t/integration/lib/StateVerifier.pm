@@ -235,4 +235,20 @@ sub verify_logs {
     return 1;
 }
 
+# Verify FlashCopy mapping is removed for a snapshot
+# Returns: 1 if mapping is removed, 0 if still exists
+sub verify_fcmap_removed {
+    my ($env, $source_vol, $snapname) = @_;
+    
+    my $snap_vol = "snap-$source_vol-$snapname";
+    my $mappings = StorageHelpers::get_flashcopy_mappings($env, $source_vol);
+    
+    for my $m (@$mappings) {
+        if ($m->{target_vdisk_name} && $m->{target_vdisk_name} eq $snap_vol) {
+            return 0;  # Mapping still exists
+        }
+    }
+    return 1;  # Mapping removed
+}
+
 1;

@@ -9,7 +9,7 @@ use warnings;
 use Exporter 'import';
 use JSON;
 
-our @EXPORT_OK = qw(volume_exists volume_exists_by_wwn cleanup_volume get_volume_info get_volume_uid get_host_mappings get_flashcopy_mappings volume_is_accessible local_volume_exists local_volume_path_exists);
+our @EXPORT_OK = qw(volume_exists volume_exists_by_wwn cleanup_volume get_volume_info get_volume_uid get_host_mappings get_flashcopy_mappings local_volume_exists local_volume_path_exists get_local_vm_volumes verify_local_vm_volumes);
 
 # Add plugin paths (rely on PERL5LIB for system-installed modules)
 # use lib 'PVE/Storage/Custom', 'PVE/Storage/Custom/IBMFlashSystem';
@@ -120,24 +120,6 @@ sub volume_exists_by_wwn {
     return 0;
 }
 
-# Check if a volume is accessible on the storage
-# Returns: 1 if accessible, 0 otherwise
-sub volume_is_accessible {
-    my ($env, $volname) = @_;
-
-    return 0 unless $env && $volname;
-
-    my $info = eval {
-        PVE::Storage::Custom::IBMFlashSystem::volume_size_info(
-            'PVE::Storage::Custom::IBMFlashSystem',
-            $env->scfg,
-            $env->storeid,
-            $volname,
-        );
-    };
-
-    return $@ ? 0 : 1;
-}
 
 # Check if a volume exists on a local storage by querying pvesm list
 sub local_volume_exists {
@@ -159,6 +141,35 @@ sub local_volume_path_exists {
     chomp $path if $path;
     return ($path && -e $path) ? 1 : 0;
 }
+
+# Get all volume names for a VM from a specific storage
+# Returns: arrayref of volume names or empty arrayref on failure
+sub get_local_vm_volumes {
+    my ($storeid, $vmid) = @_;
+    my $conf = `qm config $vmid 2>/dev/null`;
+    return [] unless $conf;
+
+    my @vols;
+    while ($conf =~ /\Q$storeid\E:([^\s,]+)/g) {
+        push @vols, $1;
+    }
+    return \@vols;
+}
+
+# Verify all volumes for a VM exist on local storage
+# Returns: 1 if all volumes exist, 0 otherwise
+sub verify_local_vm_volumes {
+    my ($storeid, $vmid) = @_;
+    my $vols = get_local_vm_volumes($storeid, $vmid);
+    return 0 unless $vols && @$vols;
+
+    for my $vol (@$vols) {
+        return 0 unless local_volume_exists($storeid, $vol);
+        return 0 unless local_volume_path_exists($storeid, $vol);
+    }
+    return 1;
+}
+
 
 # Get host mappings for a volume
 sub get_host_mappings {
