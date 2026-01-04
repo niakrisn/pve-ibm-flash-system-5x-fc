@@ -204,7 +204,7 @@ sub on_delete_hook {
 sub _get_token_path {
     my ($class, $storeid) = @_;
     die "No storeid for token path\n" unless $storeid;
-    return "/run/pve-storage-ibm-${storeid}.token";
+    return "/etc/pve/priv/storage/${storeid}.token";
 }
 
 # Read cached token

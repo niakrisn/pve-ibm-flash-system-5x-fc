@@ -154,7 +154,23 @@ sub wait_for_vdisk_state {
                 my $mappings = eval { 
                     PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/lsvdiskhostmap/$volname", {}) 
                 };
-                $current_state = (!$mappings || (ref($mappings) eq 'ARRAY' && @$mappings == 0)) ? 'unmapped' : 'mapped';
+                
+                if (!$mappings || (ref($mappings) eq 'ARRAY' && @$mappings == 0)) {
+                    $current_state = 'unmapped';
+                } else {
+                    # Check if mapped to THIS host specifically
+                    my $hostname = _get_hostname($class);
+                    my $short_h = $hostname; $short_h =~ s/\..*$//;
+                    my $mapped_to_us = 0;
+                    
+                    foreach my $m (@$mappings) {
+                        if ($m->{host_name} eq $hostname || $m->{host_name} eq $short_h) {
+                            $mapped_to_us = 1;
+                            last;
+                        }
+                    }
+                    $current_state = $mapped_to_us ? 'mapped' : 'unmapped';
+                }
             } else {
                 $current_state = 'absent';
             }
@@ -737,6 +753,7 @@ sub activate_volume {
         eval {
             PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/mkvdiskhostmap/$target_volname", {
                 host => $hostname,
+                force => JSON::true,
             });
         };
         if ($@) {

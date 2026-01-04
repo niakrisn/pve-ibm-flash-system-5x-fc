@@ -16,7 +16,7 @@ Fibre Channel SAN → Host Clusters → Volumes
 
 ### Token Management (Lazy Invalidation)
 
-- Token cached in `/run/pve-storage-ibm-${storeid}.token` (mode 0600)
+- Token cached in `/etc/pve/priv/storage/${storeid}.token` (shared via pmxcfs for cluster support)
 - On `401`, `403`, or JSON response containing `InvalidToken`:
   1. Delete cached token file
   2. Re-authenticate via `POST /rest/auth`
@@ -78,12 +78,12 @@ scp t/unit/volume/*.t root@10.4.0.122:/root/pve-ibm-flash-system-5x-fc/t/unit/vo
 1. **HTTP Client (`LWP::UserAgent`):**
    - Config: `timeout` from config, `ssl_opts` for SSL verification (optional)
 2. **`_api_request` method:**
-   - Check token cache in `/run/pve-storage-ibm-${storeid}.token`, call `_authenticate` if missing
+   - Check token cache in `/etc/pve/priv/storage/${storeid}.token`, call `_authenticate` if missing
    - Execute request with `X-Auth-Token` header
    - On `401`, `403`, or `InvalidToken` in JSON response: delete cache, re-auth, retry
 3. **`_authenticate` method:**
    - `POST /rest/auth` with `X-Auth-Username` and `X-Auth-Password` headers
-   - Save token to `/run/pve-storage-ibm-${storeid}.token with mode `0600`
+   - Save token to `/etc/pve/priv/storage/${storeid}.token` (shared via pmxcfs)
 
 ### Stage 2: Proxmox API v13 Integration
 

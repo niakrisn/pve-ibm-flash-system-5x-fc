@@ -1,3 +1,16 @@
+pve-ibm-fs5x-fc-plugin (1.1.21) unstable; urgency=medium
+
+  * Fix wait_for_vdisk_state to check for host-specific unmap (fixes migration timeout)
+
+ -- Nikita Kozlov <niakrisn@gmail.com>  Sat, 04 Jan 2026 17:20:00 +0300
+
+pve-ibm-fs5x-fc-plugin (1.1.19-4) unstable; urgency=medium
+
+  * Move multipath-tools from Recommends to Depends (required for FC devices)
+  * Move token storage to shared pmxcfs (/etc/pve/priv/storage/) for cluster support
+
+ -- Nikita Kozlov <niakrisn@gmail.com>  Sat, 04 Jan 2026 16:09:00 +0300
+
 pve-ibm-fs5x-fc-plugin (1.1.19-3) unstable; urgency=medium
 
   * Refactor integration test cleanup to be idempotent and silent
