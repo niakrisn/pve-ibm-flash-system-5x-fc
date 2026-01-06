@@ -20,16 +20,16 @@ my $vmid = 9999;
 
 subtest 'Multi-Disk VM Lifecycle (EFI + 2 SCSI)' => sub {
     
-    # Step 1: Create VM with q35 + EFI + 2 SCSI disks
-    diag("Creating VM $vmid with q35 + EFI + 2 SCSI disks...");
+    # Step 1: Create VM with q35 + EFI + 2 SCSI disks + cloud-init
+    diag("Creating VM $vmid with q35 + EFI + 2 SCSI disks + cloud-init...");
     my $scsi_disks = [
         { size => '10G', slot => 0 },  # scsi0: 10GB (OS)
         { size => '5G',  slot => 1 },  # scsi1: 5GB (Data)
     ];
-    ok(create_q35_vm($env, $vmid, $scsi_disks), "VM $vmid created with q35 + EFI + 2 SCSI disks");
+    ok(create_q35_vm($env, $vmid, $scsi_disks, { cloudinit => 1 }), "VM $vmid created with q35 + EFI + 2 SCSI disks + cloud-init");
     
     # Step 2: Verify full lifecycle
-    my $disks = ['vm-9999-disk-0', 'vm-9999-disk-1', 'vm-9999-disk-2']; # EFI + 2 SCSI
+    my $disks = ['vm-9999-disk-0', 'vm-9999-disk-1', 'vm-9999-disk-2', 'vm-9999-cloudinit']; # EFI + 2 SCSI + cloud-init
     ok(verify_full_lifecycle($env, $vmid, $disks), "VM $vmid full lifecycle verified");
 };
 

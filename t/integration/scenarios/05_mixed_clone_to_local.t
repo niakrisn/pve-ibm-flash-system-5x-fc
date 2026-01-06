@@ -24,14 +24,14 @@ my $clone_vmid = 9998;
 
 subtest 'Mixed Clone fs-01 -> local-lvm' => sub {
     
-    # Step 1: Create source VM on fs-01 (EFI + 1 SCSI)
-    diag("Creating source VM $source_vmid on $env->{storeid}...");
+    # Step 1: Create source VM on fs-01 (EFI + 1 SCSI + cloud-init)
+    diag("Creating source VM $source_vmid on $env->{storeid} with cloud-init...");
     my $scsi_disks = [
         { size => '1G', slot => 0 }, 
     ];
-    ok(create_q35_vm($env, $source_vmid, $scsi_disks), "Source VM $source_vmid created on $env->{storeid}");
+    ok(create_q35_vm($env, $source_vmid, $scsi_disks, { cloudinit => 1 }), "Source VM $source_vmid created on $env->{storeid} with cloud-init");
     
-    my $source_disks = ["vm-$source_vmid-disk-0", "vm-$source_vmid-disk-1"]; # EFI + SCSI
+    my $source_disks = ["vm-$source_vmid-disk-0", "vm-$source_vmid-disk-1", "vm-$source_vmid-cloudinit"]; # EFI + SCSI + cloud-init
     ok(StateVerifier::verify_created($env, $source_vmid, $source_disks), "Source VM $source_vmid is CREATED");
     
     # Step 2: Verify source is DEACTIVATED initially

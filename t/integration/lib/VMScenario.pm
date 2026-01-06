@@ -18,13 +18,15 @@ our @EXPORT_OK = qw(
     cleanup_vm
 );
 
-# Create VM with q35 + EFI + optional SCSI disks
-# Args: ($env, $vmid, $scsi_disks_arrayref)
+# Create VM with q35 + EFI + optional SCSI disks + optional cloud-init
+# Args: ($env, $vmid, $scsi_disks_arrayref, $options_hashref)
 # $scsi_disks_arrayref = [{ size => '10G', slot => 0 }, { size => '5G', slot => 1 }]
+# $options_hashref = { cloudinit => 1, cloudinit_slot => 2, cloudinit_storage => 'fs-01' }
 # Returns: 1 on success, 0 on failure
 sub create_q35_vm {
-    my ($env, $vmid, $scsi_disks) = @_;
+    my ($env, $vmid, $scsi_disks, $options) = @_;
     $scsi_disks //= [];
+    $options //= {};
     
     # Build qm create command
     my @cmd = (
@@ -43,6 +45,13 @@ sub create_q35_vm {
         my $size = $disk->{size};
         $size =~ s/G$//i;  # Remove 'G' suffix (qm expects just the number)
         push @cmd, "--scsi$slot", "$env->{storeid}:$size";
+    }
+    
+    # Add cloud-init if requested
+    if ($options->{cloudinit}) {
+        my $ide_slot = $options->{cloudinit_slot} // 2;  # ide2 by default
+        my $ci_storage = $options->{cloudinit_storage} // $env->{storeid};
+        push @cmd, "--ide$ide_slot", "$ci_storage:cloudinit";
     }
     
     # Create VM
@@ -130,11 +139,13 @@ sub cleanup_vm {
 }
 
 
-# Create VM on specific storage
-# Args: ($env, $vmid, $storeid, $scsi_disks_arrayref)
+# Create VM on specific storage + optional cloud-init
+# Args: ($env, $vmid, $storeid, $scsi_disks_arrayref, $options_hashref)
+# $options_hashref = { cloudinit => 1, cloudinit_slot => 2, cloudinit_storage => 'fs-01' }
 sub create_vm_on_storage {
-    my ($env, $vmid, $storeid, $scsi_disks) = @_;
+    my ($env, $vmid, $storeid, $scsi_disks, $options) = @_;
     $scsi_disks //= [];
+    $options //= {};
     
     my @cmd = (
         'qm', 'create', $vmid,
@@ -154,6 +165,13 @@ sub create_vm_on_storage {
 
     # Always add EFI disk for OVMF (standard practice)
     push @cmd, '--efidisk0', "$storeid:1,efitype=4m";
+    
+    # Add cloud-init if requested
+    if ($options->{cloudinit}) {
+        my $ide_slot = $options->{cloudinit_slot} // 2;  # ide2 by default
+        my $ci_storage = $options->{cloudinit_storage} // $storeid;
+        push @cmd, "--ide$ide_slot", "$ci_storage:cloudinit";
+    }
     
     my $result = system(@cmd);
     return $result == 0 ? 1 : 0;

@@ -165,6 +165,12 @@ sub verify_snapshot {
     
     # 2. Storage has FlashCopy mappings and snapshot volumes
     foreach my $disk (@$disks_ref) {
+        # Skip cloud-init disks - they don't participate in snapshots (CD-ROM, readonly)
+        if ($disk =~ /-cloudinit$/) {
+            diag("Skipping snapshot check for cloud-init disk: $disk");
+            next;
+        }
+        
         my $snap_vol = "snap-$disk-$snapname";
         ok(StorageHelpers::volume_exists($env, $snap_vol), "Storage: Snapshot volume $snap_vol exists") or return 0;
         

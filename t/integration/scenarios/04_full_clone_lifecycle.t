@@ -23,14 +23,14 @@ my $clone_vmid = 9998;
 
 subtest 'Full Clone VM Lifecycle (EFI + 1 SCSI)' => sub {
     
-    # Step 1: Create source VM with q35 + EFI + 1 SCSI disk
-    diag("Creating source VM $source_vmid with q35 + EFI + 1 SCSI disk...");
+    # Step 1: Create source VM with q35 + EFI + 1 SCSI disk + cloud-init
+    diag("Creating source VM $source_vmid with q35 + EFI + 1 SCSI disk + cloud-init...");
     my $scsi_disks = [
         { size => '10G', slot => 0 },  # scsi0: 10GB (OS)
     ];
-    ok(create_q35_vm($env, $source_vmid, $scsi_disks), "Source VM $source_vmid created");
+    ok(create_q35_vm($env, $source_vmid, $scsi_disks, { cloudinit => 1 }), "Source VM $source_vmid created with cloud-init");
     
-    my $source_disks = ['vm-9999-disk-0', 'vm-9999-disk-1']; # EFI + 1 SCSI
+    my $source_disks = ['vm-9999-disk-0', 'vm-9999-disk-1', 'vm-9999-cloudinit']; # EFI + 1 SCSI + cloud-init
     
     # Step 2: Verify source VM is CREATED
     ok(StateVerifier::verify_created($env, $source_vmid, $source_disks), "Source VM $source_vmid is CREATED");
@@ -54,7 +54,7 @@ subtest 'Full Clone VM Lifecycle (EFI + 1 SCSI)' => sub {
     diag("Verifying source VM $source_vmid is STILL DEACTIVATED after clone...");
     ok(StateVerifier::verify_deactivated($env, $source_vmid, $source_disks), "Source VM $source_vmid is STILL DEACTIVATED after clone");
 
-    my $clone_disks = ['vm-9998-disk-0', 'vm-9998-disk-1']; # EFI + 1 SCSI (cloned)
+    my $clone_disks = ['vm-9998-disk-0', 'vm-9998-disk-1', 'vm-9998-cloudinit']; # EFI + 1 SCSI + cloud-init (cloned)
 
     # Verify clone VM is properly created
     ok(StateVerifier::verify_cloned($env, $source_vmid, $clone_vmid, $clone_disks), "Clone VM $clone_vmid verified");

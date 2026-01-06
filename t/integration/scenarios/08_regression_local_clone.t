@@ -23,12 +23,12 @@ my $clone_vmid = 9988;
 
 subtest 'Regression Clone local-lvm -> local-lvm' => sub {
     
-    # Step 1: Create source VM on local-lvm (1 SCSI)
-    diag("Creating source VM $source_vmid on $env->{local_storeid}...");
+    # Step 1: Create source VM on local-lvm (1 SCSI + cloud-init)
+    diag("Creating source VM $source_vmid on $env->{local_storeid} with cloud-init...");
     my $scsi_disks = [
         { size => '1G', slot => 0 }, 
     ];
-    ok(create_vm_on_storage($env, $source_vmid, $env->{local_storeid}, $scsi_disks), "Source VM $source_vmid created");
+    ok(create_vm_on_storage($env, $source_vmid, $env->{local_storeid}, $scsi_disks, { cloudinit => 1 }), "Source VM $source_vmid created with cloud-init");
     ok(verify_local_vm_volumes($env->{local_storeid}, $source_vmid), "Source VM volumes verified on $env->{local_storeid}");
     my $source_local_vols = get_local_vm_volumes($env->{local_storeid}, $source_vmid);
     

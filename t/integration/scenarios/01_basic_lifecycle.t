@@ -21,12 +21,12 @@ my $clone_vmid = 9998;
 
 subtest 'Basic VM Lifecycle (EFI only)' => sub {
     
-    # Step 1: Create VM with q35 + EFI (no SCSI disks)
-    diag("Creating VM $vmid with q35 + EFI...");
-    ok(create_q35_vm($env, $vmid, []), "VM $vmid created with q35 + EFI");
+    # Step 1: Create VM with q35 + EFI + cloud-init (no SCSI disks)
+    diag("Creating VM $vmid with q35 + EFI + cloud-init...");
+    ok(create_q35_vm($env, $vmid, [], { cloudinit => 1 }), "VM $vmid created with q35 + EFI + cloud-init");
     
     # Step 2: Verify full lifecycle
-    my $disks = ['vm-9999-disk-0']; # EFI disk only
+    my $disks = ['vm-9999-disk-0', 'vm-9999-cloudinit']; # EFI + cloud-init
     ok(verify_full_lifecycle($env, $vmid, $disks), "VM $vmid full lifecycle verified");
 };
 

@@ -1,3 +1,24 @@
+pve-ibm-fs5x-fc-plugin (1.1.28) unstable; urgency=medium
+
+  * Fix missing Rule 2 (deactivate) for EFI disk clones in QemuServer.pm
+  * Final stable version for all clone scenarios
+
+ -- Nikita Kozlov <niakrisn@gmail.com>  Tue, 06 Jan 2026 12:00:00 +0300
+
+pve-ibm-fs5x-fc-plugin (1.1.23) unstable; urgency=medium
+
+  * Fix cloud-init volume deactivation after commit.
+  * Fix cloud-init volume naming issue by excluding it from offload clone.
+  * Re-apply offload cloning logic and EFI deactivation.
+
+ -- Proxmox Support Team <support@proxmox.com>  Tue, 06 Jan 2026 09:30:00 +0300
+
+pve-ibm-fs5x-fc-plugin (1.1.22) unstable; urgency=medium
+
+  * Revert Cloud-Init template conversion fix for further verification
+
+ -- Nikita Kozlov <niakrisn@gmail.com>  Tue, 06 Jan 2026 08:31:00 +0300
+
 pve-ibm-fs5x-fc-plugin (1.1.21) unstable; urgency=medium
 
   * Fix wait_for_vdisk_state to check for host-specific unmap (fixes migration timeout)

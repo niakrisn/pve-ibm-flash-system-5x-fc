@@ -22,14 +22,14 @@ my $vmid = 9999;
 
 subtest 'Snapshot VM Lifecycle (EFI + 1 SCSI)' => sub {
     
-    # Step 1: Create VM with q35 + EFI + 1 SCSI disk
-    diag("Creating VM $vmid with q35 + EFI + 1 SCSI disk...");
+    # Step 1: Create VM with q35 + EFI + 1 SCSI disk + cloud-init
+    diag("Creating VM $vmid with q35 + EFI + 1 SCSI disk + cloud-init...");
     my $scsi_disks = [
         { size => '10G', slot => 0 },  # scsi0: 10GB (OS)
     ];
-    ok(create_q35_vm($env, $vmid, $scsi_disks), "VM $vmid created");
+    ok(create_q35_vm($env, $vmid, $scsi_disks, { cloudinit => 1 }), "VM $vmid created with cloud-init");
     
-    my $disks = ['vm-9999-disk-0', 'vm-9999-disk-1']; # EFI + 1 SCSI
+    my $disks = ['vm-9999-disk-0', 'vm-9999-disk-1', 'vm-9999-cloudinit']; # EFI + 1 SCSI + cloud-init
     
     # Step 2: Verify CREATED state
     ok(StateVerifier::verify_created($env, $vmid, $disks), "VM $vmid is CREATED");
