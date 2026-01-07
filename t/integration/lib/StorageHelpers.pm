@@ -9,7 +9,7 @@ use warnings;
 use Exporter 'import';
 use JSON;
 
-our @EXPORT_OK = qw(volume_exists volume_exists_by_wwn cleanup_volume get_volume_info get_volume_uid get_host_mappings get_flashcopy_mappings fcmap_exists local_volume_exists local_volume_path_exists get_local_vm_volumes verify_local_vm_volumes);
+our @EXPORT_OK = qw(volume_exists volume_exists_by_wwn cleanup_volume get_volume_info get_volume_uid get_host_mappings get_flashcopy_mappings fcmap_exists get_fcmap_between local_volume_exists local_volume_path_exists get_local_vm_volumes verify_local_vm_volumes);
 
 # Add plugin paths (rely on PERL5LIB for system-installed modules)
 # use lib 'PVE/Storage/Custom', 'PVE/Storage/Custom/IBMFlashSystem';
@@ -245,7 +245,7 @@ sub fcmap_exists {
 
     return 0 unless $env && $source_volname && $target_volname;
 
-    my $fcmaps = eval {
+    my $exists = eval {
         # Get all FlashCopy mappings
         my $all_fcmaps = PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
             'PVE::Storage::Custom::IBMFlashSystem',
@@ -273,9 +273,46 @@ sub fcmap_exists {
         return 0;
     }
 
-    return $fcmaps ? 1 : 0;
+    return $exists ? 1 : 0;
 }
 
+# Get a FlashCopy mapping between source and target volumes
+# Returns: hashref mapping or undef
+sub get_fcmap_between {
+    my ($env, $source_volname, $target_volname) = @_;
+
+    return undef unless $env && $source_volname && $target_volname;
+
+    my $fcmap = eval {
+        my $all_fcmaps = PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
+            'PVE::Storage::Custom::IBMFlashSystem',
+            $env->scfg,
+            $env->storeid,
+            'POST',
+            '/lsfcmap',
+            undef,
+        );
+
+        return undef unless ref($all_fcmaps) eq 'ARRAY';
+
+        foreach my $map (@$all_fcmaps) {
+            next unless $map->{source_vdisk_name} && $map->{target_vdisk_name};
+            if ($map->{source_vdisk_name} eq $source_volname &&
+                $map->{target_vdisk_name} eq $target_volname) {
+                return $map;
+            }
+        }
+
+        return undef;
+    };
+
+    if ($@) {
+        warn "Error getting FlashCopy mapping: $@";
+        return undef;
+    }
+
+    return $fcmap;
+}
 # Force remove FlashCopy mappings for a volume
 sub _remove_flashcopy_mappings {
     my ($env, $volname) = @_;

@@ -21,7 +21,6 @@ my $env = TestEnv->setup();
 my $template_vmid = 9001;
 my $clone_vmid = 9002;
 
-
 subtest 'Linked Clone VM Lifecycle (Template → Linked Clone → Snapshot → Rollback)' => sub {
     
     # PRE-TEST: Verify environment is clean
@@ -61,6 +60,13 @@ subtest 'Linked Clone VM Lifecycle (Template → Linked Clone → Snapshot → R
     diag("Verifying FlashCopy mapping for linked-clone...");
     my $fcmap_exists = StorageHelpers::fcmap_exists($env, $base_disks->[1], $clone_disks->[1]);
     ok($fcmap_exists, "FlashCopy mapping exists for linked-clone");
+    my $base_fcmap = StorageHelpers::get_fcmap_between($env, $base_disks->[1], $clone_disks->[1]);
+    if ($base_fcmap) {
+        my $copyrate = $base_fcmap->{copy_rate} // $base_fcmap->{copyrate};
+        ok(defined($copyrate) && $copyrate =~ /^0$/, "FlashCopy copyrate is 0 for linked-clone");
+        my $autodelete = $base_fcmap->{auto_delete} // $base_fcmap->{autodelete};
+        ok(!defined($autodelete) || !$autodelete, "FlashCopy autodelete disabled for linked-clone");
+    }
     
     # Step 7: Start linked-clone VM
     diag("Starting linked-clone VM $clone_vmid...");

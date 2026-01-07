@@ -253,6 +253,19 @@ sub volume_snapshot_rollback {
             }
         }
 
+        if ($incomplete_state->{base_fcmap_id}) {
+            eval {
+                my $status = PVE::Storage::Custom::IBMFlashSystem::FCMap::get_fcmap_status($class, $scfg, $storeid, $incomplete_state->{base_fcmap_id});
+                if ($status->{status} && $status->{status} eq 'stopped') {
+                    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Restarting base mapping from rollback recovery (volname=%s, fcmap_id=%s)", $volname, $incomplete_state->{base_fcmap_id});
+                    PVE::Storage::Custom::IBMFlashSystem::FCMap::start_fcmap($class, $scfg, $storeid, $incomplete_state->{base_fcmap_id});
+                }
+            };
+            if ($@) {
+                PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg, "Failed to restart base mapping during recovery (volname=%s, fcmap_id=%s, error=%s)", $volname, $incomplete_state->{base_fcmap_id}, $@);
+            }
+        }
+
         # Clear the incomplete state - we'll try again
         PVE::Storage::Custom::IBMFlashSystem::Client::clear_rollback_state($class, $volname);
     }
@@ -278,13 +291,8 @@ sub volume_snapshot_rollback {
     # If this is a linked-clone, temporarily stop the base mapping
     if ($base_fcmap_id) {
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Volume is linked-clone, temporarily stopping base mapping (volname=%s, base=%s, fcmap_id=%s)", $volname, $base_volume, $base_fcmap_id);
-        eval {
-            PVE::Storage::Custom::IBMFlashSystem::FCMap::stop_fcmap($class, $scfg, $storeid, $base_fcmap_id);
-            PVE::Storage::Custom::IBMFlashSystem::FCMap::wait_for_fcmap_state($class, $scfg, $storeid, $base_fcmap_id, ['stopped', 'idle', 'idle_or_copied'], 60);
-        };
-        if ($@) {
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg, "Failed to stop base mapping, continuing anyway (error=%s)", $@);
-        }
+        PVE::Storage::Custom::IBMFlashSystem::FCMap::stop_fcmap($class, $scfg, $storeid, $base_fcmap_id);
+        PVE::Storage::Custom::IBMFlashSystem::FCMap::wait_for_fcmap_state($class, $scfg, $storeid, $base_fcmap_id, ['stopped', 'idle', 'idle_or_copied'], 60);
     }
 
     # Step 1: Collect ALL FlashCopy mappings where source is the volume (star topology)
@@ -322,6 +330,7 @@ sub volume_snapshot_rollback {
         snapname => $snapname,
         original_mappings => \@original_mappings,
         base_fcmap_id => $base_fcmap_id,  # Save for restart after rollback
+        base_volume => $base_volume,
         timestamp => time(),
     });
 
@@ -337,6 +346,8 @@ sub volume_snapshot_rollback {
         volname => $volname,
         snapname => $snapname,
         original_mappings => \@original_mappings,
+        base_fcmap_id => $base_fcmap_id,
+        base_volume => $base_volume,
         timestamp => time(),
     });
 
@@ -374,6 +385,8 @@ sub volume_snapshot_rollback {
         snapname => $snapname,
         original_mappings => \@original_mappings,
         reverse_fcmap_id => $reverse_fcmap_id,
+        base_fcmap_id => $base_fcmap_id,
+        base_volume => $base_volume,
         timestamp => time(),
     });
 
@@ -414,6 +427,8 @@ sub volume_snapshot_rollback {
         volname => $volname,
         snapname => $snapname,
         original_mappings => \@original_mappings,
+        base_fcmap_id => $base_fcmap_id,
+        base_volume => $base_volume,
         timestamp => time(),
     });
 
@@ -475,7 +490,10 @@ sub volume_snapshot_rollback {
     if ($base_fcmap_id) {
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Restarting base mapping for linked-clone (volname=%s, base=%s, fcmap_id=%s)", $volname, $base_volume, $base_fcmap_id);
         eval {
-            PVE::Storage::Custom::IBMFlashSystem::FCMap::start_fcmap($class, $scfg, $storeid, $base_fcmap_id);
+            my $status = PVE::Storage::Custom::IBMFlashSystem::FCMap::get_fcmap_status($class, $scfg, $storeid, $base_fcmap_id);
+            if ($status->{status} && $status->{status} eq 'stopped') {
+                PVE::Storage::Custom::IBMFlashSystem::FCMap::start_fcmap($class, $scfg, $storeid, $base_fcmap_id);
+            }
         };
         if ($@) {
             PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg, "Failed to restart base mapping (error=%s)", $@);

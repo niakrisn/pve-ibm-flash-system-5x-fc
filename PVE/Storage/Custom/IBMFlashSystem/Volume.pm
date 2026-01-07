@@ -318,6 +318,8 @@ sub alloc_image {
 sub clone_image {
     my ($class, $scfg, $storeid, $volname, $vmid, $snapname) = @_;
 
+    my $source_volname = $snapname ? _snapshot_name($class, $volname, $snapname) : $volname;
+
     # Check if source is a template by two methods:
     # 1. Check if volume name starts with "base-"
     # 2. Check if the source VM is marked as template in config
@@ -372,7 +374,7 @@ sub clone_image {
     }
 
     # Get source volume size
-    my $vdisk_info = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/lsvdisk/$volname", { bytes => JSON::true });
+    my $vdisk_info = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/lsvdisk/$source_volname", { bytes => JSON::true });
     $vdisk_info = $vdisk_info->[0] if ref($vdisk_info) eq 'ARRAY';
     my $size_bytes = $vdisk_info->{capacity} || 0;
 
@@ -394,7 +396,7 @@ sub clone_image {
         $volume_created = 1;
 
         # Step 2: Create FlashCopy mapping
-        $fcmap_id = PVE::Storage::Custom::IBMFlashSystem::FCMap::create_fcmap($class, $scfg, $storeid, $volname, $new_name, $copyrate, $autodelete);
+        $fcmap_id = PVE::Storage::Custom::IBMFlashSystem::FCMap::create_fcmap($class, $scfg, $storeid, $source_volname, $new_name, $copyrate, $autodelete);
 
         # Step 3: Start the FlashCopy mapping
         PVE::Storage::Custom::IBMFlashSystem::FCMap::start_fcmap($class, $scfg, $storeid, $fcmap_id);

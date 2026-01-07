@@ -4,7 +4,8 @@ This document details the architectural implementation of FlashCopy for the Prox
 
 ## 1. Cloning Strategy
 
- The plugin implements a hybrid cloning strategy to balance performance (speed) with data safety and snapshot compatibility.
+The plugin implements a hybrid cloning strategy to balance performance (speed) with data safety and snapshot compatibility, with optional offload for full clones when PVE patches are installed.
+Offload full clone is used only when source and target are on the same storage and the storage reports `copy` with `offload` support (cloud-init disks excluded).
 
 ### 1.1 Decision Logic
 
@@ -13,6 +14,7 @@ This document details the architectural implementation of FlashCopy for the Prox
 | **Template** (`base-*`) | **Linked Clone** | `0` | `false` | Instant clone, dependent on source. |
 | **Running VM** | **Full Clone** | `100` | `true` | Independent copy, background copy process. |
 | **VM with Snapshots** | **Full Clone** | `100` | `true` | Ensures clean state, avoids massive dependency trees. |
+| **Full Clone (Offload)** | **PVE vdisk_clone** | `100` | `true` | Same storage with offload support, no qemu-img copy. |
 
 ### 1.2 Visual Flow
 
@@ -22,6 +24,7 @@ graph TD
     
     CheckSource -- "Template (base-*)" --> LinkedClone[Create Linked Clone]
     CheckSource -- "Running VM" --> FullClone[Create Full Clone]
+    CheckSource -- "Full Clone Offload" --> OffloadClone[Offload Full Clone]
     
     subgraph Linked Clone Strategy
     LinkedClone --> Map1[Create FlashCopy Map]
@@ -38,6 +41,13 @@ graph TD
     StartMap2 --> Background[Background Copy Process]
     Background --> Finish[Map Auto-Deletes when 100%]
     end
+
+    subgraph Full Clone Offload Strategy
+    OffloadClone --> OffloadMap[Create FlashCopy Map]
+    OffloadMap --> OffloadProps[Set copyrate=100]
+    OffloadProps --> OffloadAuto[Set autodelete=true]
+    OffloadAuto --> OffloadStart[Start Mapping]
+    end
 ```
 
 ## 2. Snapshot Architecture
@@ -46,6 +56,8 @@ Snapshots utilize FlashCopy with `copyrate=0` to create efficient point-in-time 
 
 ### 2.1 Snapshot Creation
 When a snapshot is taken, a new volume is created, and a FlashCopy map is established from the **Source Volume** to the **Snapshot Volume**.
+
+When cloning from a snapshot (linked clone with a snapshot name), the plugin uses the snapshot volume as the FlashCopy source.
 
 ### 2.2 Rollback Mechanism (The "Manual Reverse-Sync")
 
