@@ -24,6 +24,11 @@ my $clone_vmid = 9998;
 
 subtest 'Mixed Clone fs-01 -> local-lvm' => sub {
     
+    # PRE-TEST: Verify environment is clean
+    diag("Verifying environment is clean before test...");
+    TestEnv::verify_clean_environment($env, [9999, 9998], ['vm-9999-disk']);
+    diag("Environment is clean. Starting test...");
+    
     # Step 1: Create source VM on fs-01 (EFI + 1 SCSI + cloud-init)
     diag("Creating source VM $source_vmid on $env->{storeid} with cloud-init...");
     my $scsi_disks = [

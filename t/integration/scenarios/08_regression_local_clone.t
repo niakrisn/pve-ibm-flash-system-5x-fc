@@ -23,6 +23,11 @@ my $clone_vmid = 9988;
 
 subtest 'Regression Clone local-lvm -> local-lvm' => sub {
     
+    # PRE-TEST: Verify environment is clean
+    diag("Verifying environment is clean before test...");
+    TestEnv::verify_clean_environment($env, [9989, 9988], ['vm-9989-disk']);
+    diag("Environment is clean. Starting test...");
+    
     # Step 1: Create source VM on local-lvm (1 SCSI + cloud-init)
     diag("Creating source VM $source_vmid on $env->{local_storeid} with cloud-init...");
     my $scsi_disks = [

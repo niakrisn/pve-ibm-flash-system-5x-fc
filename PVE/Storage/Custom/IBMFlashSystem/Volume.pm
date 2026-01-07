@@ -318,13 +318,6 @@ sub alloc_image {
 sub clone_image {
     my ($class, $scfg, $storeid, $volname, $vmid, $snapname) = @_;
 
-    my $force_full_clone = 0;
-    if (defined($snapname) && $snapname eq '__FULL_CLONE__') {
-        $force_full_clone = 1;
-        $snapname = undef;
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Function clone_image invoked with __FULL_CLONE__ signal - forcing hardware full clone offload");
-    }
-
     # Check if source is a template by two methods:
     # 1. Check if volume name starts with "base-"
     # 2. Check if the source VM is marked as template in config
@@ -357,10 +350,26 @@ sub clone_image {
     # Generate new volume name for the clone
     my $new_name = $class->find_free_diskname($storeid, $scfg, $vmid, 'raw');
 
-    # Force Full Clone for all operations to ensure snapshot rollback support
-    # Linked Clones (copyrate=0) prevent the source volume from being a target of other maps
-    # which breaks the Manual Reverse-Sync rollback algorithm.
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Creating full clone (storeid=%s, source=%s, target_vmid=%s, target=%s)", $storeid, $volname, $vmid, $new_name);
+    # Determine clone type based on source
+    # Template (base-*) -> Linked Clone (copyrate=0, persistent mapping)
+    # Running VM -> Full Clone (copyrate=100, autodelete after copy)
+    my $copyrate;
+    my $autodelete;
+    my $clone_type;
+    
+    if ($is_base) {
+        # Linked Clone from template
+        $copyrate = 0;
+        $autodelete = 0;  # Keep mapping persistent for linked-clone
+        $clone_type = 'linked';
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Creating linked clone from template (storeid=%s, source=%s, target_vmid=%s, target=%s)", $storeid, $volname, $vmid, $new_name);
+    } else {
+        # Full Clone from running VM
+        $copyrate = 100;
+        $autodelete = 1;  # Auto-delete mapping after full copy
+        $clone_type = 'full';
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Creating full clone from VM (storeid=%s, source=%s, target_vmid=%s, target=%s)", $storeid, $volname, $vmid, $new_name);
+    }
 
     # Get source volume size
     my $vdisk_info = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/lsvdisk/$volname", { bytes => JSON::true });
@@ -384,8 +393,8 @@ sub clone_image {
         });
         $volume_created = 1;
 
-        # Step 2: Create FlashCopy mapping with copyrate 100 (full copy) and autodelete
-        $fcmap_id = PVE::Storage::Custom::IBMFlashSystem::FCMap::create_fcmap($class, $scfg, $storeid, $volname, $new_name, 100, 1);
+        # Step 2: Create FlashCopy mapping
+        $fcmap_id = PVE::Storage::Custom::IBMFlashSystem::FCMap::create_fcmap($class, $scfg, $storeid, $volname, $new_name, $copyrate, $autodelete);
 
         # Step 3: Start the FlashCopy mapping
         PVE::Storage::Custom::IBMFlashSystem::FCMap::start_fcmap($class, $scfg, $storeid, $fcmap_id);
@@ -410,7 +419,7 @@ sub clone_image {
         die "Clone operation failed: $error\n";
     }
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Full clone created successfully (storeid=%s, source=%s, target=%s)", $storeid, $volname, $new_name);
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "%s clone created successfully (storeid=%s, source=%s, target=%s)", ucfirst($clone_type), $storeid, $volname, $new_name);
 
     return $new_name;
 }
@@ -701,6 +710,25 @@ sub free_image {
     }
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Deleting volume (storeid=%s, volname=%s, is_base=%d)", $storeid, $volname, $isBase);
+
+    # Check for dependent linked-clone volumes if this is a template
+    if ($volname =~ m/^base-/) {
+        my $fcmaps = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/lsfcmap', {});
+        $fcmaps = [] if ref($fcmaps) ne 'ARRAY';
+        
+        my @dependent_clones;
+        for my $fcmap (@$fcmaps) {
+            if ($fcmap->{source_vdisk_name} eq $volname) {
+                push @dependent_clones, $fcmap->{target_vdisk_name};
+            }
+        }
+        
+        if (@dependent_clones) {
+            die "Cannot delete template '$volname': has dependent linked-clone volumes: " . 
+                join(', ', @dependent_clones) . "\n" .
+                "Delete linked-clone volumes first or convert them to independent volumes.\n";
+        }
+    }
 
     # Step 1: Remove host mappings for this volume (all hosts)
     _remove_hostmaps_for_volume($class, $scfg, $storeid, $volname);

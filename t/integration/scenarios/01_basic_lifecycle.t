@@ -21,6 +21,11 @@ my $clone_vmid = 9998;
 
 subtest 'Basic VM Lifecycle (EFI only)' => sub {
     
+    # PRE-TEST: Verify environment is clean
+    diag("Verifying environment is clean before test...");
+    TestEnv::verify_clean_environment($env, [9999, 9998], ['vm-9999-disk', 'vm-9998-disk']);
+    diag("Environment is clean. Starting test...");
+    
     # Step 1: Create VM with q35 + EFI + cloud-init (no SCSI disks)
     diag("Creating VM $vmid with q35 + EFI + cloud-init...");
     ok(create_q35_vm($env, $vmid, [], { cloudinit => 1 }), "VM $vmid created with q35 + EFI + cloud-init");

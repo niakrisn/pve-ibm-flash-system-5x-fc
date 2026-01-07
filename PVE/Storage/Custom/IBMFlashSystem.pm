@@ -80,7 +80,7 @@ sub volume_has_feature {
     # Features supported by IBM FlashSystem
     my %features = (
         snapshot => 1,
-        clone => 0,        # Linked clone disabled to ensure snapshot rollback support
+        clone => 1,        # Linked clone enabled for templates
         copy => 1,         # Supports copying via clone_image (Full Clone)
         template => 1,     # Supports template conversion
         sparseinit => 1,   # Supports sparse initialization
@@ -89,7 +89,7 @@ sub volume_has_feature {
 
     my $res = $features{$feature};
     if ($feature eq 'clone') {
-        $res = undef;
+        $res = { base => { raw => 1 } };  # Linked clone from templates
     } elsif ($feature eq 'copy') {
         $res = { 
             base => { raw => 1, offload => 1 }, 

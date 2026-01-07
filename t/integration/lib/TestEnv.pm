@@ -8,7 +8,7 @@ use strict;
 use warnings;
 use Exporter 'import';
 
-our @EXPORT_OK = qw(setup);
+our @EXPORT_OK = qw(setup verify_clean_environment);
 
 # Add plugin paths to @INC
 # Note: Must include '.' for relative paths to work, and installed paths for the package
@@ -146,6 +146,38 @@ sub storeid {
 sub token {
     my ($self) = @_;
     return $self->{token};
+}
+
+# Verify environment is clean before running tests
+# Dies if leftover VMs or volumes are found
+# Usage: TestEnv::verify_clean_environment($env, [9001, 9002], ['vm-9001-disk', 'vm-9002-disk', 'base-9001-disk']);
+sub verify_clean_environment {
+    my ($env, $vmids, $volume_patterns) = @_;
+    
+    $vmids = [] unless defined $vmids;
+    $volume_patterns = [] unless defined $volume_patterns;
+    
+    # Check for leftover VMs
+    if (@$vmids) {
+        my $vmid_regex = join('|', @$vmids);
+        my $vm_check = `qm list 2>/dev/null | grep -E '\\b($vmid_regex)\\b' || true`;
+        if ($vm_check) {
+            die "ENVIRONMENT NOT CLEAN: Found existing VMs:\n$vm_check\n" .
+                "Run cleanup script before running tests.\n";
+        }
+    }
+    
+    # Check for leftover volumes on storage
+    if (@$volume_patterns) {
+        my $pattern_regex = join('|', @$volume_patterns);
+        my $vol_check = `pvesm list $env->{storeid} 2>/dev/null | grep -E '($pattern_regex)' || true`;
+        if ($vol_check) {
+            die "ENVIRONMENT NOT CLEAN: Found existing volumes on storage:\n$vol_check\n" .
+                "Run cleanup script before running tests.\n";
+        }
+    }
+    
+    return 1;
 }
 
 1;

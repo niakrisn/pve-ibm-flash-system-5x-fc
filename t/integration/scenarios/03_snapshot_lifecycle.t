@@ -22,6 +22,11 @@ my $vmid = 9999;
 
 subtest 'Snapshot VM Lifecycle (EFI + 1 SCSI)' => sub {
     
+    # PRE-TEST: Verify environment is clean
+    diag("Verifying environment is clean before test...");
+    TestEnv::verify_clean_environment($env, [9999], ['vm-9999-disk', 'snap-vm-9999-disk']);
+    diag("Environment is clean. Starting test...");
+    
     # Step 1: Create VM with q35 + EFI + 1 SCSI disk + cloud-init
     diag("Creating VM $vmid with q35 + EFI + 1 SCSI disk + cloud-init...");
     my $scsi_disks = [

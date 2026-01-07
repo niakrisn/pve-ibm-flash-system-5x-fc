@@ -23,6 +23,11 @@ my $clone_vmid = 9998;
 
 subtest 'Full Clone VM Lifecycle (EFI + 1 SCSI)' => sub {
     
+    # PRE-TEST: Verify environment is clean
+    diag("Verifying environment is clean before test...");
+    TestEnv::verify_clean_environment($env, [9999, 9998], ['vm-9999-disk', 'vm-9998-disk', 'base-9999-disk']);
+    diag("Environment is clean. Starting test...");
+    
     # Step 1: Create source VM with q35 + EFI + 1 SCSI disk + cloud-init
     diag("Creating source VM $source_vmid with q35 + EFI + 1 SCSI disk + cloud-init...");
     my $scsi_disks = [

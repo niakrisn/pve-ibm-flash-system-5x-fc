@@ -24,6 +24,11 @@ my $backup_storage = 'local';
 
 subtest 'vzdump Backup and Restore' => sub {
     
+    # PRE-TEST: Verify environment is clean
+    diag("Verifying environment is clean before test...");
+    TestEnv::verify_clean_environment($env, [9999, 9998], ['vm-9999-disk', 'vm-9998-disk']);
+    diag("Environment is clean. Starting test...");
+    
     # Step 1: Create VM with 1 SCSI disk + cloud-init
     diag("Creating VM $vmid with 1 SCSI disk + cloud-init...");
     my $scsi_disks = [

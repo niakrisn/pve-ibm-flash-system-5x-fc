@@ -1,3 +1,20 @@
+pve-ibm-fs5x-fc-plugin (1.1.30) unstable; urgency=medium
+
+  * Add FlashCopy linked-clone support for templates
+  * Fix snapshot rollback issues on linked-clone volumes
+  * Add template deletion protection for active linked-clones
+  * Add pre-test environment verification to all integration tests
+  * Add StorageHelpers::fcmap_exists for test validation
+
+ -- Nikita Kozlov <niakrisn@gmail.com>  Wed, 07 Jan 2026 10:10:00 +0300
+
+pve-ibm-fs5x-fc-plugin (1.1.29) unstable; urgency=medium
+
+  * Remove legacy __FULL_CLONE__ signal handling in clone_image
+  * Modern PVE uses undef for hw offload, signal is no longer needed
+
+ -- Nikita Kozlov <niakrisn@gmail.com>  Tue, 06 Jan 2026 16:20:00 +0300
+
 pve-ibm-fs5x-fc-plugin (1.1.28) unstable; urgency=medium
 
   * Fix missing Rule 2 (deactivate) for EFI disk clones in QemuServer.pm

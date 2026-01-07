@@ -9,7 +9,7 @@ use warnings;
 use Exporter 'import';
 use JSON;
 
-our @EXPORT_OK = qw(volume_exists volume_exists_by_wwn cleanup_volume get_volume_info get_volume_uid get_host_mappings get_flashcopy_mappings local_volume_exists local_volume_path_exists get_local_vm_volumes verify_local_vm_volumes);
+our @EXPORT_OK = qw(volume_exists volume_exists_by_wwn cleanup_volume get_volume_info get_volume_uid get_host_mappings get_flashcopy_mappings fcmap_exists local_volume_exists local_volume_path_exists get_local_vm_volumes verify_local_vm_volumes);
 
 # Add plugin paths (rely on PERL5LIB for system-installed modules)
 # use lib 'PVE/Storage/Custom', 'PVE/Storage/Custom/IBMFlashSystem';
@@ -236,6 +236,44 @@ sub get_flashcopy_mappings {
 
     return [] unless ref($fcmaps) eq 'ARRAY';
     return $fcmaps;
+}
+
+# Check if FlashCopy mapping exists between source and target volumes
+# Returns: 1 if mapping exists, 0 otherwise
+sub fcmap_exists {
+    my ($env, $source_volname, $target_volname) = @_;
+
+    return 0 unless $env && $source_volname && $target_volname;
+
+    my $fcmaps = eval {
+        # Get all FlashCopy mappings
+        my $all_fcmaps = PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
+            'PVE::Storage::Custom::IBMFlashSystem',
+            $env->scfg,
+            $env->storeid,
+            'POST',
+            '/lsfcmap',
+            undef,
+        );
+
+        return [] unless ref($all_fcmaps) eq 'ARRAY';
+
+        # Check if mapping exists between source and target
+        foreach my $fcmap (@$all_fcmaps) {
+            if ($fcmap->{source_vdisk_name} && $fcmap->{source_vdisk_name} eq $source_volname &&
+                $fcmap->{target_vdisk_name} && $fcmap->{target_vdisk_name} eq $target_volname) {
+                return 1;
+            }
+        }
+        return 0;
+    };
+
+    if ($@) {
+        warn "Error checking FlashCopy mapping: $@";
+        return 0;
+    }
+
+    return $fcmaps ? 1 : 0;
 }
 
 # Force remove FlashCopy mappings for a volume
