@@ -5,8 +5,11 @@ pve-ibm-fs5x-fc-plugin (1.1.30) unstable; urgency=medium
   * Add template deletion protection for active linked-clones
   * Add pre-test environment verification to all integration tests
   * Add StorageHelpers::fcmap_exists for test validation
+  * Reconstruct pve-ibm-fs5x.patch from authentic PVE 9.1.3 source for clean base
+  * Harden patch-manager.sh: fix silent failures and add idempotency
+  * Move 'patch' utility to Depends in debian/control
 
- -- Nikita Kozlov <niakrisn@gmail.com>  Wed, 07 Jan 2026 10:10:00 +0300
+ -- Nikita Kozlov <niakrisn@gmail.com>  Wed, 07 Jan 2026 23:55:00 +0300
 
 pve-ibm-fs5x-fc-plugin (1.1.29) unstable; urgency=medium
 

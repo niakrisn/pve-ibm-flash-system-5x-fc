@@ -74,6 +74,12 @@ case "$1" in
         _failed_patches=""
         _package_version=$(dpkg-query -W -f='${Version}' "$PACKAGE_NAME" 2>/dev/null || echo "unknown")
 
+        # Check for patch utility
+        if ! command -v patch >/dev/null 2>&1; then
+            log "ERROR: 'patch' utility not found. Please install it with: apt-get install patch"
+            exit 1
+        fi
+
         # Change to Perl library base for relative patch paths
         cd /usr/share/perl5
 
@@ -89,8 +95,7 @@ case "$1" in
 
                 log "Checking: $_patch_name"
 
-                # Try to apply with -N (assume not applied)
-                # We use --dry-run first to see if it's already applied
+                # Check if already applied
                 if patch -R -p0 -s -f --dry-run < "$_patch" >/dev/null 2>&1; then
                     log "  ✓ Patch already applied: $_patch_name"
                     _applied_count=$((_applied_count + 1))
@@ -99,25 +104,35 @@ case "$1" in
 
                 log "Applying: $_patch_name"
 
-                # Try to apply
-                _out=$(patch -p0 -N < "$_patch" 2>&1) || true
+                # Try to apply - we use || true to prevent set -e from exiting
+                _out=$(patch -p0 -N < "$_patch" 2>&1) || _patch_res=$?
                 
-                if echo "$_out" | grep -q "saving rejects"; then
-                     # Try fuzz
-                     log "  ⚠ First attempt failed, trying with fuzz..."
-                     if patch -p0 -N --fuzz=3 < "$_patch" >/dev/null 2>&1; then
-                         log "  ✓ Applied (with fuzz): $_patch_name"
+                if [ "$_patch_res" != "" ] && [ "$_patch_res" != "0" ]; then
+                     # If it failed, check if it's because it was actually applied (false negative in dry-run)
+                     if echo "$_out" | grep -q "Reversed (or previously applied) patch detected"; then
+                         log "  ✓ Patch detected as applied (via output): $_patch_name"
                          _applied_count=$((_applied_count + 1))
+                         _patch_res=0
                      else
-                         log "  ⚠ Failed: $_patch_name"
-                         _failed_patches="$_failed_patches $_patch_name"
-                         # Dump output for debug
-                         echo "$_out" | while read -r line; do log "    > $line"; done
+                         # Try with fuzz
+                         log "  ⚠ First attempt failed (exit $_patch_res), trying with fuzz..."
+                         if patch -p0 -N --fuzz=3 < "$_patch" >/dev/null 2>&1; then
+                             log "  ✓ Applied (with fuzz): $_patch_name"
+                             _applied_count=$((_applied_count + 1))
+                             _patch_res=0
+                         else
+                             log "  ⚠ Failed: $_patch_name"
+                             _failed_patches="$_failed_patches $_patch_name"
+                             # Dump output for debug
+                             echo "$_out" | while read -r line; do log "    > $line"; done
+                         fi
                      fi
                 else
                     log "  ✓ Applied: $_patch_name"
                     _applied_count=$((_applied_count + 1))
                 fi
+                # Reset result for next loop
+                _patch_res=0
             fi
         done
 
