@@ -130,6 +130,110 @@ sub _remove_hostmaps_for_volume {
     return;
 }
 
+sub _list_snapshot_volumes_for_source {
+    my ($class, $scfg, $storeid, $volname) = @_;
+
+    my %snapshots;
+
+    my $fcmaps = PVE::Storage::Custom::IBMFlashSystem::FCMap::list_fcmaps($class, $scfg, $storeid);
+    for my $fcmap (@$fcmaps) {
+        next unless ($fcmap->{source_vdisk_name} // '') eq $volname;
+        my $target = $fcmap->{target_vdisk_name} // '';
+        $snapshots{$target} = 1 if $target =~ /^snap-/;
+    }
+
+    my $vdisks = eval {
+        PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
+            $class, $scfg, $storeid, 'POST', '/lsvdisk', { bytes => JSON::true });
+    };
+    $vdisks = [] if $@ || ref($vdisks) ne 'ARRAY';
+
+    my $pattern = qr/^snap-\Q${volname}\E-/;
+    for my $vdisk (@$vdisks) {
+        my $name = $vdisk->{name} // '';
+        $snapshots{$name} = 1 if $name =~ $pattern;
+    }
+
+    return [sort keys %snapshots];
+}
+
+sub _remove_snapshot_volume {
+    my ($class, $scfg, $storeid, $snapshot_name) = @_;
+
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
+        "Removing snapshot volume (storeid=%s, snapshot_name=%s)", $storeid, $snapshot_name);
+
+    my $fcmaps = PVE::Storage::Custom::IBMFlashSystem::FCMap::list_fcmaps($class, $scfg, $storeid);
+    for my $fcmap (@$fcmaps) {
+        my $src = $fcmap->{source_vdisk_name} || '';
+        my $tgt = $fcmap->{target_vdisk_name} || '';
+        next unless $src eq $snapshot_name || $tgt eq $snapshot_name;
+        my $id = $fcmap->{id};
+
+        eval {
+            PVE::Storage::Custom::IBMFlashSystem::FCMap::remove_fcmap_with_wait($class, $scfg, $storeid, $id);
+            PVE::Storage::Custom::IBMFlashSystem::FCMap::wait_for_resource_cleanup($class, $scfg, $storeid, 'fcmap', $id, 30);
+        };
+        if ($@) {
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
+                "Failed to remove FlashCopy mapping (fcmap_id=%s, endpoint=/rest/rmfcmap, error=%s)", $id, $@);
+        }
+    }
+
+    eval {
+        my $hostname = _get_hostname($class);
+        PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
+            $class, $scfg, $storeid, 'POST', "/rmvdiskhostmap/$snapshot_name", { host => $hostname });
+    };
+    if ($@) {
+        if ($@ !~ /not found|CMMVC5750E|object does not exist/i) {
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
+                "Failed to remove host mapping (snapshot_name=%s, endpoint=/rest/rmvdiskhostmap, error=%s)", $snapshot_name, $@);
+        }
+    }
+
+    my $delete_attempts = 0;
+    my $max_delete_attempts = 3;
+    my $volume_deleted = 0;
+
+    while ($delete_attempts < $max_delete_attempts && !$volume_deleted) {
+        eval {
+            PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
+                $class, $scfg, $storeid, 'POST', "/rmvdisk/$snapshot_name");
+            $volume_deleted = 1;
+        };
+        if ($@) {
+            $delete_attempts++;
+            my $error = $@;
+
+            if (PVE::Storage::Custom::IBMFlashSystem::Common::is_not_found_error($class, $error)) {
+                $volume_deleted = 1;
+                last;
+            }
+
+            if (PVE::Storage::Custom::IBMFlashSystem::Common::error_code_matches($class, $error, 'CMMVC5840E')
+                && $delete_attempts < $max_delete_attempts) {
+                my $fcmaps_retry = PVE::Storage::Custom::IBMFlashSystem::FCMap::list_fcmaps($class, $scfg, $storeid);
+                for my $fcmap (@$fcmaps_retry) {
+                    my $src = $fcmap->{source_vdisk_name} || '';
+                    my $tgt = $fcmap->{target_vdisk_name} || '';
+                    next unless $src eq $snapshot_name || $tgt eq $snapshot_name;
+                    my $id = $fcmap->{id};
+                    eval {
+                        PVE::Storage::Custom::IBMFlashSystem::FCMap::remove_fcmap_with_wait($class, $scfg, $storeid, $id);
+                        PVE::Storage::Custom::IBMFlashSystem::FCMap::wait_for_resource_cleanup($class, $scfg, $storeid, 'fcmap', $id, 30);
+                    };
+                }
+                next;
+            }
+
+            die "Failed to delete snapshot volume after $delete_attempts attempts: $error\n";
+        }
+    }
+
+    return;
+}
+
 # Wait for vdisk to reach a specific state: 'exists', 'absent', 'online', 'unmapped'
 sub wait_for_vdisk_state {
     my ($class, $scfg, $storeid, $volname, $desired_state, $timeout) = @_;
@@ -727,6 +831,15 @@ sub free_image {
             die "Cannot delete template '$volname': has dependent linked-clone volumes: " . 
                 join(', ', @dependent_clones) . "\n" .
                 "Delete linked-clone volumes first or convert them to independent volumes.\n";
+        }
+    }
+
+    my $snapshots = _list_snapshot_volumes_for_source($class, $scfg, $storeid, $volname);
+    for my $snapshot_name (@$snapshots) {
+        eval { _remove_snapshot_volume($class, $scfg, $storeid, $snapshot_name); };
+        if ($@) {
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
+                "Failed to remove snapshot volume (snapshot_name=%s, error=%s)", $snapshot_name, $@);
         }
     }
 

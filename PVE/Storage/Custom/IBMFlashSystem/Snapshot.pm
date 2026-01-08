@@ -699,12 +699,15 @@ sub _start_fcmap_with_retry {
     my $max_attempts = 5;
 
     while ($attempts < $max_attempts) {
-        eval {
+        my $ok = eval {
             PVE::Storage::Custom::IBMFlashSystem::FCMap::start_fcmap($class, $scfg, $storeid, $fcmap_id);
-            return 1;
+            1;
         };
-        my $error = $@;
+        return 1 if $ok;
+
+        my $error = $@ // '';
         $attempts++;
+        $error = 'unknown error' if $error eq '';
 
         if (PVE::Storage::Custom::IBMFlashSystem::Common::error_code_matches($class, $error, 'CMMVC5701E', 'CMMVC6470E')
             && $attempts < $max_attempts) {

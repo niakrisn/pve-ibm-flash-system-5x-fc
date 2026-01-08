@@ -1,3 +1,9 @@
+pve-ibm-fs5x-fc-plugin (1.1.41) unstable; urgency=medium
+
+  * Improved snapshot volume removal and FlashCopy retry logic (by user)
+
+ -- Nikita Kozlov <niakrisn@gmail.com>  Thu, 08 Jan 2026 17:10:00 +0300
+
 pve-ibm-fs5x-fc-plugin (1.1.40) unstable; urgency=medium
 
   * Improve FlashCopy mapping handling and retries (by user)
