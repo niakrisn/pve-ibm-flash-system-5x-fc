@@ -556,8 +556,7 @@ sub volume_resize {
 
     my $retry_with_stop = 0;
     my $apply_resize = sub {
-        my $fcmaps = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/lsfcmap', {});
-        $fcmaps = [] if ref($fcmaps) ne 'ARRAY';
+        my $fcmaps = PVE::Storage::Custom::IBMFlashSystem::FCMap::list_fcmaps($class, $scfg, $storeid);
 
         my %targets;
         my @active_fcmaps;
@@ -715,8 +714,7 @@ sub free_image {
 
     # Check for dependent linked-clone volumes if this is a template
     if ($volname =~ m/^base-/) {
-        my $fcmaps = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/lsfcmap', {});
-        $fcmaps = [] if ref($fcmaps) ne 'ARRAY';
+        my $fcmaps = PVE::Storage::Custom::IBMFlashSystem::FCMap::list_fcmaps($class, $scfg, $storeid);
         
         my @dependent_clones;
         for my $fcmap (@$fcmaps) {

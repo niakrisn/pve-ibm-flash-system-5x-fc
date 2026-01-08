@@ -1,3 +1,9 @@
+pve-ibm-fs5x-fc-plugin (1.1.40) unstable; urgency=medium
+
+  * Improve FlashCopy mapping handling and retries (by user)
+
+ -- Nikita Kozlov <niakrisn@gmail.com>  Thu, 08 Jan 2026 16:30:00 +0300
+
 pve-ibm-fs5x-fc-plugin (1.1.39) unstable; urgency=medium
 
   * Remove magical rename of cleanup script in debian/rules

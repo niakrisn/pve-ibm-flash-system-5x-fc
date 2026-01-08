@@ -14,6 +14,55 @@ use PVE::Storage::Custom::IBMFlashSystem::Logger;
 # FlashCopy Mapping Operations
 # ============================================================================
 
+# Extract FlashCopy mapping ID from API response
+sub _extract_fcmap_id {
+    my ($result) = @_;
+
+    return $result->{id} if ref($result) eq 'HASH';
+    return $result if !ref($result) && $result =~ /^\d+$/;
+
+    if (!ref($result)) {
+        eval {
+            my $decoded = decode_json($result);
+            return $decoded->{id} if ref($decoded) eq 'HASH';
+        };
+    }
+
+    return undef;
+}
+
+# Normalize FlashCopy list responses (array, hash, or empty)
+sub _normalize_fcmap_list {
+    my ($result) = @_;
+
+    return [] if !defined $result;
+    return $result if ref($result) eq 'ARRAY';
+    return [$result] if ref($result) eq 'HASH';
+    return [];
+}
+
+# List FlashCopy mappings
+sub list_fcmaps {
+    my ($class, $scfg, $storeid) = @_;
+
+    my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/lsfcmap', {});
+    return _normalize_fcmap_list($result);
+}
+
+# Create FlashCopy mapping with explicit parameter hash
+# Returns: mapping ID
+sub create_fcmap_with_params {
+    my ($class, $scfg, $storeid, $params) = @_;
+
+    my $fcmap_result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
+        $class, $scfg, $storeid, 'POST', '/mkfcmap', $params);
+
+    my $fcmap_id = _extract_fcmap_id($fcmap_result);
+    die "Failed to extract FlashCopy mapping ID from response\n" unless defined $fcmap_id;
+
+    return $fcmap_id;
+}
+
 # Get FlashCopy mapping ID by source and target volume names
 # Returns: mapping ID or undef if not found
 sub get_fcmap_id {
@@ -22,10 +71,8 @@ sub get_fcmap_id {
     my $max_attempts = 5;
     my $attempt = 0;
     while ($attempt < $max_attempts) {
-        my $result = eval { PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/lsfcmap', {}) };
-        
-        # API returns array directly
-        my $fcmaps = ref($result) eq 'ARRAY' ? $result : [];
+        my $fcmaps = eval { list_fcmaps($class, $scfg, $storeid) };
+        $fcmaps = [] if $@;
 
         for my $fcmap (@$fcmaps) {
             if ($fcmap->{source_vdisk_name} eq $source_vol && $fcmap->{target_vdisk_name} eq $target_vol) {
@@ -150,27 +197,7 @@ sub create_fcmap {
     };
     $params->{autodelete} = JSON::true if $autodelete;
 
-    my $fcmap_result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/mkfcmap', {
-        %$params,
-    });
-
-    # Extract mapping ID from response
-    my $fcmap_id;
-    if (ref($fcmap_result) eq 'HASH') {
-        $fcmap_id = $fcmap_result->{id};
-    } elsif (!ref($fcmap_result) && $fcmap_result =~ /^\d+$/) {
-        # Direct numeric string response
-        $fcmap_id = $fcmap_result;
-    } else {
-        # Try to decode if it's a string
-        eval {
-            require JSON;
-            my $decoded = decode_json($fcmap_result);
-            $fcmap_id = $decoded->{id} if ref($decoded) eq 'HASH';
-        };
-    }
-
-    die "Failed to extract FlashCopy mapping ID from response\n" unless defined $fcmap_id;
+    my $fcmap_id = create_fcmap_with_params($class, $scfg, $storeid, $params);
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "FlashCopy mapping created (fcmap_id=%s)", $fcmap_id);
 
@@ -292,8 +319,7 @@ sub _remove_fcmaps_list {
 sub remove_fcmaps_for_volume {
     my ($class, $scfg, $storeid, $volname) = @_;
 
-    my $fcmaps = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/lsfcmap', {});
-    $fcmaps = [] if ref($fcmaps) ne 'ARRAY';
+    my $fcmaps = list_fcmaps($class, $scfg, $storeid);
 
     my @to_remove;
     for my $fcmap (@$fcmaps) {
@@ -317,8 +343,7 @@ sub remove_fcmaps_for_volume {
 sub remove_all_fcmaps_as_source {
     my ($class, $scfg, $storeid, $volname) = @_;
 
-    my $fcmaps = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/lsfcmap', {});
-    $fcmaps = [] if ref($fcmaps) ne 'ARRAY';
+    my $fcmaps = list_fcmaps($class, $scfg, $storeid);
 
     my @to_remove;
     for my $fcmap (@$fcmaps) {
