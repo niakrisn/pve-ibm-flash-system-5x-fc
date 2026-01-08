@@ -110,11 +110,14 @@ perl -I. -I/usr/share/pve-ibm-fs5x-fc-plugin-tests/lib -MVMHelpers -MTestEnv -e 
 # Explicit Multipath Flush
 multipath -F 2>/dev/null || true
 
-# 4. Clear Plugin Logs
+# 4. Clear Plugin Logs and State
 LOG_FILE="/var/log/pve-storage-ibm.log"
 if [ -f "$LOG_FILE" ]; then
     echo "Clearing plugin log: $LOG_FILE..."
     true > "$LOG_FILE"
 fi
+
+echo "Phase 4: Clearing temporary state files..."
+rm -f /run/pve-ibm-rollback-*.json
 
 echo "Cleanup complete."

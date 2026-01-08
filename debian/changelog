@@ -1,3 +1,9 @@
+pve-ibm-fs5x-fc-plugin (1.1.42) unstable; urgency=medium
+
+  * Add cleanup of rollback state files to global cleanup script
+
+ -- Nikita Kozlov <niakrisn@gmail.com>  Thu, 08 Jan 2026 17:15:00 +0300
+
 pve-ibm-fs5x-fc-plugin (1.1.41) unstable; urgency=medium
 
   * Improved snapshot volume removal and FlashCopy retry logic (by user)
