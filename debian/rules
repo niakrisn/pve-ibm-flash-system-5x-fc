@@ -13,11 +13,4 @@ override_dh_auto_install:
 	# Nothing to do here, dh_install will handle it
 
 # We use .install files for each package, so dh_install works automatically
-override_dh_install:
-	dh_install
-	# Rename cleanup script for convenience in the tests package
-	if [ -f debian/pve-ibm-fs5x-fc-plugin-tests/usr/share/pve-ibm-fs5x-fc-plugin-tests/cleanup_host_san.sh ]; then \
-		mv debian/pve-ibm-fs5x-fc-plugin-tests/usr/share/pve-ibm-fs5x-fc-plugin-tests/cleanup_host_san.sh \
-		   debian/pve-ibm-fs5x-fc-plugin-tests/usr/share/pve-ibm-fs5x-fc-plugin-tests/cleanup.sh; \
-		chmod +x debian/pve-ibm-fs5x-fc-plugin-tests/usr/share/pve-ibm-fs5x-fc-plugin-tests/cleanup.sh; \
-	fi
+# override_dh_install is not needed as we want to keep filenames as is

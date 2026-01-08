@@ -11,6 +11,8 @@ use TestEnv;
 use VMScenario qw(create_q35_vm cleanup_vm);
 use StateVerifier;
 use StorageHelpers;
+use PVE::Storage::Custom::IBMFlashSystem::Common qw(_snapshot_name);
+use VMHelpers qw(run_cmd_checked);
 use FCHelpers qw(skip_without_fc);
 
 # Skip if no FC connectivity
@@ -41,50 +43,54 @@ subtest 'Snapshot VM Lifecycle (EFI + 1 SCSI)' => sub {
     
     # Step 3: Start VM
     diag("Starting VM $vmid...");
-    ok(system('qm', 'start', $vmid) == 0, "VM $vmid started");
+    run_cmd_checked("qm start $vmid", 'qm', 'start', $vmid);
     ok(StateVerifier::verify_activated($env, $vmid, $disks), "VM $vmid is ACTIVATED");
     
     # Step 4: Create snapshot 'snap1'
     diag("Creating snapshot 'snap1'...");
-    ok(system('qm', 'snapshot', $vmid, 'snap1') == 0, "Snapshot 'snap1' created");
+    run_cmd_checked("qm snapshot $vmid snap1", 'qm', 'snapshot', $vmid, 'snap1');
     ok(StateVerifier::verify_snapshot($env, $vmid, 'snap1', $disks), "Snapshot 'snap1' verified on storage");
     
     # Step 5: Create snapshot 'snap2'
     diag("Creating snapshot 'snap2'...");
-    ok(system('qm', 'snapshot', $vmid, 'snap2') == 0, "Snapshot 'snap2' created");
+    run_cmd_checked("qm snapshot $vmid snap2", 'qm', 'snapshot', $vmid, 'snap2');
     ok(StateVerifier::verify_snapshot($env, $vmid, 'snap2', $disks), "Snapshot 'snap2' verified on storage");
     
     # Step 6: Rollback to snap1
     diag("Rolling back to snap1...");
-    ok(system('qm', 'rollback', $vmid, 'snap1') == 0, "Rolled back to snap1");
-    ok(system('qm', 'start', $vmid) == 0, "VM $vmid started after rollback");
+    run_cmd_checked("qm rollback $vmid snap1", 'qm', 'rollback', $vmid, 'snap1');
+    run_cmd_checked("qm start $vmid (after rollback)", 'qm', 'start', $vmid);
     ok(StateVerifier::verify_activated($env, $vmid, $disks), "VM $vmid is ACTIVATED after rollback");
     ok(StateVerifier::verify_snapshot($env, $vmid, 'snap1', $disks), "Snapshot 'snap1' still valid after rollback");
     
     # Step 7: Delete snap2
     diag("Deleting snapshot 'snap2'...");
-    ok(system('qm', 'delsnapshot', $vmid, 'snap2') == 0, "Snapshot 'snap2' deleted");
+    run_cmd_checked("qm delsnapshot $vmid snap2", 'qm', 'delsnapshot', $vmid, 'snap2');
 
     # Verify snap2 FlashCopy mapping and volume are removed
-    ok(!StorageHelpers::volume_exists($env, "snap-$disks->[1]-snap2"), "Snapshot volume snap2 removed from storage");
+    my $snap2_vol = _snapshot_name('PVE::Storage::Custom::IBMFlashSystem', $disks->[1], 'snap2');
+    ok(!StorageHelpers::volume_exists($env, $snap2_vol), "Snapshot volume snap2 removed from storage");
     ok(StateVerifier::verify_fcmap_removed($env, $disks->[1], "snap2"), "FlashCopy mapping for snap2 removed from storage");
+    StateVerifier::verify_no_orphans($env, "snapshot_del_snap2_vm${vmid}");
     
     # Step 8: Stop VM
     diag("Stopping VM $vmid...");
-    ok(system('qm', 'stop', $vmid) == 0, "VM $vmid stopped");
+    run_cmd_checked("qm stop $vmid", 'qm', 'stop', $vmid);
     ok(StateVerifier::verify_deactivated($env, $vmid, $disks), "VM $vmid is DEACTIVATED");
     
     # Step 9: Delete snap1
     diag("Deleting snapshot 'snap1'...");
-    ok(system('qm', 'delsnapshot', $vmid, 'snap1') == 0, "Snapshot 'snap1' deleted");
+    run_cmd_checked("qm delsnapshot $vmid snap1", 'qm', 'delsnapshot', $vmid, 'snap1');
 
     # Verify snap1 FlashCopy mapping and volume are removed
-    ok(!StorageHelpers::volume_exists($env, "snap-$disks->[1]-snap1"), "Snapshot volume snap1 removed from storage");
+    my $snap1_vol = _snapshot_name('PVE::Storage::Custom::IBMFlashSystem', $disks->[1], 'snap1');
+    ok(!StorageHelpers::volume_exists($env, $snap1_vol), "Snapshot volume snap1 removed from storage");
     ok(StateVerifier::verify_fcmap_removed($env, $disks->[1], "snap1"), "FlashCopy mapping for snap1 removed from storage");
+    StateVerifier::verify_no_orphans($env, "snapshot_del_snap1_vm${vmid}");
     
     # Step 10: Destroy VM
     diag("Destroying VM $vmid...");
-    ok(system('qm', 'destroy', $vmid, '--destroy-unreferenced-disks', '1') == 0, "VM $vmid destroyed");
+    run_cmd_checked("qm destroy $vmid", 'qm', 'destroy', $vmid, '--destroy-unreferenced-disks', '1');
     ok(StateVerifier::verify_destroyed($env, $vmid, $disks), "VM $vmid is DESTROYED");
 };
 

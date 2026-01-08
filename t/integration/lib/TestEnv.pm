@@ -49,6 +49,7 @@ sub setup {
     # Precedence: Env > Params > Config > Default
     my $storeid = $ENV{IBMFS_STOREID} || $params{storeid} || $config->{flashsystem_storage} || 'fs-01';
     my $local_storeid = $ENV{IBMFS_LOCAL_STOREID} || $params{local_storeid} || $config->{local_storage} || 'local-lvm';
+    my $test_pool = $ENV{IBMFS_TEST_POOL} || $params{test_pool} || $config->{test_pool} || 'pve-storage-test-pool';
 
     # Try to load storage config from Proxmox
     my $scfg;
@@ -111,6 +112,7 @@ sub setup {
         scfg    => $scfg,
         storeid => $storeid,
         local_storeid => $local_storeid,
+        test_pool => $test_pool,
         token   => $token,
     }, $class;
 

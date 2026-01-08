@@ -9,12 +9,21 @@ use warnings;
 use Test::More;
 use StorageHelpers;
 use VMHelpers;
+use PVE::Storage::Custom::IBMFlashSystem::Common qw(_snapshot_name);
 
 # ============================================================================
 # Public API
 # ============================================================================
 
 my %VOLUME_UIDS; # Session cache for WWNs to verify removal after volumes are gone
+
+sub verify_no_orphans {
+    my ($env, $label) = @_;
+    $label //= 'state';
+
+    ok(VMHelpers::check_orphans_after_test($env, $label), "Host: No orphan FC devices after $label") or return 0;
+    return 1;
+}
 
 # Verify VM is created but NOT yet active (no mappings, no devices)
 sub verify_created {
@@ -46,6 +55,8 @@ sub verify_created {
             ok(!-e $path, "Host: Device $path does NOT exist") or return 0;
         }
     }
+
+    return 0 unless verify_no_orphans($env, "verify_created_$vmid");
     return 1;
 }
 
@@ -78,12 +89,16 @@ sub verify_activated {
             sleep 1;
         }
         ok($found, "Host: Device $path exists") or return 0;
+
+        ok(VMHelpers::device_is_openable($path), "Host: Device $path is openable") or return 0;
         
         # 3. Multipath device is present (normalize UID to lowercase)
         my $uid_lower = lc($uid);
         my $mp = `multipath -ll 3$uid_lower 2>&1`;
-        ok($mp =~ /3$uid_lower/, "Host: Multipath device 3$uid is present") or return 0;
+        ok($mp =~ /3$uid_lower/, "Host: Multipath device 3$uid_lower is present") or return 0;
     }
+
+    return 0 unless verify_no_orphans($env, "verify_activated_$vmid");
     return 1;
 }
 
@@ -101,13 +116,16 @@ sub verify_deactivated {
         # 2. Local devices gone (Check by cached UID)
         my $uid = $VOLUME_UIDS{$disk} // StorageHelpers::get_volume_uid($env, $disk);
         if ($uid) {
-            my $path = "/dev/disk/by-id/scsi-3" . lc($uid);
+            my $uid_lower = lc($uid);
+            my $path = "/dev/disk/by-id/scsi-3" . $uid_lower;
             ok(!-e $path, "Host: Device $path is removed") or return 0;
             
-            my $mp = `multipath -ll 3$uid 2>&1`;
-            ok($mp !~ /3$uid/, "Host: Multipath device 3$uid is removed") or return 0;
+            my $mp = `multipath -ll 3$uid_lower 2>&1`;
+            ok($mp !~ /3$uid_lower/, "Host: Multipath device 3$uid_lower is removed") or return 0;
         }
     }
+
+    return 0 unless verify_no_orphans($env, "verify_deactivated_$vmid");
     return 1;
 }
 
@@ -129,17 +147,16 @@ sub verify_destroyed {
         # 2b. Host check (using cached UID)
         my $uid = $VOLUME_UIDS{$disk};
         if ($uid) {
-            my $path = "/dev/disk/by-id/scsi-3" . lc($uid);
+            my $uid_lower = lc($uid);
+            my $path = "/dev/disk/by-id/scsi-3" . $uid_lower;
             ok(!-e $path, "Host: Specific device path $path is REMOVED") or return 0;
             
-            my $mp = `multipath -ll 3$uid 2>&1`;
-            ok($mp !~ /3$uid/, "Host: Multipath entry 3$uid is REMOVED from kernel") or return 0;
+            my $mp = `multipath -ll 3$uid_lower 2>&1`;
+            ok($mp !~ /3$uid_lower/, "Host: Multipath entry 3$uid_lower is REMOVED from kernel") or return 0;
         }
     }
     
-    # 3. Global orphan check (Verify no IBM 2145 handle remains without a SAN volume)
-    ok(VMHelpers::check_orphans_after_test($env, "verify_destroyed_$vmid"), "Host: Final global orphan scan passed") or return 0;
-    
+    return 0 unless verify_no_orphans($env, "verify_destroyed_$vmid");
     return 1;
 }
 
@@ -171,16 +188,17 @@ sub verify_snapshot {
             next;
         }
         
-        my $snap_vol = "snap-$disk-$snapname";
+        my $snap_vol = _snapshot_name('PVE::Storage::Custom::IBMFlashSystem', $disk, $snapname);
         ok(StorageHelpers::volume_exists($env, $snap_vol), "Storage: Snapshot volume $snap_vol exists") or return 0;
         
-        my $mappings = StorageHelpers::get_flashcopy_mappings($env, $disk);
-        my $found = 0;
-        foreach my $m (@$mappings) {
-            if ($m->{target_vdisk_name} eq $snap_vol) { $found = 1; last; }
-        }
-        ok($found, "Storage: FlashCopy mapping exists from $disk to $snap_vol") or return 0;
+        my $fcmap = StorageHelpers::get_fcmap_between($env, $disk, $snap_vol);
+        ok($fcmap, "Storage: FlashCopy mapping exists from $disk to $snap_vol") or return 0;
+
+        my $state = $fcmap->{status} // $fcmap->{state} // '';
+        ok($state && $state !~ /stopped/i, "Storage: FlashCopy mapping active for $disk -> $snap_vol (state=$state)") or return 0;
     }
+
+    return 0 unless verify_no_orphans($env, "verify_snapshot_${vmid}_$snapname");
     return 1;
 }
 
@@ -199,6 +217,8 @@ sub verify_template {
         # IBM FlashSystem plugin marks base volumes with base- prefix during create_base
         ok($disk =~ /^base-/, "Storage: Volume $disk is named as base") or return 0;
     }
+
+    return 0 unless verify_no_orphans($env, "verify_template_$vmid");
     return 1;
 }
 
@@ -216,6 +236,8 @@ sub verify_cloned {
     foreach my $disk (@$target_disks_ref) {
         ok(StorageHelpers::volume_exists($env, $disk), "Storage: Clone volume $disk exists") or return 0;
     }
+
+    return 0 unless verify_no_orphans($env, "verify_cloned_$target_id");
     return 1;
 }
 
@@ -246,7 +268,7 @@ sub verify_logs {
 sub verify_fcmap_removed {
     my ($env, $source_vol, $snapname) = @_;
     
-    my $snap_vol = "snap-$source_vol-$snapname";
+    my $snap_vol = _snapshot_name('PVE::Storage::Custom::IBMFlashSystem', $source_vol, $snapname);
     my $mappings = StorageHelpers::get_flashcopy_mappings($env, $source_vol);
     
     for my $m (@$mappings) {
@@ -255,6 +277,30 @@ sub verify_fcmap_removed {
         }
     }
     return 1;  # Mapping removed
+}
+
+sub verify_fcmap_active {
+    my ($env, $source_vol, $target_vol, $timeout) = @_;
+
+    $timeout //= 30;
+    diag("Verifying FlashCopy mapping is active for $source_vol -> $target_vol");
+
+    my $fcmap;
+    my $state = '';
+    for (1..$timeout) {
+        $fcmap = StorageHelpers::get_fcmap_between($env, $source_vol, $target_vol);
+        if ($fcmap) {
+            $state = $fcmap->{status} // $fcmap->{state} // '';
+            last if $state && $state !~ /stopped/i;
+        }
+        sleep 1 if $_ < $timeout;
+    }
+
+    ok($fcmap, "Storage: FlashCopy mapping exists for $source_vol -> $target_vol") or return 0;
+    ok($state && $state !~ /stopped/i, "Storage: FlashCopy mapping active for $source_vol -> $target_vol (state=$state)") or return 0;
+
+    return 0 unless verify_no_orphans($env, "verify_fcmap_active_${source_vol}_$target_vol");
+    return 1;
 }
 
 1;

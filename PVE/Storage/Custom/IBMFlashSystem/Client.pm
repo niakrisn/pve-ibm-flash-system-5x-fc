@@ -541,6 +541,17 @@ sub _api_request {
                 next REQUEST_LOOP;
             }
 
+            # Retry on 50x server errors (transient failures)
+            my $status_code = $response->code;
+            if ($status_code >= 500 && $status_code < 600 && $busy_attempts < $max_busy_retries) {
+                $busy_attempts++;
+                PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
+                    "API request failed with server error %d, retrying (storeid=%s, endpoint=%s, attempt=%d/%d)",
+                    $status_code, $storeid, $endpoint, $busy_attempts, $max_busy_retries);
+                sleep(2);  # Longer delay for server errors
+                next REQUEST_LOOP;
+            }
+
             my $duration = (time - $start_time) * 1000;
             PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg,
                 "API request failed (storeid=%s, endpoint=%s, method=%s, status=%s, duration=%dms)",

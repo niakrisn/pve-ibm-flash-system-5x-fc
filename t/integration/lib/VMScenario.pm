@@ -9,6 +9,7 @@ use warnings;
 use Exporter 'import';
 use Test::More;
 use StateVerifier;
+use VMHelpers qw(run_cmd_checked);
 
 our @EXPORT_OK = qw(
     create_q35_vm
@@ -31,6 +32,7 @@ sub create_q35_vm {
     # Build qm create command
     my @cmd = (
         'qm', 'create', $vmid,
+        '--pool', $env->{test_pool},
         '--bios', 'ovmf',
         '--machine', 'q35',
         '--scsihw', 'virtio-scsi-pci',
@@ -55,9 +57,8 @@ sub create_q35_vm {
     }
     
     # Create VM
-    my $result = system(@cmd);
-    
-    return $result == 0 ? 1 : 0;
+    run_cmd_checked("qm create $vmid", @cmd);
+    return 1;
 }
 
 # Verify full lifecycle: create → start → stop → destroy
@@ -75,11 +76,7 @@ sub verify_full_lifecycle {
     
     # 2. Start VM
     diag("Starting VM $vmid...");
-    my $start_result = system('qm', 'start', $vmid);
-    unless ($start_result == 0) {
-        diag("FAILED: qm start $vmid failed");
-        return 0;
-    }
+    run_cmd_checked("qm start $vmid", 'qm', 'start', $vmid);
     
     # 3. Verify ACTIVATED state
     unless (StateVerifier::verify_activated($env, $vmid, $disks)) {
@@ -89,11 +86,7 @@ sub verify_full_lifecycle {
     
     # 4. Stop VM
     diag("Stopping VM $vmid...");
-    my $stop_result = system('qm', 'stop', $vmid);
-    unless ($stop_result == 0) {
-        diag("FAILED: qm stop $vmid failed");
-        return 0;
-    }
+    run_cmd_checked("qm stop $vmid", 'qm', 'stop', $vmid);
     
     # 5. Verify DEACTIVATED state
     unless (StateVerifier::verify_deactivated($env, $vmid, $disks)) {
@@ -103,11 +96,7 @@ sub verify_full_lifecycle {
     
     # 6. Destroy VM
     diag("Destroying VM $vmid...");
-    my $destroy_result = system('qm', 'destroy', $vmid, '--destroy-unreferenced-disks', '1');
-    unless ($destroy_result == 0) {
-        diag("FAILED: qm destroy $vmid failed");
-        return 0;
-    }
+    run_cmd_checked("qm destroy $vmid", 'qm', 'destroy', $vmid, '--destroy-unreferenced-disks', '1');
     
     # 7. Verify DESTROYED state
     unless (StateVerifier::verify_destroyed($env, $vmid, $disks)) {
@@ -173,16 +162,16 @@ sub create_vm_on_storage {
         push @cmd, "--ide$ide_slot", "$ci_storage:cloudinit";
     }
     
-    my $result = system(@cmd);
-    return $result == 0 ? 1 : 0;
+    run_cmd_checked("qm create $vmid", @cmd);
+    return 1;
 }
 
 # Convert VM to template
 # Args: ($vmid)
 sub convert_to_template {
     my ($vmid) = @_;
-    my $result = system('qm', 'template', $vmid);
-    return $result == 0 ? 1 : 0;
+    run_cmd_checked("qm template $vmid", 'qm', 'template', $vmid);
+    return 1;
 }
 
 1;

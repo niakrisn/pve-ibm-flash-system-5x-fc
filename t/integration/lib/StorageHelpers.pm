@@ -186,8 +186,9 @@ sub get_host_mappings {
             {},
         );
     };
+    die "Failed to list host mappings for $volname: $@" if $@;
+    die "Empty response while listing host mappings for $volname\n" if !defined $result;
 
-    return [] if $@ || !$result;
     # Handle both array and hash responses
     if (ref($result) eq 'ARRAY') {
         return $result;
@@ -197,7 +198,33 @@ sub get_host_mappings {
         return [] if @keys == 0;
         return [$result];
     }
-    return [];
+    die "Unexpected host mapping response type: " . (ref($result) || 'SCALAR') . "\n";
+}
+
+# Get all FlashCopy mappings (strict)
+sub _get_all_fcmaps {
+    my ($env) = @_;
+
+    die "Missing test environment for FlashCopy query\n" unless $env;
+
+    my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
+        'PVE::Storage::Custom::IBMFlashSystem',
+        $env->scfg,
+        $env->storeid,
+        'POST',
+        '/lsfcmap',
+        undef,
+    );
+
+    if (ref($result) eq 'ARRAY') {
+        return $result;
+    } elsif (ref($result) eq 'HASH') {
+        my @keys = keys %$result;
+        return [] if @keys == 0;
+        return [$result];
+    }
+
+    die "Unexpected FlashCopy response type: " . (ref($result) || 'SCALAR') . "\n";
 }
 
 # Get FlashCopy mappings for a volume (as source or target)
@@ -205,37 +232,18 @@ sub get_host_mappings {
 sub get_flashcopy_mappings {
     my ($env, $volname) = @_;
 
-    my $fcmaps = eval {
-        # Get all FlashCopy mappings (requires POST method)
-        my $all_fcmaps = PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
-            'PVE::Storage::Custom::IBMFlashSystem',
-            $env->scfg,
-            $env->storeid,
-            'POST',
-            '/lsfcmap',
-            undef,
-        );
+    my $all_fcmaps = eval { _get_all_fcmaps($env) };
+    die "Failed to list FlashCopy mappings for $volname: $@" if $@;
 
-        return [] unless ref($all_fcmaps) eq 'ARRAY';
-
-        # Filter by volume name (source or target)
-        my @filtered;
-        foreach my $fcmap (@$all_fcmaps) {
-            if (($fcmap->{source_vdisk_name} && $fcmap->{source_vdisk_name} eq $volname) ||
-                ($fcmap->{target_vdisk_name} && $fcmap->{target_vdisk_name} eq $volname)) {
-                push @filtered, $fcmap;
-            }
+    # Filter by volume name (source or target)
+    my @filtered;
+    foreach my $fcmap (@$all_fcmaps) {
+        if (($fcmap->{source_vdisk_name} && $fcmap->{source_vdisk_name} eq $volname) ||
+            ($fcmap->{target_vdisk_name} && $fcmap->{target_vdisk_name} eq $volname)) {
+            push @filtered, $fcmap;
         }
-        return \@filtered;
-    };
-
-    if ($@) {
-        warn "Error getting FlashCopy mappings: $@";
-        return [];
     }
-
-    return [] unless ref($fcmaps) eq 'ARRAY';
-    return $fcmaps;
+    return \@filtered;
 }
 
 # Check if FlashCopy mapping exists between source and target volumes
@@ -245,35 +253,17 @@ sub fcmap_exists {
 
     return 0 unless $env && $source_volname && $target_volname;
 
-    my $exists = eval {
-        # Get all FlashCopy mappings
-        my $all_fcmaps = PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
-            'PVE::Storage::Custom::IBMFlashSystem',
-            $env->scfg,
-            $env->storeid,
-            'POST',
-            '/lsfcmap',
-            undef,
-        );
+    my $all_fcmaps = eval { _get_all_fcmaps($env) };
+    die "Failed to check FlashCopy mapping $source_volname -> $target_volname: $@" if $@;
 
-        return [] unless ref($all_fcmaps) eq 'ARRAY';
-
-        # Check if mapping exists between source and target
-        foreach my $fcmap (@$all_fcmaps) {
-            if ($fcmap->{source_vdisk_name} && $fcmap->{source_vdisk_name} eq $source_volname &&
-                $fcmap->{target_vdisk_name} && $fcmap->{target_vdisk_name} eq $target_volname) {
-                return 1;
-            }
+    foreach my $fcmap (@$all_fcmaps) {
+        if ($fcmap->{source_vdisk_name} && $fcmap->{source_vdisk_name} eq $source_volname &&
+            $fcmap->{target_vdisk_name} && $fcmap->{target_vdisk_name} eq $target_volname) {
+            return 1;
         }
-        return 0;
-    };
-
-    if ($@) {
-        warn "Error checking FlashCopy mapping: $@";
-        return 0;
     }
 
-    return $exists ? 1 : 0;
+    return 0;
 }
 
 # Get a FlashCopy mapping between source and target volumes
@@ -283,35 +273,18 @@ sub get_fcmap_between {
 
     return undef unless $env && $source_volname && $target_volname;
 
-    my $fcmap = eval {
-        my $all_fcmaps = PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
-            'PVE::Storage::Custom::IBMFlashSystem',
-            $env->scfg,
-            $env->storeid,
-            'POST',
-            '/lsfcmap',
-            undef,
-        );
+    my $all_fcmaps = eval { _get_all_fcmaps($env) };
+    die "Failed to get FlashCopy mapping $source_volname -> $target_volname: $@" if $@;
 
-        return undef unless ref($all_fcmaps) eq 'ARRAY';
-
-        foreach my $map (@$all_fcmaps) {
-            next unless $map->{source_vdisk_name} && $map->{target_vdisk_name};
-            if ($map->{source_vdisk_name} eq $source_volname &&
-                $map->{target_vdisk_name} eq $target_volname) {
-                return $map;
-            }
+    foreach my $map (@$all_fcmaps) {
+        next unless $map->{source_vdisk_name} && $map->{target_vdisk_name};
+        if ($map->{source_vdisk_name} eq $source_volname &&
+            $map->{target_vdisk_name} eq $target_volname) {
+            return $map;
         }
-
-        return undef;
-    };
-
-    if ($@) {
-        warn "Error getting FlashCopy mapping: $@";
-        return undef;
     }
 
-    return $fcmap;
+    return undef;
 }
 # Force remove FlashCopy mappings for a volume
 sub _remove_flashcopy_mappings {

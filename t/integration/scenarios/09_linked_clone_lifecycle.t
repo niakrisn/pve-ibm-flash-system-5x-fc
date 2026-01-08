@@ -12,6 +12,7 @@ use TestEnv;
 use VMScenario qw(create_q35_vm cleanup_vm);
 use StateVerifier;
 use StorageHelpers;
+use VMHelpers qw(run_cmd_checked);
 use FCHelpers qw(skip_without_fc);
 
 # Skip if no FC connectivity
@@ -42,14 +43,14 @@ subtest 'Linked Clone VM Lifecycle (Template → Linked Clone → Snapshot → R
     
     # Step 3: Convert to template
     diag("Converting VM $template_vmid to template...");
-    ok(system('qm', 'template', $template_vmid) == 0, "VM $template_vmid converted to template");
+    run_cmd_checked("qm template $template_vmid", 'qm', 'template', $template_vmid);
     
     my $base_disks = ['base-9001-disk-0', 'base-9001-disk-1']; # Renamed to base-*
     ok(StateVerifier::verify_created($env, $template_vmid, $base_disks), "Template volumes renamed to base-*");
     
     # Step 4: Create linked-clone from template
     diag("Creating linked-clone VM $clone_vmid from template $template_vmid...");
-    ok(system('qm', 'clone', $template_vmid, $clone_vmid, '--name', 'test-linked-clone') == 0, "Linked-clone created");
+    run_cmd_checked("qm clone $template_vmid $clone_vmid (linked)", 'qm', 'clone', $template_vmid, $clone_vmid, '--name', 'test-linked-clone', '--pool', $env->{test_pool});
     
     my $clone_disks = ['vm-9002-disk-0', 'vm-9002-disk-1']; # EFI + 1 SCSI (linked)
     
@@ -70,29 +71,31 @@ subtest 'Linked Clone VM Lifecycle (Template → Linked Clone → Snapshot → R
     
     # Step 7: Start linked-clone VM
     diag("Starting linked-clone VM $clone_vmid...");
-    ok(system('qm', 'start', $clone_vmid) == 0, "Linked-clone VM $clone_vmid started");
+    run_cmd_checked("qm start $clone_vmid", 'qm', 'start', $clone_vmid);
     ok(StateVerifier::verify_activated($env, $clone_vmid, $clone_disks), "Linked-clone VM $clone_vmid is ACTIVATED");
     
     # Step 8: Create snapshot on linked-clone
     diag("Creating snapshot 'snap1' on linked-clone...");
-    ok(system('qm', 'snapshot', $clone_vmid, 'snap1') == 0, "Snapshot 'snap1' created on linked-clone");
+    run_cmd_checked("qm snapshot $clone_vmid snap1", 'qm', 'snapshot', $clone_vmid, 'snap1');
     ok(StateVerifier::verify_snapshot($env, $clone_vmid, 'snap1', $clone_disks), "Snapshot 'snap1' verified on storage");
     
     # Step 9: Rollback to snapshot on linked-clone
     diag("Rolling back linked-clone to snap1...");
-    ok(system('qm', 'rollback', $clone_vmid, 'snap1') == 0, "Rolled back linked-clone to snap1");
-    ok(system('qm', 'start', $clone_vmid) == 0, "Linked-clone VM $clone_vmid started after rollback");
+    run_cmd_checked("qm rollback $clone_vmid snap1", 'qm', 'rollback', $clone_vmid, 'snap1');
+    ok(StateVerifier::verify_fcmap_active($env, $base_disks->[1], $clone_disks->[1]), "Base mapping active after rollback");
+    run_cmd_checked("qm start $clone_vmid (after rollback)", 'qm', 'start', $clone_vmid);
     ok(StateVerifier::verify_activated($env, $clone_vmid, $clone_disks), "Linked-clone VM $clone_vmid is ACTIVATED after rollback");
     
     # Step 10: Delete snapshot
     diag("Deleting snapshot 'snap1'...");
-    ok(system('qm', 'delsnapshot', $clone_vmid, 'snap1') == 0, "Snapshot 'snap1' deleted");
+    run_cmd_checked("qm delsnapshot $clone_vmid snap1", 'qm', 'delsnapshot', $clone_vmid, 'snap1');
+    StateVerifier::verify_no_orphans($env, "linked_clone_delsnapshot_${clone_vmid}");
     
     # Step 11: Stop and destroy linked-clone
     diag("Stopping and destroying linked-clone VM $clone_vmid...");
-    ok(system('qm', 'stop', $clone_vmid) == 0, "Linked-clone VM $clone_vmid stopped");
+    run_cmd_checked("qm stop $clone_vmid", 'qm', 'stop', $clone_vmid);
     ok(StateVerifier::verify_deactivated($env, $clone_vmid, $clone_disks), "Linked-clone VM $clone_vmid is DEACTIVATED");
-    ok(system('qm', 'destroy', $clone_vmid, '--destroy-unreferenced-disks', '1') == 0, "Linked-clone VM $clone_vmid destroyed");
+    run_cmd_checked("qm destroy $clone_vmid", 'qm', 'destroy', $clone_vmid, '--destroy-unreferenced-disks', '1');
     ok(StateVerifier::verify_destroyed($env, $clone_vmid, $clone_disks), "Linked-clone VM $clone_vmid is DESTROYED");
     
     # Step 12: Verify FlashCopy mapping removed
@@ -101,7 +104,7 @@ subtest 'Linked Clone VM Lifecycle (Template → Linked Clone → Snapshot → R
     
     # Step 13: Destroy template
     diag("Destroying template VM $template_vmid...");
-    ok(system('qm', 'destroy', $template_vmid, '--destroy-unreferenced-disks', '1') == 0, "Template VM $template_vmid destroyed");
+    run_cmd_checked("qm destroy $template_vmid", 'qm', 'destroy', $template_vmid, '--destroy-unreferenced-disks', '1');
     ok(StateVerifier::verify_destroyed($env, $template_vmid, $base_disks), "Template VM $template_vmid is DESTROYED");
 };
 

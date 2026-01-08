@@ -7,14 +7,21 @@ package VMHelpers;
 use strict;
 use warnings;
 use Exporter 'import';
-use Fcntl qw(O_RDWR O_NONBLOCK);
+use Fcntl qw(O_RDONLY O_RDWR O_NONBLOCK);
+use IPC::Open3;
+use Symbol 'gensym';
+use JSON;
+use Test::More;
 
 our @EXPORT_OK = qw(
     cleanup_orphan_fc_devices
+    device_is_openable
     device_is_writable
     no_orphan_fc_devices
     show_relevant_logs
     check_orphans_after_test
+    run_cmd_checked
+    run_shell_checked
 );
 
 # Add plugin paths
@@ -62,7 +69,8 @@ sub cleanup_orphan_fc_devices {
     my $mpath_output = `multipath -ll 2>/dev/null`;
     while ($mpath_output =~ /^([0-9a-f]{33})\s+/gm) {
         my $mpath = $1;
-        my $exists = StorageHelpers::volume_exists_by_wwn($env, $mpath);
+        my $wwn = _normalize_mpath_wwn($mpath);
+        my $exists = StorageHelpers::volume_exists_by_wwn($env, $wwn);
         if (!$exists) {
              print STDERR "Cleaning up orphan multipath device: $mpath\n";
              _remove_multipath_device($mpath);
@@ -88,6 +96,21 @@ sub device_is_writable {
     return $@ ? 0 : 1;
 }
 
+# Check if a block device is openable for read
+# Returns: 1 if openable, 0 otherwise
+sub device_is_openable {
+    my ($path) = @_;
+
+    return 0 unless $path && -e $path;
+
+    eval {
+        sysopen(my $fh, $path, O_RDONLY | O_NONBLOCK) or die "Cannot open: $!";
+        close($fh);
+    };
+
+    return $@ ? 0 : 1;
+}
+
 # Check if there are any orphan FC devices on the host
 # Returns: 1 if no orphans found, 0 if orphans exist
 sub no_orphan_fc_devices {
@@ -100,7 +123,8 @@ sub no_orphan_fc_devices {
 
     # Check each WWN
     while ($mpath_output =~ /^([0-9a-f]{33})\s+/gm) {
-        my $wwn = $1;
+        my $mpath = $1;
+        my $wwn = _normalize_mpath_wwn($mpath);
         my $exists = StorageHelpers::volume_exists_by_wwn($env, $wwn);
         return 0 unless $exists;  # Found an orphan
     }
@@ -135,6 +159,47 @@ sub show_relevant_logs {
     return;
 }
 
+# Run a command, verify exit code, and check PVE task status if UPID is returned.
+sub run_cmd_checked {
+    my ($label, @cmd) = @_;
+    $label //= 'command';
+
+    my ($status, $output) = _run_cmd_capture(@cmd);
+    if ($status != 0) {
+        diag("Command output:\n$output") if $output;
+        BAIL_OUT("$label failed (exit=$status)");
+    }
+
+    my ($upid) = $output =~ /(UPID:[^\s]+)/;
+    if ($upid) {
+        my ($ok, $status_msg, $exitstatus) = _wait_for_task_ok($upid, 300);
+        unless ($ok) {
+            diag("Task output:\n$output") if $output;
+            BAIL_OUT("$label task failed (upid=$upid, status=$status_msg, exitstatus=" . ($exitstatus // '') . ")");
+        }
+    }
+
+    return 1;
+}
+
+# Run a shell command string, verify exit code.
+sub run_shell_checked {
+    my ($label, $cmdline, $logfile) = @_;
+    $label //= 'shell command';
+
+    my ($status, $output) = _run_cmd_capture('bash', '-lc', $cmdline);
+    if ($status != 0) {
+        if ($logfile && -f $logfile) {
+            my $log = `cat $logfile 2>/dev/null`;
+            diag("Log file ($logfile):\n$log") if $log;
+        }
+        diag("Command output:\n$output") if $output;
+        BAIL_OUT("$label failed (exit=$status)");
+    }
+
+    return 1;
+}
+
 # Check for orphan FC devices after a test and report if found
 # Returns: 1 if clean (no orphans), 0 if orphans detected
 sub check_orphans_after_test {
@@ -147,7 +212,8 @@ sub check_orphans_after_test {
 
     my @orphan_wwns;
     while ($mpath_output =~ /^([0-9a-f]{33})\s+/gm) {
-        my $wwn = $1;
+        my $mpath = $1;
+        my $wwn = _normalize_mpath_wwn($mpath);
         my $exists = StorageHelpers::volume_exists_by_wwn($env, $wwn);
         push @orphan_wwns, $wwn unless $exists;
     }
@@ -231,6 +297,56 @@ sub _remove_multipath_device {
     }
 
     return;
+}
+
+sub _run_cmd_capture {
+    my (@cmd) = @_;
+
+    my $err = gensym;
+    my $pid = open3(my $in, my $out, $err, @cmd);
+    close $in;
+
+    my $output = '';
+    while (my $line = <$out>) {
+        $output .= $line;
+    }
+    while (my $line = <$err>) {
+        $output .= $line;
+    }
+
+    waitpid($pid, 0);
+    my $status = $? >> 8;
+
+    return ($status, $output);
+}
+
+sub _wait_for_task_ok {
+    my ($upid, $timeout) = @_;
+    $timeout //= 300;
+
+    for (1..$timeout) {
+        my $raw = `pvesh get /nodes/localhost/tasks/$upid/status --output-format json 2>/dev/null`;
+        if ($raw) {
+            my $data = eval { decode_json($raw) };
+            if (!$@ && ref($data) eq 'HASH') {
+                my $status = $data->{status} // '';
+                my $exitstatus = $data->{exitstatus};
+                return (1, $status, $exitstatus) if $status eq 'OK';
+                return (0, $status, $exitstatus) if $status && $status ne 'running';
+            }
+        }
+        sleep 1 if $_ < $timeout;
+    }
+
+    return (0, 'timeout', undef);
+}
+
+sub _normalize_mpath_wwn {
+    my ($mpath) = @_;
+    return undef unless $mpath;
+
+    return substr($mpath, 1) if $mpath =~ /^3[0-9a-f]{32}$/i;
+    return $mpath;
 }
 
 1;

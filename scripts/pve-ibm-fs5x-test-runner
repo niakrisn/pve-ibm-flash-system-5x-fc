@@ -7,12 +7,21 @@ set -e
 TEST_BASE="/usr/share/pve-ibm-fs5x-fc-plugin-tests"
 LIB_DIR="${TEST_BASE}/lib"
 SCENARIO_DIR="${TEST_BASE}/scenarios"
+LOCKFILE="/run/lock/pve-ibm-fs5x-test-runner.lock"
 
 # Ensure we are running as root
 if [ "$EUID" -ne 0 ]; then
   echo "Error: Please run as root."
   exit 1
 fi
+
+# Prevent parallel test runs
+exec 9>"${LOCKFILE}"
+if ! flock -n 9; then
+  echo "Error: Test runner already running (lock: ${LOCKFILE})."
+  exit 1
+fi
+echo "$$" 1>&9
 
 # Set up environment
 export PERL5LIB="${LIB_DIR}:/usr/share/perl5"
@@ -29,12 +38,36 @@ if [ ! -f "/etc/pve/ibm-fs5x-tests.conf" ]; then
 fi
 
 # Run global cleanup before tests
-if [ -x "${TEST_BASE}/cleanup.sh" ]; then
-    echo "Running global environment cleanup..."
-    "${TEST_BASE}/cleanup.sh"
-else
-    echo "WARNING: cleanup.sh not found in ${TEST_BASE}"
+CLEANUP_SCRIPT="${TEST_BASE}/scripts/cleanup_host_san.sh"
+if [ ! -x "$CLEANUP_SCRIPT" ]; then
+    CLEANUP_SCRIPT="${TEST_BASE}/cleanup_host_san.sh"
 fi
+
+if [ -x "$CLEANUP_SCRIPT" ]; then
+    echo "Running global environment cleanup using $CLEANUP_SCRIPT..."
+    "$CLEANUP_SCRIPT"
+else
+    echo "WARNING: cleanup_host_san.sh not found in ${TEST_BASE} or ${TEST_BASE}/scripts"
+fi
+
+# Verify environment is clean after cleanup
+CONFIG_FILE="/etc/pve/ibm-fs5x-tests.conf"
+if [ -f "$CONFIG_FILE" ]; then
+    TEST_POOL=$(jq -r '.test_pool // "pve-storage-test-pool"' "$CONFIG_FILE" 2>/dev/null)
+else
+    TEST_POOL="pve-storage-test-pool"
+fi
+
+echo "Verifying test pool '$TEST_POOL' is empty..."
+REMAINING_VMS=$(pvesh get /pools/$TEST_POOL --output-format json 2>/dev/null | jq -r '.members[]? | select(.type == "qemu") | .vmid' 2>/dev/null || true)
+
+if [ -n "$REMAINING_VMS" ]; then
+    echo "FATAL: Test pool '$TEST_POOL' is not empty after cleanup."
+    echo "Remaining VMs: $REMAINING_VMS"
+    echo "Please investigate and manually clean the environment."
+    exit 1
+fi
+echo "Test pool is clean. Proceeding with tests..."
 
 # Run tests using prove
 # Run tests sequentially to enforce Fail-Fast

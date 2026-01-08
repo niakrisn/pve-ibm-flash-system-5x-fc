@@ -12,6 +12,7 @@ use TestEnv;
 use VMScenario qw(create_q35_vm create_vm_on_storage cleanup_vm);
 use StateVerifier;
 use StorageHelpers qw(local_volume_exists local_volume_path_exists get_local_vm_volumes verify_local_vm_volumes);
+use VMHelpers qw(run_cmd_checked);
 use FCHelpers qw(skip_without_fc);
 
 # Skip if no FC connectivity
@@ -44,8 +45,7 @@ subtest 'Mixed Clone fs-01 -> local-lvm' => sub {
     
     # Step 3: Full clone to local-lvm
     diag("Cloning $source_vmid ($env->{storeid}) to $clone_vmid ($env->{local_storeid})...");
-    my $cmd = "qm clone $source_vmid $clone_vmid --full --storage $env->{local_storeid}";
-    ok(system($cmd) == 0, "Clone command successful");
+    run_cmd_checked("qm clone $source_vmid $clone_vmid --full --storage $env->{local_storeid} --pool $env->{test_pool}", 'qm', 'clone', $source_vmid, $clone_vmid, '--full', '--storage', $env->{local_storeid}, '--pool', $env->{test_pool});
 
     # CRITICAL: Verify Rule 2 - Source VM must be DEACTIVATED after clone
     # Because it was activated for 'qemu-img convert' or mirroring
@@ -63,8 +63,8 @@ subtest 'Mixed Clone fs-01 -> local-lvm' => sub {
 
     # Step 5: Start/Stop clone to ensure it's functional
     diag("Starting clone VM $clone_vmid...");
-    ok(system('qm', 'start', $clone_vmid) == 0, "Clone VM $clone_vmid started");
-    ok(system('qm', 'stop', $clone_vmid) == 0, "Clone VM $clone_vmid stopped");
+    run_cmd_checked("qm start $clone_vmid", 'qm', 'start', $clone_vmid);
+    run_cmd_checked("qm stop $clone_vmid", 'qm', 'stop', $clone_vmid);
     ok(verify_local_vm_volumes($env->{local_storeid}, $clone_vmid), "Clone VM volumes still present after stop");
     ok(StateVerifier::verify_deactivated($env, $source_vmid, $source_disks), "Source VM $source_vmid remains DEACTIVATED after clone start/stop");
     

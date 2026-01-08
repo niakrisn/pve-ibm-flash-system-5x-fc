@@ -1,3 +1,61 @@
+pve-ibm-fs5x-fc-plugin (1.1.39) unstable; urgency=medium
+
+  * Remove magical rename of cleanup script in debian/rules
+
+ -- Nikita Kozlov <niakrisn@gmail.com>  Wed, 08 Jan 2026 14:55:00 +0300
+
+pve-ibm-fs5x-fc-plugin (1.1.38) unstable; urgency=medium
+
+  * Fix cleanup script path in test runner (look in scripts/ subdirectory)
+
+ -- Nikita Kozlov <niakrisn@gmail.com>  Wed, 08 Jan 2026 14:50:00 +0300
+
+pve-ibm-fs5x-fc-plugin (1.1.37) unstable; urgency=medium
+
+  * Fix bug in test runner: call cleanup_host_san.sh instead of cleanup.sh
+  * Improve cleanup script to handle orphaned VMs from failed clones
+
+ -- Nikita Kozlov <niakrisn@gmail.com>  Wed, 08 Jan 2026 14:45:00 +0300
+
+pve-ibm-fs5x-fc-plugin (1.1.36) unstable; urgency=medium
+
+  * Add retry logic for 50x server errors (500, 502, 503, 504)
+  * Add --pool parameter to qm clone commands for proper pool membership
+
+ -- Nikita Kozlov <niakrisn@gmail.com>  Wed, 08 Jan 2026 14:40:00 +0300
+
+pve-ibm-fs5x-fc-plugin (1.1.35) unstable; urgency=medium
+
+  * Implement Resource Pool isolation for test VMs
+  * Dynamic cleanup based on pool membership instead of hardcoded IDs
+  * Add mandatory pool verification before test execution
+
+ -- Nikita Kozlov <niakrisn@gmail.com>  Wed, 08 Jan 2026 14:20:00 +0300
+
+pve-ibm-fs5x-fc-plugin (1.1.34) unstable; urgency=medium
+
+  * Add extended logging and PVE task result handling
+
+ -- Nikita Kozlov <niakrisn@gmail.com>  Thu, 08 Jan 2026 13:45:00 +0300
+
+pve-ibm-fs5x-fc-plugin (1.1.33) unstable; urgency=medium
+
+  * Add flock to test runner to prevent parallel execution
+
+ -- Nikita Kozlov <niakrisn@gmail.com>  Thu, 08 Jan 2026 11:58:00 +0300
+
+pve-ibm-fs5x-fc-plugin (1.1.32) unstable; urgency=medium
+
+  * Fix WWN normalization in integration tests verification
+
+ -- Nikita Kozlov <niakrisn@gmail.com>  Thu, 08 Jan 2026 11:20:00 +0300
+
+pve-ibm-fs5x-fc-plugin (1.1.31) unstable; urgency=medium
+
+  * Update integration tests and re-build test package
+
+ -- Nikita Kozlov <niakrisn@gmail.com>  Thu, 08 Jan 2026 10:40:00 +0300
+
 pve-ibm-fs5x-fc-plugin (1.1.30) unstable; urgency=medium
 
   * Add FlashCopy linked-clone support for templates

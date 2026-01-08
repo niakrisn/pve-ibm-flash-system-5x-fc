@@ -12,6 +12,7 @@ use TestEnv;
 use VMScenario qw(create_vm_on_storage cleanup_vm);
 use StateVerifier;
 use StorageHelpers qw(local_volume_exists local_volume_path_exists get_local_vm_volumes verify_local_vm_volumes);
+use VMHelpers qw(run_cmd_checked);
 use FCHelpers qw(skip_without_fc);
 
 # Skip if no FC connectivity
@@ -40,8 +41,7 @@ subtest 'Mixed Clone local-lvm -> fs-01' => sub {
     
     # Step 2: Full clone to fs-01
     diag("Cloning $source_vmid ($env->{local_storeid}) to $clone_vmid ($env->{storeid})...");
-    my $cmd = "qm clone $source_vmid $clone_vmid --full --storage $env->{storeid}";
-    ok(system($cmd) == 0, "Clone command successful");
+    run_cmd_checked("qm clone $source_vmid $clone_vmid --full --storage $env->{storeid} --pool $env->{test_pool}", 'qm', 'clone', $source_vmid, $clone_vmid, '--full', '--storage', $env->{storeid}, '--pool', $env->{test_pool});
 
     my $clone_disks = ["vm-$clone_vmid-disk-0"];
     
@@ -55,11 +55,11 @@ subtest 'Mixed Clone local-lvm -> fs-01' => sub {
 
     # Step 4: Start/Stop clone to ensure it's functional
     diag("Starting clone VM $clone_vmid...");
-    ok(system('qm', 'start', $clone_vmid) == 0, "Clone VM $clone_vmid started");
+    run_cmd_checked("qm start $clone_vmid", 'qm', 'start', $clone_vmid);
     ok(StateVerifier::verify_activated($env, $clone_vmid, $clone_disks), "Clone VM $clone_vmid is ACTIVATED");
     
     diag("Stopping clone VM $clone_vmid...");
-    ok(system('qm', 'stop', $clone_vmid) == 0, "Clone VM $clone_vmid stopped");
+    run_cmd_checked("qm stop $clone_vmid", 'qm', 'stop', $clone_vmid);
     ok(StateVerifier::verify_deactivated($env, $clone_vmid, $clone_disks), "Clone VM $clone_vmid is DEACTIVATED");
     
     # Step 5: Cleanup

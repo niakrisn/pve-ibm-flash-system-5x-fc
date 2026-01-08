@@ -11,6 +11,7 @@ use TestEnv;
 use VMScenario qw(create_q35_vm create_vm_on_storage verify_full_lifecycle cleanup_vm);
 use StateVerifier;
 use StorageHelpers;
+use VMHelpers qw(run_cmd_checked run_shell_checked);
 use FCHelpers qw(skip_without_fc);
 
 # Skip if no FC connectivity
@@ -43,12 +44,7 @@ subtest 'vzdump Backup and Restore' => sub {
     diag("Running vzdump for VM $vmid to storage $backup_storage...");
     # vzdump creates a temporary snapshot, maps it, reads it, and then deletes it.
     my $vzdump_cmd = "vzdump $vmid --storage $backup_storage --mode snapshot --compress zstd";
-    my $vzdump_res = system("$vzdump_cmd > /tmp/vzdump.log 2>&1");
-    if ($vzdump_res != 0) {
-        diag("vzdump failed! Log content:");
-        system("cat /tmp/vzdump.log");
-    }
-    ok($vzdump_res == 0, "vzdump completed successfully");
+    run_shell_checked("vzdump $vmid", "$vzdump_cmd > /tmp/vzdump.log 2>&1", "/tmp/vzdump.log");
     ok(StateVerifier::verify_created($env, $vmid, $disks), "VM $vmid is still CREATED after vzdump");
     
     # Step 3: Find the backup file
@@ -60,33 +56,28 @@ subtest 'vzdump Backup and Restore' => sub {
     
     # Step 4: Destroy original VM
     diag("Destroying original VM $vmid...");
-    ok(system('qm', 'destroy', $vmid, '--destroy-unreferenced-disks', '1') == 0, "Original VM $vmid destroyed");
+    run_cmd_checked("qm destroy $vmid", 'qm', 'destroy', $vmid, '--destroy-unreferenced-disks', '1');
     sleep 2; # Allow some time for multipath cleanup
     ok(StateVerifier::verify_destroyed($env, $vmid, $disks), "Storage for VM $vmid cleaned up");
     
     # Step 5: Restore VM
     diag("Restoring VM to $restore_vmid on $env->{storeid}...");
     my $restore_cmd = "qmrestore $backup_file $restore_vmid --storage $env->{storeid}";
-    my $restore_res = system("$restore_cmd > /tmp/restore.log 2>&1");
-    if ($restore_res != 0) {
-        diag("qmrestore failed! Log content:");
-        system("cat /tmp/restore.log");
-    }
-    ok($restore_res == 0, "qmrestore completed successfully");
+    run_shell_checked("qmrestore $restore_vmid", "$restore_cmd > /tmp/restore.log 2>&1", "/tmp/restore.log");
     
     my $restore_disks = ["vm-$restore_vmid-disk-0", "vm-$restore_vmid-disk-1", "vm-$restore_vmid-cloudinit"];
     ok(StateVerifier::verify_created($env, $restore_vmid, $restore_disks), "Restored VM $restore_vmid verified on storage");
     
     # Step 6: Start restored VM (basic verification that it's bootable/active)
     diag("Starting restored VM $restore_vmid...");
-    ok(system('qm', 'start', $restore_vmid) == 0, "Restored VM $restore_vmid started");
+    run_cmd_checked("qm start $restore_vmid", 'qm', 'start', $restore_vmid);
     ok(StateVerifier::verify_activated($env, $restore_vmid, $restore_disks), "Restored VM $restore_vmid is ACTIVATED");
     
     # Cleanup
     diag("Cleaning up...");
-    ok(system('qm', 'stop', $restore_vmid) == 0, "Restored VM $restore_vmid stopped");
+    run_cmd_checked("qm stop $restore_vmid", 'qm', 'stop', $restore_vmid);
     ok(StateVerifier::verify_deactivated($env, $restore_vmid, $restore_disks), "Restored VM $restore_vmid is DEACTIVATED");
-    ok(system('qm', 'destroy', $restore_vmid, '--destroy-unreferenced-disks', '1') == 0, "Restored VM $restore_vmid destroyed");
+    run_cmd_checked("qm destroy $restore_vmid", 'qm', 'destroy', $restore_vmid, '--destroy-unreferenced-disks', '1');
     ok(StateVerifier::verify_destroyed($env, $restore_vmid, $restore_disks), "Restored VM $restore_vmid storage cleaned up");
     unlink $backup_file if $backup_file;
 };
