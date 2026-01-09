@@ -26,9 +26,9 @@ sub authenticate {
 }
 
 sub api_request {
-    my ($class, $scfg, $storeid, $method, $endpoint, $data) = @_;
+    my ($class, $scfg, $storeid, $method, $endpoint, $data, $options) = @_;
     die "No storage ID provided\n" unless $storeid;
-    return _api_request($class, $scfg, $storeid, $method, $endpoint, $data);
+    return _api_request($class, $scfg, $storeid, $method, $endpoint, $data, $options);
 }
 
 sub clear_cached_token {
@@ -252,6 +252,30 @@ sub _clear_cached_token {
     return;
 }
 
+# Normalize API response based on expected type
+sub _normalize_response {
+    my ($result, $expect) = @_;
+
+    return $result unless $expect;
+
+    if ($expect eq 'array') {
+        # Normalize to array
+        return [] if !defined $result;
+        return $result if ref($result) eq 'ARRAY';
+        return [$result] if ref($result) eq 'HASH';
+        return [];
+    } elsif ($expect eq 'object') {
+        # Normalize to object
+        return undef if !defined $result;
+        return $result->[0] if ref($result) eq 'ARRAY';
+        return $result if ref($result) eq 'HASH';
+        return undef;
+    }
+
+    # No normalization if expect is not recognized
+    return $result;
+}
+
 # Get rollback state file path for a volume
 sub _get_rollback_state_path {
     my ($class, $volname) = @_;
@@ -446,7 +470,7 @@ sub _authenticate {
 
 # Core API request method with token retry logic
 sub _api_request {
-    my ($class, $scfg, $storeid, $method, $endpoint, $data) = @_;
+    my ($class, $scfg, $storeid, $method, $endpoint, $data, $options) = @_;
 
     $method = uc($method);
     die "Invalid HTTP method: $method\n" unless $method =~ /^(GET|POST|PUT|DELETE)$/;
@@ -570,8 +594,12 @@ sub _api_request {
         "API response received (storeid=%s, endpoint=%s, status=%d, duration=%dms)",
         $storeid, $endpoint, $response->code, int($duration));
 
-    # Return decoded JSON if there's content
-    return $content ? decode_json($content) : {};
+    # Decode JSON if there's content
+    my $result = $content ? decode_json($content) : {};
+
+    # Normalize response based on expected type
+    my $expect = $options->{expect} if $options;
+    return _normalize_response($result, $expect);
 }
 
 1;

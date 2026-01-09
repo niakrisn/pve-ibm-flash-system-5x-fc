@@ -26,14 +26,16 @@ docker run --rm -v $(pwd):/build -w /build debian:bookworm bash -c "apt-get upda
 
 ### 2. Deploy Plugin Package
 ```bash
+ssh -i ~/.ssh/id_ed25519 root@10.4.0.122 "rm -f /tmp/pve-ibm-fs5x-fc-plugin*.deb"
 scp -i ~/.ssh/id_ed25519 output/pve-ibm-fs5x-fc-plugin_*.deb root@10.4.0.122:/tmp/
-ssh -i ~/.ssh/id_ed25519 root@10.4.0.122 "apt-get install -y /tmp/pve-ibm-fs5x-fc-plugin_*.deb"
+ssh -i ~/.ssh/id_ed25519 root@10.4.0.122 "dpkg -i /tmp/pve-ibm-fs5x-fc-plugin_*.deb && systemctl restart pvedaemon pveproxy pvestatd"
 ```
 
 ### 3. Deploy Tests Package (Optional)
 ```bash
+ssh -i ~/.ssh/id_ed25519 root@10.4.0.122 "rm -f /tmp/pve-ibm-fs5x-fc-plugin-tests*.deb"
 scp -i ~/.ssh/id_ed25519 output/pve-ibm-fs5x-fc-plugin-tests_*.deb root@10.4.0.122:/tmp/
-ssh -i ~/.ssh/id_ed25519 root@10.4.0.122 "apt-get install -y /tmp/pve-ibm-fs5x-fc-plugin-tests_*.deb"
+ssh -i ~/.ssh/id_ed25519 root@10.4.0.122 "dpkg -i /tmp/pve-ibm-fs5x-fc-plugin-tests_*.deb"
 ```
 
 ### 4. Configure Tests (if not done before)

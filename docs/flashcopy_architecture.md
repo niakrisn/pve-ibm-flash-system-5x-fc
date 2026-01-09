@@ -61,20 +61,63 @@ When cloning from a snapshot (linked clone with a snapshot name), the plugin use
 
 ### 2.2 Rollback Mechanism (The "Manual Reverse-Sync")
 
-Rolling back is complex because IBM FlashSystem allows mappings to be active. 
+Rolling back is complex because IBM FlashSystem has strict rules about FlashCopy topology:
+- A volume can be both a **source** and a **target** simultaneously
+- But you **cannot start** a mapping where the target is already an **active source** in another mapping (`CMMVC9055E`)
 
-#### Scenario A: Standard Rollback (Independent Volume)
-1. Stop IO.
-2. Delete existing FlashCopy maps involves the volume.
-3. Create "Reverse Map" (Snapshot -> Volume).
-4. Start Reverse Map with `copyrate=150` (high priority).
-5. Wait for sync.
-6. Delete Reverse Map.
+#### Scenario A: Standard Rollback (Full Clone / Independent Volume)
+
+Full clones have no base mapping dependency. They may have snapshot mappings.
+
+**Topology before rollback:**
+```
+vm-200-disk-0 (independent)
+    └── snap-vm-200-disk-0-snap1 (fcmap: vm-disk → snapshot, copyrate=0)
+```
+
+**Algorithm:**
+1. Stop IO (Deactivate volume)
+2. Stop and remove all snapshot mappings (volume as source)
+3. Create reverse map: `Snapshot -> Volume` with `copyrate=150`
+4. Start reverse map, wait for `idle_or_copied` (100% sync)
+5. Delete reverse map
+6. Recreate snapshot mappings: `Volume -> Snapshot` with `copyrate=0`
+7. Start snapshot mappings
+8. Start VM (Activate)
 
 #### Scenario B: Linked-Clone Rollback (Dependent Volume)
-Linked clones have an active "Base Map" (Template -> Clone) that **cannot** exist simultaneously with a "Reverse Map" (Snapshot -> Clone) if both write to the Clone.
 
-**Solution:** The "Pause & Patch" Protocol.
+Linked clones have an active "Base Map" (Template → Clone) that creates a dependency chain.
+
+**Topology before rollback:**
+```
+base-100-disk-0 (template)
+    │
+    │ fcmap 0 (base → clone, copyrate=0) ← BASE MAPPING
+    ↓
+vm-200-disk-0 (linked clone)
+    │
+    │ fcmap 1 (clone → snapshot, copyrate=0) ← SNAPSHOT MAPPING
+    ↓
+snap-vm-200-disk-0-snap1
+```
+
+**Critical constraint (`CMMVC9055E`):**
+- Cannot start base mapping (where clone is **target**) while clone is an **active source** in snapshot mapping
+- Order matters: base mapping must be started **before** snapshot mappings
+
+**Algorithm:**
+1. Stop IO (Deactivate volume)
+2. **Stop base mapping** (Template → Clone)
+3. Stop and remove all snapshot mappings (Clone → Snapshots)
+4. Create reverse map: `Snapshot -> Clone` with `copyrate=150`
+5. Start reverse map, wait for `idle_or_copied` (100% sync)
+6. Delete reverse map
+7. **Start base mapping first** (Template → Clone) ← CRITICAL ORDER
+8. Recreate and start snapshot mappings (Clone → Snapshots)
+9. Start VM (Activate)
+
+**Visual Flow:**
 
 ```mermaid
 sequenceDiagram
@@ -83,28 +126,56 @@ sequenceDiagram
     participant Snapshot
     participant Plugin
 
-    Note over Clone: Active State (Writes go to Clone)
-    
+    Note over Clone: Initial: base→clone (active), clone→snapshot (active)
+
     Plugin->>Clone: Stop IO (Deactivate)
-    
+
     rect rgb(255, 200, 200)
-    Note right of Plugin: CRITICAL STEP
-    Plugin->>Template: Stop FlashCopy Map (Template->Clone)
+    Note right of Plugin: PHASE 1: STOP ALL MAPPINGS
+    Plugin->>Template: Stop base mapping (Template→Clone)
+    Plugin->>Snapshot: Stop & remove snapshot mapping (Clone→Snapshot)
     end
-    
-    Plugin->>Snapshot: Create Reverse Map (Snapshot->Clone)
-    Plugin->>Snapshot: Start Reverse Map (Restore Data)
-    Note over Clone: Data being overwritten by Snapshot
-    Plugin->>Snapshot: Wait for 100% Sync
-    Plugin->>Snapshot: Delete Reverse Map
-    
+
+    rect rgb(200, 200, 255)
+    Note right of Plugin: PHASE 2: RESTORE DATA
+    Plugin->>Snapshot: Create reverse map (Snapshot→Clone, CR=150)
+    Plugin->>Snapshot: Start reverse map
+    Note over Clone: Data being overwritten from Snapshot
+    Plugin->>Snapshot: Wait for 100% sync (idle_or_copied)
+    Plugin->>Snapshot: Delete reverse map
+    end
+
     rect rgb(200, 255, 200)
-    Note right of Plugin: RESTORE DEPENDENCY
-    Plugin->>Template: Start FlashCopy Map (Template->Clone)
+    Note right of Plugin: PHASE 3: RESTORE TOPOLOGY (ORDER CRITICAL!)
+    Plugin->>Template: Start base mapping (Template→Clone) FIRST
+    Plugin->>Snapshot: Recreate snapshot mapping (Clone→Snapshot)
+    Plugin->>Snapshot: Start snapshot mapping SECOND
     end
-    
+
     Plugin->>Clone: Start VM (Activate)
 ```
+
+#### Why Order Matters
+
+IBM FlashSystem enforces this constraint:
+```
+CMMVC9055E: The command failed because a target volume has dependent FlashCopy mappings.
+```
+
+This error occurs when trying to start a mapping where the **target** volume is already an **active source** in another mapping.
+
+| Step | Clone Role | Allowed? |
+|------|------------|----------|
+| Start base mapping (base → clone) | clone = target | ✅ Yes (clone not active source) |
+| Start snapshot mapping (clone → snap) | clone = source | ✅ Yes (can be both target and source) |
+| Start snapshot first, then base | clone = active source, then target | ❌ `CMMVC9055E` |
+
+#### Transaction Recovery
+
+The plugin saves rollback state to `/run/pve-ibm-rollback-$volname.json` for crash recovery:
+- Phase tracking: `removing_mappings`, `creating_reverse`, `restoring`, `recreating_mappings`
+- Orphaned reverse mappings are cleaned up on retry
+- Base mapping is restored if rollback was interrupted
 
 ## 3. Limitations & Constraints
 

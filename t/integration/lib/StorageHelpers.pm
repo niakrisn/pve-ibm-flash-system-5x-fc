@@ -84,7 +84,7 @@ sub get_volume_uid {
         return undef;
     }
 
-    return $info->{uid};
+    return $info->{vdisk_UID};
 }
 
 # Check if volume exists on storage by WWN

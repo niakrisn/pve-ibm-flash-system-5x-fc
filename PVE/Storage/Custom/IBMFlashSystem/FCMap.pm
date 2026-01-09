@@ -31,22 +31,72 @@ sub _extract_fcmap_id {
     return undef;
 }
 
-# Normalize FlashCopy list responses (array, hash, or empty)
-sub _normalize_fcmap_list {
-    my ($result) = @_;
-
-    return [] if !defined $result;
-    return $result if ref($result) eq 'ARRAY';
-    return [$result] if ref($result) eq 'HASH';
-    return [];
-}
-
 # List FlashCopy mappings
 sub list_fcmaps {
     my ($class, $scfg, $storeid) = @_;
 
-    my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/lsfcmap', {});
-    return _normalize_fcmap_list($result);
+    return PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
+        $class, $scfg, $storeid, 'POST', '/lsfcmap', {}, { expect => 'array' });
+}
+
+# List FlashCopy mappings by source volume (using filtervalue)
+# Returns: arrayref of mappings where source_vdisk_name matches
+sub list_fcmaps_by_source {
+    my ($class, $scfg, $storeid, $source_vol) = @_;
+
+    my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
+        $class, $scfg, $storeid, 'POST', '/lsfcmap', 
+        { filtervalue => "source_vdisk_name=$source_vol" },
+        { expect => 'array' }
+    );
+
+    return $result || [];
+}
+
+# List FlashCopy mappings by target volume (using filtervalue)
+# Returns: arrayref of mappings where target_vdisk_name matches
+sub list_fcmaps_by_target {
+    my ($class, $scfg, $storeid, $target_vol) = @_;
+
+    my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
+        $class, $scfg, $storeid, 'POST', '/lsfcmap',
+        { filtervalue => "target_vdisk_name=$target_vol" },
+        { expect => 'array' }
+    );
+
+    return $result || [];
+}
+
+# List dependent FlashCopy mappings for a given mapping
+# Returns: arrayref of fcmap objects that depend on the specified mapping
+sub list_dependent_maps {
+    my ($class, $scfg, $storeid, $fcmap_id) = @_;
+
+    my $result = eval {
+        PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
+            $class, $scfg, $storeid, 'POST', "/lsfcmapdependentmaps/$fcmap_id", {},
+            { expect => 'array' }
+        );
+    };
+
+    return [] if $@;
+    return $result || [];
+}
+
+# List FlashCopy mappings that must be stopped to delete a volume
+# Returns: arrayref of fcmap objects
+sub list_volume_dependent_maps {
+    my ($class, $scfg, $storeid, $volname) = @_;
+
+    my $result = eval {
+        PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
+            $class, $scfg, $storeid, 'POST', "/lsrmvdiskdependentmaps/$volname", {},
+            { expect => 'array' }
+        );
+    };
+
+    return [] if $@;
+    return $result || [];
 }
 
 # Create FlashCopy mapping with explicit parameter hash
@@ -97,26 +147,13 @@ sub get_fcmap_status {
     my ($class, $scfg, $storeid, $fcmap_id) = @_;
 
     # Query specific mapping: POST /lsfcmap/{id}
-    my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/lsfcmap/$fcmap_id", {});
+    my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
+        $class, $scfg, $storeid, 'POST', "/lsfcmap/$fcmap_id", {}, { expect => 'object' });
 
-    # Empty result means mapping not found (API returns empty hash/array/string for non-existent fcmap)
-    if (!$result ||
-        (ref($result) eq 'ARRAY' && !@$result) ||
-        (ref($result) eq 'HASH' && !%$result) ||
-        (ref($result) eq '' && $result eq '')) {
-        die "FlashCopy mapping '$fcmap_id' not found\n";
-    }
+    # Empty result means mapping not found
+    die "FlashCopy mapping '$fcmap_id' not found\n" unless $result && ref($result) eq 'HASH' && %$result;
 
-    my $fcmap_info;
-    if (ref($result) eq 'ARRAY') {
-        $fcmap_info = $result->[0];
-    } elsif (ref($result) eq 'HASH') {
-        $fcmap_info = $result;
-    }
-
-    die "FlashCopy mapping '$fcmap_id' not found\n" unless $fcmap_info;
-
-    return $fcmap_info;
+    return $result;
 }
 
 # Poll FlashCopy mapping until it reaches one of the expected states

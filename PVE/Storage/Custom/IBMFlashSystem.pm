@@ -402,14 +402,13 @@ sub deactivate_storage {
 # Ensure host exists on storage array and in cluster, create if not
 sub _ensure_host_exists {
     my ($class, $scfg, $storeid) = @_;
-
     my $hostname = _get_hostname($class);
     my $host_cluster = $scfg->{hostcluster} or die "hostcluster not configured\n";
 
     # Check if host already exists
-    my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/lshost', {});
-
-    my $hosts = ref($result) eq 'ARRAY' ? $result : [];
+    my $result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
+        $class, $scfg, $storeid, 'POST', '/lshost', {}, { expect => 'array' });
+    my $hosts = $result || [];
     my $host_exists = 0;
 
     for my $host (@$hosts) {
