@@ -74,10 +74,21 @@ sub _get_volume_info {
     return $result;
 }
 
-# Align size to 512-byte blocks (SVC requirement)
+# Minimum volume size (4 MB) for FlashCopy compatibility
+# FlashCopy grain_size=256KB requires volumes to be at least 4MB for reliable snapshots
+use constant MIN_VOLUME_SIZE_BYTES => 4 * 1024 * 1024;  # 4 MB
+
+# Align size to minimum 4MB and 512-byte blocks (SVC + FlashCopy requirement)
 sub _align_size_bytes {
     my ($class, $size_bytes) = @_;
-    return $size_bytes if !$size_bytes || $size_bytes % 512 == 0;
+    
+    # Enforce minimum 4 MB for FlashCopy compatibility
+    if ($size_bytes < MIN_VOLUME_SIZE_BYTES) {
+        $size_bytes = MIN_VOLUME_SIZE_BYTES;
+    }
+    
+    # Align to 512-byte blocks
+    return $size_bytes if $size_bytes % 512 == 0;
     return $size_bytes - ($size_bytes % 512) + 512;
 }
 

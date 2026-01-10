@@ -243,12 +243,17 @@ sub create_fcmap {
 
 # Start FlashCopy mapping (with prepare step and retry logic for CMMVC5906E)
 sub start_fcmap {
-    my ($class, $scfg, $storeid, $fcmap_id) = @_;
+    my ($class, $scfg, $storeid, $fcmap_id, $opts) = @_;
+
+    $opts //= {};
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "Starting FlashCopy mapping (fcmap_id=%s)", $fcmap_id);
 
-    # Prepare the mapping
-    PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/prestartfcmap/$fcmap_id", {});
+    # Prepare the mapping (restore forces prepare when target is an active source)
+    my $prestart_params = {};
+    $prestart_params->{restore} = JSON::true if $opts->{restore};
+    PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
+        $class, $scfg, $storeid, 'POST', "/prestartfcmap/$fcmap_id", $prestart_params);
 
     # Start the mapping with retry for CMMVC5906E (preparing state)
     my $start_attempts = 0;
