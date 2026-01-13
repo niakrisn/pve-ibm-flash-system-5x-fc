@@ -67,6 +67,7 @@ sub plugindata {
     return {
         content => [{ images => 1, rootdir => 1 }],
         format => [{ raw => 1 }, 'raw'],
+        san => 1,  # Requires explicit deactivation for SAN storage
         'sensitive-properties' => { password => 1 },
     };
 }
@@ -80,24 +81,17 @@ sub volume_has_feature {
     # Features supported by IBM FlashSystem
     my %features = (
         snapshot => 1,
-        clone => 1,        # Linked clone enabled for templates
-        copy => 1,         # Supports copying via clone_image (Full Clone)
         template => 1,     # Supports template conversion
         sparseinit => 1,   # Supports sparse initialization
         rename => 1,       # Supports volume renaming
     );
 
     my $res = $features{$feature};
-    if ($feature eq 'clone') {
-        $res = { base => { raw => 1 } };  # Linked clone from templates
-    } elsif ($feature eq 'copy') {
-        $res = { 
-            base => { raw => 1, offload => 1 }, 
-            current => { raw => 1, offload => 1 }, 
-            snap => { raw => 1 } 
-        };
+    if ($feature eq 'copy') {
+        # Support full copy (raw), but no offload yet
+        $res = { base => { raw => 1 }, current => { raw => 1 }, snap => { raw => 0 } };
     } elsif ($feature eq 'template') {
-        $res = { current => { raw => 1, offload => 1 } };
+        $res = { current => { raw => 1 } };
     } elsif ($feature eq 'sparseinit') {
         $res = { base => { raw => 1 }, current => { raw => 1 } };
     } elsif ($feature eq 'snapshot') {
@@ -215,15 +209,6 @@ sub alloc_image {
     return $res;
 }
 
-sub clone_image {
-    my ($class, $scfg, $storeid, $volname, $vmid, $snapname) = @_;
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER clone_image (storeid=%s, source=%s, target_vmid=%s, snapname=%s)", $storeid, $volname, $vmid, $snapname // 'undef');
-    my $res = PVE::Storage::Custom::IBMFlashSystem::Volume::clone_image(
-        $class, $scfg, $storeid, $volname, $vmid, $snapname
-    );
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT clone_image (name=%s)", $res);
-    return $res;
-}
 
 sub create_base {
     my ($class, $storeid, $scfg, $volname) = @_;
@@ -485,14 +470,15 @@ sub volume_snapshot_delete {
     return $res;
 }
 
-sub volume_has_snapshot {
-    my ($class, $scfg, $storeid, $volname, $snapname) = @_;
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER volume_has_snapshot (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname);
-    my $res = PVE::Storage::Custom::IBMFlashSystem::Snapshot::_volume_has_snapshot(
-        $class, $scfg, $storeid, $volname, $snapname
-    );
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "EXIT volume_has_snapshot (res=%s)", $res // 'undef');
-    return $res;
+sub volume_snapshot_needs_fsfreeze {
+    return 1;  # FlashCopy snapshots require filesystem freeze for consistency
+}
+
+sub volume_snapshot_info {
+    my ($class, $scfg, $storeid, $volname) = @_;
+    # Block storage (FlashCopy) doesn't use qcow2 snapshot chains
+    # PVE manages snapshots via VM config, not storage-level snapshot info
+    return {};
 }
 
 # ============================================================================

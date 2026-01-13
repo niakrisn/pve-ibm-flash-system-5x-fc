@@ -1,191 +1,107 @@
-diff -ur ./PVE/API2/Qemu.pm ../mod/PVE/API2/Qemu.pm
---- ./PVE/API2/Qemu.pm	2026-01-07 16:41:44
-+++ ../mod/PVE/API2/Qemu.pm	2026-01-07 16:41:44
-@@ -4516,12 +4516,59 @@
-             my $newvollist = [];
-             my $jobs = {};
- 
-+            my $all_same_storage_offload = 0;
-+            my @offload_volids = ();
-+
-             eval {
-                 local $SIG{INT} = local $SIG{TERM} = local $SIG{QUIT} = local $SIG{HUP} =
-                     sub { die "interrupted by signal\n"; };
- 
--                PVE::Storage::activate_volumes($storecfg, $vollist, $snapname);
-+                eval {
-+                    local $SIG{INT} = local $SIG{TERM} = local $SIG{QUIT} = local $SIG{HUP} =
-+                        sub { die "interrupted by signal\n"; };
- 
-+                    # Helper: check if volume has offload capability
-+                    my $volume_has_offload = sub {
-+                        my ($volid) = @_;
-+                        my $features = PVE::Storage::volume_has_feature($storecfg, "copy", $volid, $snapname, $running);
-+                        return 0 unless $features && ref($features) eq "HASH";
-+                        my (undef, $volname) = PVE::Storage::parse_volume_id($volid);
-+                        my $isBase = ($volname =~ m/^base-/) ? 1 : 0;
-+                        my $key = $snapname ? "snap" : ($isBase ? "base" : "current");
-+                        return $features->{$key}->{offload} ? 1 : 0;
-+                    };
-+
-+                    # Check: all sources on same storage with offload?
-+                    $all_same_storage_offload = 1;
-+                    my $first_storeid = undef;
-+                    @offload_volids = ();
-+
-+                    foreach my $volid (@$vollist) {
-+                        my ($storeid) = PVE::Storage::parse_volume_id($volid);
-+                        $first_storeid //= $storeid;
-+
-+                        if ($storeid ne $first_storeid) {
-+                            $all_same_storage_offload = 0;
-+                        }
-+
-+                        if ($volume_has_offload->($volid)) {
-+                            push @offload_volids, $volid;
-+                        } else {
-+                            $all_same_storage_offload = 0;
-+                        }
-+                    }
-+
-+                    # Rule 1: don"t activate if all offload on same storage AND target is the same
-+                    if ($storage && $first_storeid && $storage ne $first_storeid) {
-+                        $all_same_storage_offload = 0;
-+                    }
-+
-+                    unless ($all_same_storage_offload) {
-+                        PVE::Storage::activate_volumes($storecfg, $vollist, $snapname);
-+                    }
-+                };
-+                warn $@ if $@;
-+
-                 my $bwlimit = extract_param($param, 'bwlimit');
- 
-                 my $total_jobs = scalar(keys %{$drives});
-@@ -4606,7 +4653,17 @@
- 
-                 PVE::AccessControl::add_vm_to_pool($newid, $pool) if $pool;
-             };
--            if (my $err = $@) {
-+            my $err = $@;
-+
-+            # Rule 2: deactivate offload volumes that were activated
-+            if (!$all_same_storage_offload && !$running) {
-+                foreach my $volid (@offload_volids) {
-+                    eval { PVE::Storage::deactivate_volumes($storecfg, [$volid], $snapname); };
-+                    warn "Deactivate failed for $volid: $@" if $@;
-+                }
-+            }
-+
-+            if ($err) {
-                 eval { PVE::QemuServer::BlockJob::qemu_blockjobs_cancel($vmid, $jobs) };
-                 sleep 1; # some storage like rbd need to wait before release volume - really?
- 
-diff -ur ./PVE/QemuServer/Cloudinit.pm ../mod/PVE/QemuServer/Cloudinit.pm
---- ./PVE/QemuServer/Cloudinit.pm	2026-01-07 16:41:44
-+++ ../mod/PVE/QemuServer/Cloudinit.pm	2026-01-07 16:41:44
-@@ -70,6 +70,13 @@
-     };
-     my $err = $@;
-     rmtree($path);
-+
-+    # Deactivate volume if VM is not running - important for FC SAN storage
-+    my $running = PVE::QemuServer::check_running($vmid);
-+    if (!$running) {
-+        eval { $plugin->deactivate_volume($storeid, $scfg, $volname); };
-+        warn $@ if $@;
-+    }
-     die $err if $err;
+--- PVE/Storage/Plugin.pm	2026-01-13 11:25:32
++++ PVE/Storage/Plugin.pm	2026-01-13 11:26:05
+@@ -289,6 +289,13 @@
+     return [qw(encryption-key keyring master-pubkey password)];
  }
  
-diff -ur ./PVE/QemuServer/OVMF.pm ../mod/PVE/QemuServer/OVMF.pm
---- ./PVE/QemuServer/OVMF.pm	2026-01-07 16:41:44
-+++ ../mod/PVE/QemuServer/OVMF.pm	2026-01-07 16:41:44
-@@ -176,6 +176,12 @@
++# Check if storage type requires explicit deactivation (SAN storage)
++sub storage_is_san {
++    my ($type) = @_;
++    my $data = $defaultData->{plugindata}->{$type};
++    return $data->{san} ? 1 : 0;
++}
++
+ sub storage_has_feature {
+     my ($type, $feature) = @_;
+ 
+--- PVE/QemuServer/OVMF.pm	2026-01-13 11:25:34
++++ PVE/QemuServer/OVMF.pm	2026-01-13 11:31:50
+@@ -176,6 +176,14 @@
      PVE::Storage::activate_volumes($storecfg, [$volid]);
  
      PVE::QemuServer::QemuImage::convert($ovmf_vars, $volid, $vars_size_b);
 +
-+    # Rule 2: deactivate offload EFI after data copy
-+    my $features = PVE::Storage::volume_has_feature($storecfg, "copy", $volid, undef, 0);
-+    if ($features && ref($features) eq "HASH" && $features->{current}->{offload}) {
++    # Deactivate SAN volumes after EFI initialization
++    ($storeid) = PVE::Storage::parse_volume_id($volid);
++    ($storecfg) = PVE::Storage::config();
++    my $scfg = PVE::Storage::storage_config($storecfg, $storeid);
++    if (PVE::Storage::Plugin::storage_is_san($scfg->{type})) {
 +        PVE::Storage::deactivate_volumes($storecfg, [$volid]);
 +    }
      my $size = PVE::Storage::volume_size_info($storecfg, $volid, 3);
  
      if ($efidisk->{'pre-enrolled-keys'} && is_ms_2023_cert_enrolled($ovmf_vars)) {
-diff -ur ./PVE/QemuServer.pm ../mod/PVE/QemuServer.pm
---- ./PVE/QemuServer.pm	2026-01-07 16:41:44
-+++ ../mod/PVE/QemuServer.pm	2026-01-07 16:41:44
-@@ -7861,6 +7861,17 @@
-     my ($newvmid, $dst_drivename, $efisize) = $dest->@{qw(vmid drivename efisize)};
-     my ($storage, $format) = $dest->@{qw(storage format)};
- 
-+    # Helper: check if volume has offload capability
-+    my $volume_has_offload = sub {
-+        my ($volid, $snap) = @_;
-+        my $features = PVE::Storage::volume_has_feature($storecfg, "copy", $volid, $snap, $running);
-+        return 0 unless $features && ref($features) eq "HASH";
-+        my (undef, $volname) = PVE::Storage::parse_volume_id($volid);
-+        my $isBase = ($volname =~ m/^base-/) ? 1 : 0;
-+        my $key = $snap ? "snap" : ($isBase ? "base" : "current");
-+        return $features->{$key}->{offload} ? 1 : 0;
-+    };
+--- PVE/QemuServer/Cloudinit.pm	2026-01-13 11:25:37
++++ PVE/QemuServer/Cloudinit.pm	2026-01-13 11:32:15
+@@ -70,6 +70,15 @@
+     };
+     my $err = $@;
+     rmtree($path);
 +
-     my $unused = defined($src_drivename) && $src_drivename =~ /^unused/;
-     my $use_drive_mirror = $full && $running && $src_drivename && !$snapname && !$unused;
- 
-@@ -7891,6 +7902,17 @@
-         my ($src_storeid) = PVE::Storage::parse_volume_id($drive->{file});
-         my $storeid = $storage || $src_storeid;
- 
-+        # Rule 1: offload clone if source and target on same storage
-+        my $can_offload = $volume_has_offload->($drive->{file}, $snapname)
-+                          && ($src_storeid eq $storeid) && !drive_is_cloudinit($drive);
-+
-+        if ($can_offload) {
-+            print "Using storage offload for full clone\n";
-+            $newvolid = PVE::Storage::vdisk_clone($storecfg, $drive->{file}, $newvmid, undef);
-+            push @$newvollist, $newvolid;
-+            goto no_data_clone;
++    # Deactivate volume if VM is not running - important for SAN storage
++    my $running = PVE::QemuServer::check_running($vmid);
++    if (!$running) {
++        if (PVE::Storage::Plugin::storage_is_san($scfg->{type})) {
++            eval { $plugin->deactivate_volume($storeid, $scfg, $volname); };
++            warn $@ if $@;
 +        }
-+
-         my $dst_format = resolve_dst_disk_format($storecfg, $storeid, $drive->{file}, $format);
++    }
+     die $err if $err;
+ }
  
-         my $name = undef;
-@@ -7935,6 +7957,11 @@
-                     $vmid, $newvmid, $jobs, $completion, $qga,
-                 );
-             }
-+
-+            # Rule 2: deactivate offload target after cloudinit
-+            if ($volume_has_offload->($newvolid, undef)) {
-+                PVE::Storage::deactivate_volumes($storecfg, [$newvolid]);
-+            }
-             goto no_data_clone;
-         }
- 
-@@ -7980,6 +8007,11 @@
-                 }
-                 push $cmd->@*, "bs=$bs", "osize=$size", "if=$src_path", "of=$dst_path";
-                 run_command($cmd);
-+
-+                # Rule 2: deactivate offload target after data copy (EFI)
-+                if ($volume_has_offload->($newvolid, undef)) {
-+                    PVE::Storage::deactivate_volumes($storecfg, [$newvolid]);
-+                }
-             } else {
-                 my $opts = {
-                     bwlimit => $bwlimit,
-@@ -7987,6 +8019,11 @@
-                     snapname => $snapname,
-                 };
-                 PVE::QemuServer::QemuImage::convert($drive->{file}, $newvolid, $size, $opts);
-+
-+                # Rule 2: deactivate offload target after data copy
-+                if ($volume_has_offload->($newvolid, undef)) {
-+                    PVE::Storage::deactivate_volumes($storecfg, [$newvolid]);
-+                }
-             }
+--- PVE/QemuServer.pm	2026-01-13 11:25:40
++++ PVE/QemuServer.pm	2026-01-13 11:44:32
+@@ -7991,6 +7991,27 @@
          }
      }
+ 
++    # Deactivate SAN volumes after full clone
++    if ($full && !$running) {
++        # Source volume
++        my ($src_storeid) = PVE::Storage::parse_volume_id($drive->{file});
++        my $src_scfg = PVE::Storage::storage_config($storecfg, $src_storeid);
++        if (PVE::Storage::Plugin::storage_is_san($src_scfg->{type})) {
++            print "Deactivating SAN source volume $drive->{file}\n";
++            eval { PVE::Storage::deactivate_volumes($storecfg, [$drive->{file}], $snapname); };
++            warn $@ if $@;
++        }
++
++        # Destination volume
++        my ($dst_storeid) = PVE::Storage::parse_volume_id($newvolid);
++        my $dst_scfg = PVE::Storage::storage_config($storecfg, $dst_storeid);
++        if (PVE::Storage::Plugin::storage_is_san($dst_scfg->{type})) {
++            print "Deactivating SAN destination volume $newvolid\n";
++            eval { PVE::Storage::deactivate_volumes($storecfg, [$newvolid]); };
++            warn $@ if $@;
++        }
++    }
++
+ no_data_clone:
+     my $size = eval { PVE::Storage::volume_size_info($storecfg, $newvolid, 10) };
+ 
+--- PVE/API2/Qemu.pm	2026-01-13 11:58:55
++++ PVE/API2/Qemu.pm	2026-01-13 12:17:33
+@@ -4605,6 +4605,23 @@
+                 }
+ 
+                 PVE::AccessControl::add_vm_to_pool($newid, $pool) if $pool;
++
++                # Deactivate CloudInit volumes for SAN storage
++                foreach my $opt (sort keys %$newconf) {
++                    next if $opt !~ m/^(ide|sata|scsi|virtio)\d+$/;
++                    my $drive = PVE::QemuServer::parse_drive($opt, $newconf->{$opt});
++                    next if !PVE::QemuServer::drive_is_cloudinit($drive);
++                    
++                    my $newvolid = $drive->{file};
++                    my ($newstoreid) = PVE::Storage::parse_volume_id($newvolid);
++                    my $newscfg = PVE::Storage::storage_config($storecfg, $newstoreid);
++                    
++                    if (PVE::Storage::Plugin::storage_is_san($newscfg->{type})) {
++                        eval { PVE::Storage::deactivate_volumes($storecfg, [$newvolid]); };
++                        warn $@ if $@;
++                    }
++                }
++
+             };
+             if (my $err = $@) {
+                 eval { PVE::QemuServer::BlockJob::qemu_blockjobs_cancel($vmid, $jobs) };

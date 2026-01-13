@@ -139,7 +139,7 @@ scp t/unit/volume/*.t root@10.4.0.122:/root/pve-ibm-flash-system-5x-fc/t/unit/vo
 
 ### `volume_resize($class, $scfg, $storeid, $volname, $size, $running)`
 *   **Действие**: Расширение тома.
-*   **Критическое поведение**: Расширять основной том И все его зависимые снапшоты (`Targets`) на одну и ту же дельту в байтах. Если маппинг активен и СХД блокирует расширение: `stopfcmap` -> `expand` -> `startfcmap`.
+*   **Критическое поведение**: Расширять основной том на дельту в байтах. Завершить вызов с ошибкой если у тома существуют `FlasyCopy` отображения в которые зависят от данных тома. (Это могут быть действующие снапшоты или действующее полное клонрование).
 
 ---
 
@@ -179,7 +179,7 @@ scp t/unit/volume/*.t root@10.4.0.122:/root/pve-ibm-flash-system-5x-fc/t/unit/vo
     ```perl
     {
         clone      => { base => { raw => 1 } },
-        copy       => { base => { raw => 1 }, current => { raw => 1 }, snap => { raw => 1 } },
+        copy       => { base => { raw => 1 }, current => { raw => 1 }, snap => { raw => 0 } },
         snapshot   => { current => { raw => 1 } },
         template   => { current => { raw => 1 } },
         sparseinit => { base => { raw => 1 }, current => { raw => 1 } }
@@ -234,77 +234,77 @@ IBM FlashSystem 5.x предоставляет REST API для управлен�
 
 #### Аутентификация
 
-| Endpoint | Описание |
-|----------|----------|
+| Endpoint          | Описание                                                         |
+| ----------------- | ---------------------------------------------------------------- |
 | `POST /rest/auth` | Получить токен (заголовки: `X-Auth-Username`, `X-Auth-Password`) |
 
 #### Управление томами
 
-| Endpoint | Описание | Параметры |
-|----------|----------|-----------|
-| `POST /rest/mkvolume` | Создать том | `name`, `pool`, `size`, `unit: "b"`, `thin: true` |
-| `POST /rest/lsvdisk` | Список томов | `bytes: true` |
-| `POST /rest/lsvdisk/<name>` | Информация о томе | `bytes: true` |
-| `POST /rest/expandvdisksize/<id>` | Расширить том | `size` (дельта), `unit: "b"` |
-| `POST /rest/rmvdisk/<id>` | Удалить том | `{}` |
-| `POST /rest/lsmdiskgrp/<pool>` | Информация о пуле | `bytes: true` |
+| Endpoint                          | Описание          | Параметры                                         |
+| --------------------------------- | ----------------- | ------------------------------------------------- |
+| `POST /rest/mkvolume`             | Создать том       | `name`, `pool`, `size`, `unit: "b"`, `thin: true` |
+| `POST /rest/lsvdisk`              | Список томов      | `bytes: true`                                     |
+| `POST /rest/lsvdisk/<name>`       | Информация о томе | `bytes: true`                                     |
+| `POST /rest/expandvdisksize/<id>` | Расширить том     | `size` (дельта), `unit: "b"`                      |
+| `POST /rest/rmvdisk/<id>`         | Удалить том       | `{}`                                              |
+| `POST /rest/lsmdiskgrp/<pool>`    | Информация о пуле | `bytes: true`                                     |
 
 #### Управление хостами
 
-| Endpoint | Описание | Параметры |
-|----------|----------|-----------|
-| `POST /rest/lshost` | Список хостов | `{}` |
-| `POST /rest/mkhost` | Создать хост | `name`, `hostcluster`, `type: "generic"` |
-| `POST /rest/mkport/<host>` | Добавить FC порт | `fcport_name: "XX:XX:XX:XX:XX:XX:XX:XX"` |
-| `POST /rest/lshostcluster/<cluster>` | Информация о кластере | `{}` |
+| Endpoint                             | Описание              | Параметры                                |
+| ------------------------------------ | --------------------- | ---------------------------------------- |
+| `POST /rest/lshost`                  | Список хостов         | `{}`                                     |
+| `POST /rest/mkhost`                  | Создать хост          | `name`, `hostcluster`, `type: "generic"` |
+| `POST /rest/mkport/<host>`           | Добавить FC порт      | `fcport_name: "XX:XX:XX:XX:XX:XX:XX:XX"` |
+| `POST /rest/lshostcluster/<cluster>` | Информация о кластере | `{}`                                     |
 
 #### Подключение томов к хостам (LUN Mapping)
 
-| Endpoint | Описание | Параметры |
-|----------|----------|-----------|
-| `POST /rest/lsvdiskhostmap` | Список маппингов | `{}` |
-| `POST /rest/mkvdiskhostmap/<id>` | Подключить том к хосту | `host`, `scsi` (LUN 1-255) |
-| `POST /rest/rmvdiskhostmap/<id>` | Отключить том от хоста | `host` |
+| Endpoint                         | Описание               | Параметры |
+| -------------------------------- | ---------------------- | --------- |
+| `POST /rest/lsvdiskhostmap`      | Список маппингов       | `{}`      |
+| `POST /rest/mkvdiskhostmap/<id>` | Подключить том к хосту | `host`    |
+| `POST /rest/rmvdiskhostmap/<id>` | Отключить том от хоста | `host`    |
 
 #### FlashCopy (Снапшоты и клоны)
 
-| Endpoint | Описание | Параметры |
-|----------|----------|-----------|
-| `POST /rest/lsfcmap` | Список FlashCopy | `{}` |
-| `POST /rest/lsfcmap/<id>` | Информация о FlashCopy | `{}` |
-| `POST /rest/mkfcmap` | Создать FlashCopy | `source`, `target`, `copyrate` |
-| `POST /rest/prestartfcmap/<id>` | Подготовить FlashCopy | `{}` |
-| `POST /rest/startfcmap/<id>` | Запустить FlashCopy | `{}` |
-| `POST /rest/stopfcmap/<id>` | Остановить FlashCopy | `{}` |
-| `POST /rest/rmfcmap/<id>` | Удалить FlashCopy | `force: true` |
+| Endpoint                        | Описание               | Параметры                      |
+| ------------------------------- | ---------------------- | ------------------------------ |
+| `POST /rest/lsfcmap`            | Список FlashCopy       | `{}`                           |
+| `POST /rest/lsfcmap/<id>`       | Информация о FlashCopy | `{}`                           |
+| `POST /rest/mkfcmap`            | Создать FlashCopy      | `source`, `target`, `copyrate` |
+| `POST /rest/prestartfcmap/<id>` | Подготовить FlashCopy  | `{}`                           |
+| `POST /rest/startfcmap/<id>`    | Запустить FlashCopy    | `{}`                           |
+| `POST /rest/stopfcmap/<id>`     | Остановить FlashCopy   | `{}`                           |
+| `POST /rest/rmfcmap/<id>`       | Удалить FlashCopy      | `force: true`                  |
 
 ### Коды ошибок IBM FlashSystem
 
-| Код | Описание | Обработка |
-|-----|----------|-----------|
-| `CMMVC5701E` | Объект занят | Retry 5 раз, пауза 1с |
-| `CMMVC5750E` | Не найден | Игнорировать (idempotent) |
-| `CMMVC5840E` | Том подключён/в FlashCopy | Сначала отключить |
-| `CMMVC5842E` | Объект не существует | Игнорировать (idempotent) |
-| `CMMVC5897E` | FlashCopy не удалён | Игнорировать |
-| `CMMVC5902E` | Уже подготовлен | Получить существующий ID |
-| `CMMVC5906E` | В состоянии preparing | Retry 5 раз, пауза 1с |
-| `CMMVC5916E` | Не активен | Игнорировать |
-| `CMMVC5951E` | Уже остановлен | Игнорировать |
-| `CMMVC6035E` | Уже существует | Игнорировать (idempotent) |
-| `CMMVC6374E` | Идентичный маппинг | Получить существующий ID |
-| `CMMVC6432E` | Хост не существует | Создать хост |
-| `CMMVC6470E` | Целевой том занят | Retry 5 раз, пауза 1с |
-| `CMMVC9055E` | Есть зависимые маппинги | Удалить зависимости |
-| `ClusterCrendentialsInvalid` | Неверные учетные данные | Проверить логин/пароль |
+| Код                          | Описание                  | Обработка                 |
+| ---------------------------- | ------------------------- | ------------------------- |
+| `CMMVC5701E`                 | Объект занят              | Retry 5 раз, пауза 1с     |
+| `CMMVC5750E`                 | Не найден                 | Игнорировать (idempotent) |
+| `CMMVC5840E`                 | Том подключён/в FlashCopy | Сначала отключить         |
+| `CMMVC5842E`                 | Объект не существует      | Игнорировать (idempotent) |
+| `CMMVC5897E`                 | FlashCopy не удалён       | Игнорировать              |
+| `CMMVC5902E`                 | Уже подготовлен           | Получить существующий ID  |
+| `CMMVC5906E`                 | В состоянии preparing     | Retry 5 раз, пауза 1с     |
+| `CMMVC5916E`                 | Не активен                | Игнорировать              |
+| `CMMVC5951E`                 | Уже остановлен            | Игнорировать              |
+| `CMMVC6035E`                 | Уже существует            | Игнорировать (idempotent) |
+| `CMMVC6374E`                 | Идентичный маппинг        | Получить существующий ID  |
+| `CMMVC6432E`                 | Хост не существует        | Создать хост              |
+| `CMMVC6470E`                 | Целевой том занят         | Retry 5 раз, пауза 1с     |
+| `CMMVC9055E`                 | Есть зависимые маппинги   | Удалить зависимости       |
+| `ClusterCrendentialsInvalid` | Неверные учетные данные   | Проверить логин/пароль    |
 
 ### Параметр copyrate для FlashCopy
 
-| Значение | Описание | Использование |
-|----------|----------|---------------|
-| `0` | Copy-on-write (без немедленного копирования) | Снапшоты |
-| `1-100` | Фоновое копирование | Клоны |
-| `100-150` | Быстрое копирование | Быстрые клоны/восстановление |
+| Значение  | Описание                                     | Использование                |
+| --------- | -------------------------------------------- | ---------------------------- |
+| `0`       | Copy-on-write (без немедленного копирования) | Снапшоты                     |
+| `1-100`   | Фоновое копирование                          | Клоны                        |
+| `100-150` | Быстрое копирование                          | Быстрые клоны/восстановление |
 
 ### Workflow'и
 
@@ -317,9 +317,9 @@ IBM FlashSystem 5.x предоставляет REST API для управлен�
 #### Удаление тома
 1. `POST /rest/stopfcmap/<id>` → остановить FlashCopy
 2. `POST /rest/rmfcmap/<id>` → удалить FlashCopy
-3. `POST /rest/rmvdiskhostmap/<id>` → отключить от хоста
-4. `multipath -f <device>` → удалить multipath
-5. `POST /rest/rmvdisk/<id>` → удалить том
+3. `multipath -f <device>` → удалить multipath
+4. `POST /rest/rmvdisk/<id>` → удалить том
+5. `POST /rest/rmvdiskhostmap/<id>` → отключить от хоста
 
 #### Создание снапшота
 1. `POST /rest/mkvolume` → создать целевой том
@@ -329,7 +329,7 @@ IBM FlashSystem 5.x предоставляет REST API для управлен�
 
 #### Клонирование
 1. `POST /rest/mkvolume` → создать целевой том
-2. `POST /rest/mkfcmap` → создать FlashCopy (copyrate: 100-150)
+2. `POST /rest/mkfcmap` → создать FlashCopy (copyrate: 100-150, autodelete: true)
 3. `POST /rest/prestartfcmap/<id>` → подготовить
 4. `POST /rest/startfcmap/<id>` → запустить
 5. Дождаться `idle_or_copied`

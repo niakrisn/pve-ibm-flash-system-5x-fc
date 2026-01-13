@@ -24,6 +24,7 @@ use JSON;
 
 # Load test helpers
 use VMHelpers;
+use Test::More;
 
 # ============================================================================
 # Public API
@@ -116,10 +117,13 @@ sub setup {
         token   => $token,
     }, $class;
 
-    # Clean up orphan FC devices from previous test runs
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
-        "Cleaning up orphan FC devices (storeid=%s)", $storeid);
-    VMHelpers::cleanup_orphan_fc_devices($env);
+    # Fail-fast if orphan devices exist (unless in evidence mode)
+    unless ($ENV{IBMFS_EVIDENCE_MODE}) {
+        unless (VMHelpers::no_orphan_fc_devices($env)) {
+            VMHelpers::show_relevant_logs('preflight_orphans');
+            BAIL_OUT("ENVIRONMENT NOT CLEAN: Orphan FC devices detected before tests.");
+        }
+    }
 
     return $env;
 }
@@ -164,8 +168,8 @@ sub verify_clean_environment {
         my $vmid_regex = join('|', @$vmids);
         my $vm_check = `qm list 2>/dev/null | grep -E '\\b($vmid_regex)\\b' || true`;
         if ($vm_check) {
-            die "ENVIRONMENT NOT CLEAN: Found existing VMs:\n$vm_check\n" .
-                "Run cleanup script before running tests.\n";
+            BAIL_OUT("ENVIRONMENT NOT CLEAN: Found existing VMs:\n$vm_check\n" .
+                "Run cleanup script before running tests.\n");
         }
     }
     
@@ -174,8 +178,16 @@ sub verify_clean_environment {
         my $pattern_regex = join('|', @$volume_patterns);
         my $vol_check = `pvesm list $env->{storeid} 2>/dev/null | grep -E '($pattern_regex)' || true`;
         if ($vol_check) {
-            die "ENVIRONMENT NOT CLEAN: Found existing volumes on storage:\n$vol_check\n" .
-                "Run cleanup script before running tests.\n";
+            BAIL_OUT("ENVIRONMENT NOT CLEAN: Found existing volumes on storage:\n$vol_check\n" .
+                "Run cleanup script before running tests.\n");
+        }
+    }
+
+    # Check for orphan FC devices on host
+    unless ($ENV{IBMFS_EVIDENCE_MODE}) {
+        unless (VMHelpers::no_orphan_fc_devices($env)) {
+            VMHelpers::show_relevant_logs('pretest_orphans');
+            BAIL_OUT("ENVIRONMENT NOT CLEAN: Orphan FC devices detected on host.");
         }
     }
     

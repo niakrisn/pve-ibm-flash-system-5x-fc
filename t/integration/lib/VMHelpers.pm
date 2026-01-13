@@ -21,6 +21,7 @@ our @EXPORT_OK = qw(
     show_relevant_logs
     check_orphans_after_test
     run_cmd_checked
+    run_cmd_expect_fail
     run_shell_checked
 );
 
@@ -182,6 +183,32 @@ sub run_cmd_checked {
     return 1;
 }
 
+# Run a command that is expected to fail (exit != 0 or task status != OK).
+sub run_cmd_expect_fail {
+    my ($label, @cmd) = @_;
+    $label //= 'command (expect fail)';
+
+    my ($status, $output) = _run_cmd_capture(@cmd);
+    my ($upid) = $output =~ /(UPID:[^\s]+)/;
+
+    if ($status != 0) {
+        diag("Command failed as expected: $label");
+        diag("Command output:\n$output") if $output;
+        return 1;
+    }
+
+    if ($upid) {
+        my ($ok, $status_msg, $exitstatus) = _wait_for_task_ok($upid, 300);
+        if (!$ok) {
+            diag("Task failed as expected (upid=$upid, status=$status_msg, exitstatus=" . ($exitstatus // '') . ")");
+            return 1;
+        }
+    }
+
+    diag("Command output:\n$output") if $output;
+    BAIL_OUT("$label unexpectedly succeeded");
+}
+
 # Run a shell command string, verify exit code.
 sub run_shell_checked {
     my ($label, $cmdline, $logfile) = @_;
@@ -195,6 +222,24 @@ sub run_shell_checked {
         }
         diag("Command output:\n$output") if $output;
         BAIL_OUT("$label failed (exit=$status)");
+    }
+
+    my $log_content = '';
+    if ($logfile && -f $logfile) {
+        $log_content = `cat $logfile 2>/dev/null`;
+    }
+
+    my ($upid) = $output =~ /(UPID:[^\s]+)/;
+    if (!$upid && $log_content) {
+        ($upid) = $log_content =~ /(UPID:[^\s]+)/;
+    }
+    if ($upid) {
+        my ($ok, $status_msg, $exitstatus) = _wait_for_task_ok($upid, 300);
+        unless ($ok) {
+            diag("Task output:\n$output") if $output;
+            diag("Log file ($logfile):\n$log_content") if $log_content;
+            BAIL_OUT("$label task failed (upid=$upid, status=$status_msg, exitstatus=" . ($exitstatus // '') . ")");
+        }
     }
 
     return 1;
@@ -221,9 +266,8 @@ sub check_orphans_after_test {
     if (@orphan_wwns) {
         print STDERR "!!! WARNING: Orphan FC devices detected after $test_name !!!\n";
         print STDERR "Orphan WWNs: " . join(', ', @orphan_wwns) . "\n";
-        print STDERR "These devices will be cleaned up before the next test\n";
         show_relevant_logs($test_name);
-        return 0;
+        BAIL_OUT("Orphan FC devices detected after $test_name");
     }
 
     return 1;

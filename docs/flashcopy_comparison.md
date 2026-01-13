@@ -31,7 +31,7 @@ Legend:
 | --- | --- |
 | Cinder (storwize_svc) | 0) Pretreatment: `svcinfo lsvdiskfcmappings <vol>` + `svcinfo lsfcmap <id>`; stop active clone maps if needed<br>1) `svctask mkfcmap -source <snap> -target <vol> -copyrate <flashcopy_rate> -autodelete [-cleanrate <clean_rate>]`<br>2) `svctask prestartfcmap -restore <id>`<br>3) `svctask startfcmap -restore <id>` |
 | CSI (ibm-block-csi-driver) | Not implemented (no FlashCopy revert in CSI driver) |
-| PVE plugin (this repo) | 1) `POST /rest/lsfcmap` (collect mappings where source is `<vol>`)<br>2) `POST /rest/stopfcmap/<id>` -> `POST /rest/rmfcmap/<id> {force:true}` for all source mappings<br>3) `POST /rest/mkfcmap {source:<snap>,target:<vol>,copyrate:150,cleanrate:150}`<br>4) `POST /rest/prestartfcmap/<id>` -> `POST /rest/startfcmap/<id>`<br>5) `POST /rest/lsfcmap/<id>` (wait for `idle_or_copied`)<br>6) `POST /rest/rmfcmap/<id> {force:true}`<br>7) Recreate snapshot star: `POST /rest/mkfcmap {source:<vol>,target:<snapX>,copyrate:0}` + `prestart` + `start` for each snapshot target |
+| PVE plugin (this repo) | 1) `POST /rest/lsfcmap` (ensure mapping exists for `<vol> -> <snap>`, no teardown)<br>2) `POST /rest/mkfcmap {source:<snap>,target:<vol>,copyrate:150,cleanrate:150,autodelete:true}`<br>3) `POST /rest/prestartfcmap/<id> {restore:true}` -> `POST /rest/startfcmap/<id>`<br>4) `POST /rest/lsfcmap/<id>` (wait for `idle_or_copied`)<br>5) `POST /rest/rmfcmap/<id> {force:true}`<br>6) Ensure base mapping active for linked clones (recreate if missing) |
 
 ### Cinder Rollback (expanded)
 

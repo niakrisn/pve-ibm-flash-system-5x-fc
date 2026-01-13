@@ -21,7 +21,7 @@ rsync -avz --delete PVE/ root@10.4.0.122:/usr/share/perl5/PVE/
 ### 1. Build Packages
 // turbo
 ```bash
-docker run --rm -v $(pwd):/build -w /build debian:bookworm bash -c "apt-get update && apt-get install -y dpkg && ./scripts/build-deb.sh"
+make package-docker
 ```
 
 ### 2. Deploy Plugin Package

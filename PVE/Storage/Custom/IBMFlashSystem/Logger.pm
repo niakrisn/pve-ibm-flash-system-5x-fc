@@ -58,18 +58,7 @@ sub log_error {
     return _log('error', $message, $scfg);
 }
 
-# Legacy API for backward compatibility (does nothing with context)
-sub log {
-    my ($class, $level, $message, $scfg) = @_;
-    return _log($level, $message, $scfg);
-}
-
-# Sanitize and format JSON bodies (keep for API request logging)
-sub sanitize {
-    my ($class, $data) = @_;
-    return _sanitize_for_log($data);
-}
-
+# Format and sanitize JSON bodies for API request logging
 sub format_body {
     my ($class, $data) = @_;
     return '' unless defined $data;

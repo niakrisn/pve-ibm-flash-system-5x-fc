@@ -201,7 +201,7 @@ sub flush_device {
             run_command(['/usr/sbin/multipath', '-F', $device_name], timeout => 10);
         };
         if ($@) {
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, "Failed to flush multipath device %s (error=%s)", $device_name, $@);
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, undef, "Failed to flush multipath device %s (error=%s)", $device_name, $@);
         }
     }
     return;

@@ -1,26 +1,31 @@
 ---
 description: Strict Integration Test Execution (Fail-Fast & Evidence Collection)
 ---
+
 # Strict Integration Test Execution Workflow
 
 This workflow enforces the **Fail-Fast** principle. You must follow this EXACTLY when running integration tests.
 
 ## 1. Preparation
-1.  **Sync Tests**: Ensure local test files are synced to the remote host.
+1.  **Sync/Install Tests**: Рекомендуется использовать пакетную установку:
     ```bash
-    scp -r t/integration/* root@10.4.0.122:/usr/share/pve-ibm-fs5x-fc-plugin-tests/
+    make package-docker-tests
+    # ... деплой пакета ...
     ```
-2.  **Verify Environment**: Check that the host is clean before starting.
-    ```bash
-    ssh -i ~/.ssh/id_ed25519 root@10.4.0.122 "qm list; multipath -ll; lsblk"
-    ```
-    *If any leftover VMs or devices exist, STOP and notify the user.*
 
 ## 2. Execution (FAIL-FAST)
-Run the test runner. The runner is configured to `set -e`, but YOU must also respect the outcome.
+Используй системный раннер. Он сам сделает очистку и проверит окружение.
+Запрещено запускать `prove` напрямую (в том числе локально или на сервере) — это нарушает Fail-Fast и может запустить тесты параллельно.
+При любой ошибке раннер автоматически запускает сбор доказательств.
 
 ```bash
-ssh -i ~/.ssh/id_ed25519 root@10.4.0.122 "chmod +x /usr/share/pve-ibm-fs5x-fc-plugin-tests/scenarios/*.t; pve-ibm-fs5x-test-runner"
+ssh -i ~/.ssh/id_ed25519 root@10.4.0.122 "pve-ibm-fs5x-test-runner"
+# Для запуска конкретного теста по номеру (первые два символа файла):
+ssh -i ~/.ssh/id_ed25519 root@10.4.0.122 "pve-ibm-fs5x-test-runner 03"
+# Допускается передать полный файл, будет взят его префикс:
+ssh -i ~/.ssh/id_ed25519 root@10.4.0.122 "pve-ibm-fs5x-test-runner 03_snapshot_lifecycle.t"
+# Можно указать несколько тестов:
+ssh -i ~/.ssh/id_ed25519 root@10.4.0.122 "pve-ibm-fs5x-test-runner 01 03 07"
 ```
 
 ## 3. Protocol: ON FAILURE
@@ -32,7 +37,17 @@ If the test runner exits with a non-zero code, or if you see a "FAIL" in the out
 *   **DO NOT** run cleanup scripts that might destroy evidence.
 
 ### [ACTION] COLLECT EVIDENCE
-Run the following commands to capture the state "as-is":
+Используй ТОЛЬКО доказательства, собранные раннером через `collect_evidence.sh`.
+Не запускай сбор вручную — чтобы не перезаписать/исказить артефакты.
+
+Каталог evidence включает имя сценария в пути (например, `...-07_backup_restore.t-YYYYMMDD-HHMMSS`).
+Если нужны данные, сначала найди последний каталог:
+```bash
+ls -dt /var/log/pve-ibm-fs5x-evidence-* | head -n 1
+```
+
+После сбора агент обязан проанализировать доказательства и подготовить отчет.
+Желательно сохранить отчет как артефакт в каталоге evidence (например, `analysis.txt`).
 
 1.  **Process List**:
     ```bash

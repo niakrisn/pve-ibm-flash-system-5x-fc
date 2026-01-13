@@ -13,3 +13,5 @@ debian/debhelper-build-stamp
 *.tar.gz
 *.swp
 .DS_Store
+cinder/
+ibm-block-cdi-driver/

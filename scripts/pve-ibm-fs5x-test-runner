@@ -2,12 +2,31 @@
 # PVE IBM FlashSystem Plugin Test Runner
 # This script is used to run integration tests after they are installed.
 
-set -e
+set -eE -o pipefail
 
 TEST_BASE="/usr/share/pve-ibm-fs5x-fc-plugin-tests"
 LIB_DIR="${TEST_BASE}/lib"
 SCENARIO_DIR="${TEST_BASE}/scenarios"
 LOCKFILE="/run/lock/pve-ibm-fs5x-test-runner.lock"
+EVIDENCE_SCRIPT="${TEST_BASE}/scripts/collect_evidence.sh"
+
+run_evidence() {
+    local script="$EVIDENCE_SCRIPT"
+    if [ ! -x "$script" ]; then
+        script="${TEST_BASE}/collect_evidence.sh"
+    fi
+
+    if [ -x "$script" ]; then
+        echo "================================================================"
+        echo "TEST FAILURE DETECTED - Collecting evidence using ${script}..."
+        echo "================================================================"
+        EVIDENCE_TAG="${CURRENT_TEST:-}" "$script" || true
+    else
+        echo "WARNING: Evidence script not found in ${TEST_BASE}."
+    fi
+}
+
+trap 'status=$?; run_evidence; exit $status' ERR
 
 # Ensure we are running as root
 if [ "$EUID" -ne 0 ]; then
@@ -25,6 +44,10 @@ echo "$$" 1>&9
 
 # Set up environment
 export PERL5LIB="${LIB_DIR}:/usr/share/perl5"
+if [ -n "${HARNESS_OPTIONS:-}" ] || [ -n "${PROVE_OPTIONS:-}" ]; then
+    echo "NOTICE: Ignoring HARNESS_OPTIONS/PROVE_OPTIONS to enforce sequential runs."
+fi
+unset HARNESS_OPTIONS PROVE_OPTIONS
 
 echo "=== Starting IBM FlashSystem Plugin Integration Tests ==="
 echo "Base directory: ${TEST_BASE}"
@@ -72,9 +95,47 @@ echo "Test pool is clean. Proceeding with tests..."
 # Run tests using prove
 # Run tests sequentially to enforce Fail-Fast
 # because set -e is active, any failed prove command will immediately exit the script
-for test_script in "${SCENARIO_DIR}"/*.t; do
+TEST_SCRIPTS=()
+declare -A SEEN_TESTS=()
+
+add_test_glob() {
+    local test_glob="$1"
+    local label="$2"
+    if ! compgen -G "$test_glob" > /dev/null; then
+        if [ -n "$label" ]; then
+            echo "Error: No scenario test files found starting with '${label}'."
+        else
+            echo "Error: No scenario test files found in '${SCENARIO_DIR}'."
+        fi
+        exit 1
+    fi
+    local test_script
+    for test_script in $test_glob; do
+        if [ -z "${SEEN_TESTS[$test_script]+x}" ]; then
+            SEEN_TESTS[$test_script]=1
+            TEST_SCRIPTS+=("$test_script")
+        fi
+    done
+}
+
+if [ "$#" -gt 0 ]; then
+    for arg in "$@"; do
+        if [[ "$arg" =~ ^[0-9]+$ ]]; then
+            TEST_PREFIX=$(printf "%02d" $((10#$arg)))
+        else
+            TEST_PREFIX="${arg:0:2}"
+        fi
+        add_test_glob "${SCENARIO_DIR}/${TEST_PREFIX}*.t" "$TEST_PREFIX"
+    done
+else
+    add_test_glob "${SCENARIO_DIR}/*.t" ""
+fi
+
+for test_script in "${TEST_SCRIPTS[@]}"; do
+    CURRENT_TEST="$(basename "$test_script")"
+    export CURRENT_TEST
     echo "----------------------------------------------------------------"
     echo "Running Scenario: $(basename "$test_script")"
     echo "----------------------------------------------------------------"
-    prove -v "$test_script"
+    prove -v -j1 "$test_script"
 done

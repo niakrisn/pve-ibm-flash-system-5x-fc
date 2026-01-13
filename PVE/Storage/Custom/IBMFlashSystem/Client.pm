@@ -52,22 +52,6 @@ sub delete_password {
     return _delete_password($class, $scfg, $storeid);
 }
 
-# Rollback state (for snapshot transactions)
-sub save_rollback_state {
-    my ($class, $volname, $state) = @_;
-    return _save_rollback_state($class, $volname, $state);
-}
-
-sub load_rollback_state {
-    my ($class, $volname) = @_;
-    return _load_rollback_state($class, $volname);
-}
-
-sub clear_rollback_state {
-    my ($class, $volname) = @_;
-    return _clear_rollback_state($class, $volname);
-}
-
 # Hooks (called from main plugin)
 sub on_add_hook {
     my ($class, $storeid, $scfg, %param) = @_;
@@ -274,53 +258,6 @@ sub _normalize_response {
 
     # No normalization if expect is not recognized
     return $result;
-}
-
-# Get rollback state file path for a volume
-sub _get_rollback_state_path {
-    my ($class, $volname) = @_;
-    return "/run/pve-ibm-rollback-$volname.json";
-}
-
-# Save rollback state to file
-sub _save_rollback_state {
-    my ($class, $volname, $state) = @_;
-
-    my $path = _get_rollback_state_path($class, $volname);
-    eval { file_set_contents($path, encode_json($state), 0600) };
-    if ($@) {
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, undef,
-            "Failed to save rollback state (volname=%s, error=%s)", $volname, $@);
-    }
-
-    return;
-}
-
-# Load rollback state from file
-sub _load_rollback_state {
-    my ($class, $volname) = @_;
-
-    my $path = _get_rollback_state_path($class, $volname);
-    return unless -f $path;
-
-    my $content = eval { file_get_contents($path) };
-    return unless $content;
-
-    my $state = eval { decode_json($content) };
-    return $state;
-}
-
-# Clear rollback state file
-sub _clear_rollback_state {
-    my ($class, $volname) = @_;
-
-    my $path = _get_rollback_state_path($class, $volname);
-    if (-f $path) {
-        unlink($path) or PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, undef,
-            "Failed to clear rollback state (volname=%s, error=%s)", $volname, $!);
-    }
-
-    return;
 }
 
 # Initialize LWP::UserAgent

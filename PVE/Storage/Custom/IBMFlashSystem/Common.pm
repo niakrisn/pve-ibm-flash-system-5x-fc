@@ -9,7 +9,7 @@ use warnings;
 use PVE::Storage::Custom::IBMFlashSystem::Logger;
 
 use Exporter 'import';
-our @EXPORT_OK = qw(_get_hostname _snapshot_name error_code_matches is_already_exists_error is_not_found_error is_resource_busy_error is_mapping_stopped_error is_object_not_found_error);
+our @EXPORT_OK = qw(_get_hostname _snapshot_name _task_log error_code_matches is_not_found_error);
 
 # ============================================================================
 # Hostname Utility
@@ -53,6 +53,32 @@ sub _snapshot_name {
 }
 
 # ============================================================================
+# Task Logging
+# ============================================================================
+
+sub _task_log {
+    my ($class, $scfg, $level, $message) = @_;
+
+    my $ok = eval {
+        local $| = 1;
+        print "$message\n";
+        1;
+    };
+
+    if (!$ok) {
+        if ($level && $level =~ /err/i) {
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg, $message);
+        } elsif ($level && $level =~ /warn/i) {
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg, $message);
+        } else {
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, $message);
+        }
+    }
+
+    return;
+}
+
+# ============================================================================
 # Error Handling
 # ============================================================================
 
@@ -75,32 +101,10 @@ sub error_code_matches {
     return 0;
 }
 
-# Semantic error helpers for common error types
-
-sub is_already_exists_error {
-    my ($class, $error) = @_;
-    return error_code_matches($class, $error, 'CMMVC6035E', 'CMMVC6043E');
-}
-
+# Semantic error helper for "not found" errors
 sub is_not_found_error {
     my ($class, $error) = @_;
     return error_code_matches($class, $error, 'CMMVC5753E', 'CMMVC5804E', 'CMMVC5750E');
-}
-
-sub is_object_not_found_error {
-    my ($class, $error) = @_;
-    return is_not_found_error($class, $error);
-}
-
-sub is_resource_busy_error {
-    my ($class, $error) = @_;
-    return error_code_matches($class, $error, 'CMMVC5840E', 'CMMVC9411E', 'CMMVC9356E');
-}
-
-sub is_mapping_stopped_error {
-    my ($class, $error) = @_;
-    return error_code_matches($class, $error, 'CMMVC5897E', 'CMMVC5951E') || 
-           $error =~ /already stopped|not active|in the stopped state|stopping/i;
 }
 
 1;

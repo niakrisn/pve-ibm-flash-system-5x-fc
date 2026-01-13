@@ -8,3 +8,6 @@ t/integration/lib/*.pm usr/share/pve-ibm-fs5x-fc-plugin-tests/lib/
 
 # Install cleanup script
 scripts/cleanup_host_san.sh usr/share/pve-ibm-fs5x-fc-plugin-tests/
+
+# Install evidence collection script
+scripts/collect_evidence.sh usr/share/pve-ibm-fs5x-fc-plugin-tests/
