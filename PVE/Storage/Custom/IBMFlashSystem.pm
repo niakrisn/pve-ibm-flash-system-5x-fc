@@ -331,8 +331,9 @@ sub activate_storage {
     my $protocol = PVE::Storage::Custom::IBMFlashSystem::Protocol->get_handler($scfg);
     $protocol->validate_system_config($scfg);
 
-    # Check 2: Verify host cluster exists
+    # Check 2: Verify host cluster and pool are configured
     my $host_cluster = $scfg->{hostcluster} or die "hostcluster not configured\n";
+    my $pool_name = $scfg->{pool} or die "pool not configured\n";
     eval {
         PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/lshostcluster/$host_cluster", {});
     };

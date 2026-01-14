@@ -268,7 +268,6 @@ sub create_volume {
     }
 
     my $pool_name = $opts->{pool} // $scfg->{pool};
-    _throw_volume_error($class, "Pool not configured\n") unless $pool_name;
     my $unit = $opts->{unit} // 'b';
     my $thin = $opts->{thin};
 
@@ -415,7 +414,6 @@ sub get_pool_info {
     my ($class, $scfg, $storeid, $skip_protection_check) = @_;
 
     my $pool_name = $scfg->{pool};
-    _throw_volume_error($class, "Pool not configured\n") unless $pool_name;
 
     # Use specific pool endpoint: POST /lsmdiskgrp/<pool_name>
     my $endpoint = "/lsmdiskgrp/$pool_name";
@@ -457,7 +455,6 @@ sub alloc_image {
     local $CURRENT_OP_LOGGED = 0;
 
     my $pool_name = $scfg->{pool};
-    _throw_volume_error($class, "Pool not configured\n") unless $pool_name;
     _throw_volume_error($class, "Volume size cannot be zero or undefined\n") if !$size || $size <= 0;
 
     # Proxmox passes size in kilobytes, convert to bytes
@@ -507,7 +504,6 @@ sub clone_image {
     local $CURRENT_OP_LOGGED = 0;
 
     my $pool_name = $scfg->{pool};
-    _throw_volume_error($class, "Pool not configured\n") unless $pool_name;
     $ctx->{pool} = $pool_name;
 
     # Generate new volume name for the clone
@@ -758,7 +754,6 @@ sub list_images {
     my $vmid_display = defined($vmid) ? $vmid : 'all';
 
     my $pool_name = $scfg->{pool};
-    _throw_volume_error($class, "Pool not configured\n") unless $pool_name;
 
     # Query vdisk list with retries for eventual consistency
     my $max_attempts = 5;

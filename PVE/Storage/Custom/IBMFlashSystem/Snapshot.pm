@@ -69,7 +69,6 @@ sub volume_snapshot {
     _throw_snapshot_error($class, "Snapshot volume '$snapshot_name' already exists\n") if $snapshot_info;
 
     my $pool_name = $scfg->{pool};
-    _throw_snapshot_error($class, "Pool not configured\n") unless $pool_name;
 
     # Get source volume size - capacity is in bytes from API
     my $size_bytes = $source_info->{capacity} || 0;
