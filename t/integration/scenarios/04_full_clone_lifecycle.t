@@ -11,6 +11,7 @@ use TestEnv;
 use VMScenario qw(create_q35_vm cleanup_vm);
 use StateVerifier;
 use VMHelpers qw(run_cmd_checked);
+use TestAssert qw(ok_or_bail);
 use FCHelpers qw(skip_without_fc);
 
 # Skip if no FC connectivity
@@ -34,59 +35,59 @@ subtest 'Full Clone VM Lifecycle (EFI + 1 SCSI)' => sub {
     my $scsi_disks = [
         { size => '10G', slot => 0 },  # scsi0: 10GB (OS)
     ];
-    ok(create_q35_vm($env, $source_vmid, $scsi_disks, { cloudinit => 1 }), "Source VM $source_vmid created with cloud-init");
+    ok_or_bail(create_q35_vm($env, $source_vmid, $scsi_disks, { cloudinit => 1 }), "Source VM $source_vmid created with cloud-init", { env => $env, vmid => $source_vmid });
     
     my $source_disks = ['vm-9999-disk-0', 'vm-9999-disk-1', 'vm-9999-cloudinit']; # EFI + 1 SCSI + cloud-init
     
     # Step 2: Verify source VM is CREATED
-    ok(StateVerifier::verify_created($env, $source_vmid, $source_disks), "Source VM $source_vmid is CREATED");
+    ok_or_bail(StateVerifier::verify_created($env, $source_vmid, $source_disks), "Source VM $source_vmid is CREATED", { env => $env, vmid => $source_vmid, disks => $source_disks });
     
     # Step 3: Start source VM
     diag("Starting source VM $source_vmid...");
-    run_cmd_checked("qm start $source_vmid", 'qm', 'start', $source_vmid);
-    ok(StateVerifier::verify_activated($env, $source_vmid, $source_disks), "Source VM $source_vmid is ACTIVATED");
+    run_cmd_checked("qm start $source_vmid", 'qm', 'start', $source_vmid, { env => $env, vmid => $source_vmid, disks => $source_disks });
+    ok_or_bail(StateVerifier::verify_activated($env, $source_vmid, $source_disks), "Source VM $source_vmid is ACTIVATED", { env => $env, vmid => $source_vmid, disks => $source_disks });
     
     # Step 4: Stop source VM
     diag("Stopping source VM $source_vmid...");
-    run_cmd_checked("qm stop $source_vmid", 'qm', 'stop', $source_vmid);
-    ok(StateVerifier::verify_deactivated($env, $source_vmid, $source_disks), "Source VM $source_vmid is DEACTIVATED");
+    run_cmd_checked("qm stop $source_vmid", 'qm', 'stop', $source_vmid, { env => $env, vmid => $source_vmid, disks => $source_disks });
+    ok_or_bail(StateVerifier::verify_deactivated($env, $source_vmid, $source_disks), "Source VM $source_vmid is DEACTIVATED", { env => $env, vmid => $source_vmid, disks => $source_disks });
     
     # Step 5: Full clone to VM 9998
     diag("Cloning source VM $source_vmid to clone VM $clone_vmid (full clone)...");
-    run_cmd_checked("qm clone $source_vmid $clone_vmid --full --pool $env->{test_pool}", 'qm', 'clone', $source_vmid, $clone_vmid, '--full', '--pool', $env->{test_pool});
+    run_cmd_checked("qm clone $source_vmid $clone_vmid --full --pool $env->{test_pool}", 'qm', 'clone', $source_vmid, $clone_vmid, '--full', '--pool', $env->{test_pool}, { env => $env, vmid => $clone_vmid });
 
     # CRITICAL: Verify source VM is STILL DEACTIVATED after clone
     # Clone should NOT re-map source volumes
     diag("Verifying source VM $source_vmid is STILL DEACTIVATED after clone...");
-    ok(StateVerifier::verify_deactivated($env, $source_vmid, $source_disks), "Source VM $source_vmid is STILL DEACTIVATED after clone");
+    ok_or_bail(StateVerifier::verify_deactivated($env, $source_vmid, $source_disks), "Source VM $source_vmid is STILL DEACTIVATED after clone", { env => $env, vmid => $source_vmid, disks => $source_disks });
 
     my $clone_disks = ['vm-9998-disk-0', 'vm-9998-disk-1', 'vm-9998-cloudinit']; # EFI + 1 SCSI + cloud-init (cloned)
 
     # Verify clone VM is properly created
-    ok(StateVerifier::verify_cloned($env, $source_vmid, $clone_vmid, $clone_disks), "Clone VM $clone_vmid verified");
+    ok_or_bail(StateVerifier::verify_cloned($env, $source_vmid, $clone_vmid, $clone_disks), "Clone VM $clone_vmid verified", { env => $env, vmid => $clone_vmid, disks => $clone_disks });
     
     # Step 6: Verify clone VM is CREATED (independent volumes)
-    ok(StateVerifier::verify_created($env, $clone_vmid, $clone_disks), "Clone VM $clone_vmid is CREATED");
+    ok_or_bail(StateVerifier::verify_created($env, $clone_vmid, $clone_disks), "Clone VM $clone_vmid is CREATED", { env => $env, vmid => $clone_vmid, disks => $clone_disks });
     
     # Step 7: Start clone VM
     diag("Starting clone VM $clone_vmid...");
-    run_cmd_checked("qm start $clone_vmid", 'qm', 'start', $clone_vmid);
-    ok(StateVerifier::verify_activated($env, $clone_vmid, $clone_disks), "Clone VM $clone_vmid is ACTIVATED");
+    run_cmd_checked("qm start $clone_vmid", 'qm', 'start', $clone_vmid, { env => $env, vmid => $clone_vmid, disks => $clone_disks });
+    ok_or_bail(StateVerifier::verify_activated($env, $clone_vmid, $clone_disks), "Clone VM $clone_vmid is ACTIVATED", { env => $env, vmid => $clone_vmid, disks => $clone_disks });
     
     # Step 8: Stop clone VM
     diag("Stopping clone VM $clone_vmid...");
-    run_cmd_checked("qm stop $clone_vmid", 'qm', 'stop', $clone_vmid);
-    ok(StateVerifier::verify_deactivated($env, $clone_vmid, $clone_disks), "Clone VM $clone_vmid is DEACTIVATED");
+    run_cmd_checked("qm stop $clone_vmid", 'qm', 'stop', $clone_vmid, { env => $env, vmid => $clone_vmid, disks => $clone_disks });
+    ok_or_bail(StateVerifier::verify_deactivated($env, $clone_vmid, $clone_disks), "Clone VM $clone_vmid is DEACTIVATED", { env => $env, vmid => $clone_vmid, disks => $clone_disks });
     
     # Step 9: Destroy clone VM
     diag("Destroying clone VM $clone_vmid...");
-    run_cmd_checked("qm destroy $clone_vmid", 'qm', 'destroy', $clone_vmid, '--destroy-unreferenced-disks', '1');
-    ok(StateVerifier::verify_destroyed($env, $clone_vmid, $clone_disks), "Clone VM $clone_vmid is DESTROYED");
+    run_cmd_checked("qm destroy $clone_vmid", 'qm', 'destroy', $clone_vmid, '--destroy-unreferenced-disks', '1', { env => $env, vmid => $clone_vmid, disks => $clone_disks });
+    ok_or_bail(StateVerifier::verify_destroyed($env, $clone_vmid, $clone_disks), "Clone VM $clone_vmid is DESTROYED", { env => $env, vmid => $clone_vmid, disks => $clone_disks });
     
     # Step 10: Destroy source VM
     diag("Destroying source VM $source_vmid...");
-    run_cmd_checked("qm destroy $source_vmid", 'qm', 'destroy', $source_vmid, '--destroy-unreferenced-disks', '1');
-    ok(StateVerifier::verify_destroyed($env, $source_vmid, $source_disks), "Source VM $source_vmid is DESTROYED");
+    run_cmd_checked("qm destroy $source_vmid", 'qm', 'destroy', $source_vmid, '--destroy-unreferenced-disks', '1', { env => $env, vmid => $source_vmid, disks => $source_disks });
+    ok_or_bail(StateVerifier::verify_destroyed($env, $source_vmid, $source_disks), "Source VM $source_vmid is DESTROYED", { env => $env, vmid => $source_vmid, disks => $source_disks });
 };
 
 done_testing();

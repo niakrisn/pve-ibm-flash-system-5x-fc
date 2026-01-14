@@ -18,10 +18,20 @@ use JSON;
 
 my %VOLUME_UIDS; # Session cache for WWNs to verify removal after volumes are gone
 my $TEST_START_TS = time();
+my %CTX;
+
+sub _set_ctx {
+    my (%ctx) = @_;
+    %CTX = %ctx;
+    return;
+}
 
 sub _bail {
     my ($msg, $detail) = @_;
     diag($detail) if defined $detail;
+    if (%CTX) {
+        VMHelpers::collect_evidence($CTX{env}, $CTX{label} // $msg, $CTX{vmid}, $CTX{disks});
+    }
     BAIL_OUT($msg);
 }
 
@@ -29,6 +39,7 @@ sub verify_no_orphans {
     my ($env, $label) = @_;
     $label //= 'state';
 
+    _set_ctx(env => $env, label => $label);
     ok(VMHelpers::check_orphans_after_test($env, $label), "Host: No orphan FC devices after $label")
         or _bail("Host: Orphan FC devices detected after $label");
     return 1;
@@ -39,6 +50,7 @@ sub verify_created {
     my ($env, $vmid, $disks_ref) = @_;
     
     diag("Verifying VM $vmid is CREATED (No mappings expected)");
+    _set_ctx(env => $env, vmid => $vmid, disks => $disks_ref, label => "verify_created_$vmid");
     
     # 1. Check VM config exists
     my $conf = `qm config $vmid 2>/dev/null`;
@@ -77,6 +89,7 @@ sub verify_activated {
     my ($env, $vmid, $disks_ref) = @_;
     
     diag("Verifying VM $vmid is ACTIVATED (Mappings and devices expected)");
+    _set_ctx(env => $env, vmid => $vmid, disks => $disks_ref, label => "verify_activated_$vmid");
     
     foreach my $disk (@$disks_ref) {
         # 1. Mapping exists on storage (with retries for API consistency)
@@ -125,6 +138,7 @@ sub verify_deactivated {
     my ($env, $vmid, $disks_ref) = @_;
     
     diag("Verifying VM $vmid is DEACTIVATED (Mappings and devices should be removed)");
+    _set_ctx(env => $env, vmid => $vmid, disks => $disks_ref, label => "verify_deactivated_$vmid");
     
     foreach my $disk (@$disks_ref) {
         # 1. No mappings on storage
@@ -156,6 +170,7 @@ sub verify_destroyed {
     my ($env, $vmid, $disks_ref) = @_;
     
     diag("Verifying VM $vmid is DESTROYED (Total purge from SAN and Host)");
+    _set_ctx(env => $env, vmid => $vmid, disks => $disks_ref, label => "verify_destroyed_$vmid");
     
     # 1. Config gone
     my $conf = `qm config $vmid 2>/dev/null`;
@@ -192,6 +207,7 @@ sub verify_snapshot {
     my ($env, $vmid, $snapname, $disks_ref) = @_;
 
     diag("Verifying Snapshot $snapname for VM $vmid");
+    _set_ctx(env => $env, vmid => $vmid, disks => $disks_ref, label => "verify_snapshot_${vmid}_$snapname");
 
     # 1. Config has snapshot (with retries for async write)
     # PVE uses "parent: snapname" format for snapshots
@@ -239,6 +255,7 @@ sub verify_template {
     my ($env, $vmid, $disks_ref) = @_;
     
     diag("Verifying VM $vmid is a TEMPLATE");
+    _set_ctx(env => $env, vmid => $vmid, disks => $disks_ref, label => "verify_template_$vmid");
     
     # 1. Check template status
     # 1. Check template status
@@ -264,6 +281,7 @@ sub verify_cloned {
     my ($env, $source_id, $target_id, $target_disks_ref) = @_;
     
     diag("Verifying Clone $target_id from $source_id");
+    _set_ctx(env => $env, vmid => $target_id, disks => $target_disks_ref, label => "verify_cloned_$target_id");
     
     # 1. Target config exists
     my $conf = `qm config $target_id 2>/dev/null`;
@@ -287,6 +305,7 @@ sub verify_logs {
     
     $vmid //= '';
     diag("Verifying Logs and Task status for $vmid");
+    _set_ctx(vmid => $vmid, label => "verify_logs_$vmid");
     
     # 1. Check Proxmox task status
     if ($task_upid) {
@@ -333,6 +352,7 @@ sub verify_logs {
 sub verify_fcmap_removed {
     my ($env, $source_vol, $snapname, $vmid) = @_;
     $vmid //= ($source_vol =~ /^vm-(\d+)-/ ? $1 : undef);
+    _set_ctx(env => $env, vmid => $vmid, disks => [$source_vol], label => "verify_fcmap_removed_${source_vol}_$snapname");
     
     my $snap_vol = _snapshot_name('PVE::Storage::Custom::IBMFlashSystem', $source_vol, $snapname);
     my $mappings = StorageHelpers::get_flashcopy_mappings($env, $source_vol);
@@ -353,6 +373,7 @@ sub verify_fcmap_active {
 
     $timeout //= 30;
     diag("Verifying FlashCopy mapping is active for $source_vol -> $target_vol");
+    _set_ctx(env => $env, vmid => $vmid, disks => [$source_vol, $target_vol], label => "verify_fcmap_active_${source_vol}_$target_vol");
 
     my $fcmap;
     my $state = '';

@@ -9,6 +9,7 @@ use lib qw(t/unit/lib t/integration/lib);
 
 use TestEnv;
 use VMScenario qw(create_q35_vm verify_full_lifecycle cleanup_vm);
+use TestAssert qw(ok_or_bail);
 use FCHelpers qw(skip_without_fc);
 
 # Skip if no FC connectivity
@@ -28,11 +29,11 @@ subtest 'Basic VM Lifecycle (EFI only)' => sub {
     
     # Step 1: Create VM with q35 + EFI + cloud-init (no SCSI disks)
     diag("Creating VM $vmid with q35 + EFI + cloud-init...");
-    ok(create_q35_vm($env, $vmid, [], { cloudinit => 1 }), "VM $vmid created with q35 + EFI + cloud-init");
+    ok_or_bail(create_q35_vm($env, $vmid, [], { cloudinit => 1 }), "VM $vmid created with q35 + EFI + cloud-init", { env => $env, vmid => $vmid });
     
     # Step 2: Verify full lifecycle
     my $disks = ['vm-9999-disk-0', 'vm-9999-cloudinit']; # EFI + cloud-init
-    ok(verify_full_lifecycle($env, $vmid, $disks), "VM $vmid full lifecycle verified");
+    ok_or_bail(verify_full_lifecycle($env, $vmid, $disks), "VM $vmid full lifecycle verified", { env => $env, vmid => $vmid, disks => $disks });
 };
 
 done_testing();

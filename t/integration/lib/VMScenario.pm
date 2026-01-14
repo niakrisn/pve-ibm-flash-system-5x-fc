@@ -57,7 +57,7 @@ sub create_q35_vm {
     }
     
     # Create VM
-    run_cmd_checked("qm create $vmid", @cmd);
+    run_cmd_checked("qm create $vmid", @cmd, { env => $env, vmid => $vmid });
     return 1;
 }
 
@@ -76,7 +76,7 @@ sub verify_full_lifecycle {
     
     # 2. Start VM
     diag("Starting VM $vmid...");
-    run_cmd_checked("qm start $vmid", 'qm', 'start', $vmid);
+    run_cmd_checked("qm start $vmid", 'qm', 'start', $vmid, { env => $env, vmid => $vmid, disks => $disks });
     
     # 3. Verify ACTIVATED state
     unless (StateVerifier::verify_activated($env, $vmid, $disks)) {
@@ -86,7 +86,7 @@ sub verify_full_lifecycle {
     
     # 4. Stop VM
     diag("Stopping VM $vmid...");
-    run_cmd_checked("qm stop $vmid", 'qm', 'stop', $vmid);
+    run_cmd_checked("qm stop $vmid", 'qm', 'stop', $vmid, { env => $env, vmid => $vmid, disks => $disks });
     
     # 5. Verify DEACTIVATED state
     unless (StateVerifier::verify_deactivated($env, $vmid, $disks)) {
@@ -96,7 +96,7 @@ sub verify_full_lifecycle {
     
     # 6. Destroy VM
     diag("Destroying VM $vmid...");
-    run_cmd_checked("qm destroy $vmid", 'qm', 'destroy', $vmid, '--destroy-unreferenced-disks', '1');
+    run_cmd_checked("qm destroy $vmid", 'qm', 'destroy', $vmid, '--destroy-unreferenced-disks', '1', { env => $env, vmid => $vmid, disks => $disks });
     
     # 7. Verify DESTROYED state
     unless (StateVerifier::verify_destroyed($env, $vmid, $disks)) {
@@ -162,7 +162,7 @@ sub create_vm_on_storage {
         push @cmd, "--ide$ide_slot", "$ci_storage:cloudinit";
     }
     
-    run_cmd_checked("qm create $vmid", @cmd);
+    run_cmd_checked("qm create $vmid", @cmd, { env => $env, vmid => $vmid });
     return 1;
 }
 
@@ -170,7 +170,7 @@ sub create_vm_on_storage {
 # Args: ($vmid)
 sub convert_to_template {
     my ($vmid) = @_;
-    run_cmd_checked("qm template $vmid", 'qm', 'template', $vmid);
+    run_cmd_checked("qm template $vmid", 'qm', 'template', $vmid, { vmid => $vmid });
     return 1;
 }
 

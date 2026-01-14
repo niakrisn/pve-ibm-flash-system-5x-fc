@@ -18,6 +18,7 @@ our @EXPORT_OK = qw(
     device_is_openable
     device_is_writable
     no_orphan_fc_devices
+    collect_evidence
     show_relevant_logs
     check_orphans_after_test
     run_cmd_checked
@@ -29,7 +30,7 @@ our @EXPORT_OK = qw(
 use lib 'PVE/Storage/Custom', 'PVE/Storage/Custom/IBMFlashSystem';
 
 use PVE::Storage::Custom::IBMFlashSystem::Client;
-use StorageHelpers qw(volume_exists_by_wwn);
+use StorageHelpers qw(volume_exists_by_wwn get_volume_uid get_host_mappings get_flashcopy_mappings);
 
 
 # ============================================================================
@@ -160,14 +161,34 @@ sub show_relevant_logs {
     return;
 }
 
+# Collect evidence for a failure (host + storage state + logs).
+sub collect_evidence {
+    my ($env, $label, $vmid, $disks_ref) = @_;
+    $label //= 'evidence';
+
+    print STDERR "=== Evidence: $label ===\n";
+    show_relevant_logs($vmid // $label);
+
+    _dump_host_state($label);
+    _dump_storage_state($env, $vmid, $disks_ref);
+
+    return;
+}
+
 # Run a command, verify exit code, and check PVE task status if UPID is returned.
 sub run_cmd_checked {
     my ($label, @cmd) = @_;
     $label //= 'command';
 
+    my $ctx;
+    if (@cmd && ref($cmd[-1]) eq 'HASH') {
+        $ctx = pop @cmd;
+    }
+
     my ($status, $output) = _run_cmd_capture(@cmd);
     if ($status != 0) {
         diag("Command output:\n$output") if $output;
+        collect_evidence($ctx ? $ctx->{env} : undef, $ctx->{label} // $label, $ctx->{vmid}, $ctx->{disks});
         BAIL_OUT("$label failed (exit=$status)");
     }
 
@@ -176,6 +197,7 @@ sub run_cmd_checked {
         my ($ok, $status_msg, $exitstatus) = _wait_for_task_ok($upid, 300);
         unless ($ok) {
             diag("Task output:\n$output") if $output;
+            collect_evidence($ctx ? $ctx->{env} : undef, $ctx->{label} // $label, $ctx->{vmid}, $ctx->{disks});
             BAIL_OUT("$label task failed (upid=$upid, status=$status_msg, exitstatus=" . ($exitstatus // '') . ")");
         }
     }
@@ -187,6 +209,11 @@ sub run_cmd_checked {
 sub run_cmd_expect_fail {
     my ($label, @cmd) = @_;
     $label //= 'command (expect fail)';
+
+    my $ctx;
+    if (@cmd && ref($cmd[-1]) eq 'HASH') {
+        $ctx = pop @cmd;
+    }
 
     my ($status, $output) = _run_cmd_capture(@cmd);
     my ($upid) = $output =~ /(UPID:[^\s]+)/;
@@ -206,13 +233,19 @@ sub run_cmd_expect_fail {
     }
 
     diag("Command output:\n$output") if $output;
+    collect_evidence($ctx ? $ctx->{env} : undef, $ctx->{label} // $label, $ctx->{vmid}, $ctx->{disks});
     BAIL_OUT("$label unexpectedly succeeded");
 }
 
 # Run a shell command string, verify exit code.
 sub run_shell_checked {
-    my ($label, $cmdline, $logfile) = @_;
+    my ($label, $cmdline, $logfile, $ctx) = @_;
     $label //= 'shell command';
+
+    if (ref($logfile) eq 'HASH' && !defined $ctx) {
+        $ctx = $logfile;
+        $logfile = undef;
+    }
 
     my ($status, $output) = _run_cmd_capture('bash', '-lc', $cmdline);
     if ($status != 0) {
@@ -221,6 +254,7 @@ sub run_shell_checked {
             diag("Log file ($logfile):\n$log") if $log;
         }
         diag("Command output:\n$output") if $output;
+        collect_evidence($ctx ? $ctx->{env} : undef, $ctx->{label} // $label, $ctx->{vmid}, $ctx->{disks});
         BAIL_OUT("$label failed (exit=$status)");
     }
 
@@ -238,6 +272,7 @@ sub run_shell_checked {
         unless ($ok) {
             diag("Task output:\n$output") if $output;
             diag("Log file ($logfile):\n$log_content") if $log_content;
+            collect_evidence($ctx ? $ctx->{env} : undef, $ctx->{label} // $label, $ctx->{vmid}, $ctx->{disks});
             BAIL_OUT("$label task failed (upid=$upid, status=$status_msg, exitstatus=" . ($exitstatus // '') . ")");
         }
     }
@@ -362,6 +397,85 @@ sub _run_cmd_capture {
     my $status = $? >> 8;
 
     return ($status, $output);
+}
+
+sub _dump_host_state {
+    my ($label) = @_;
+    $label //= 'host';
+
+    print STDERR "=== Host State ($label): lsblk IBM devices ===\n";
+    my $lsblk = `lsblk -dno NAME,VENDOR,MODEL,WWN,STATE 2>/dev/null | grep -E 'IBM|2145' || true`;
+    print STDERR ($lsblk || "No IBM 2145 devices found\n");
+
+    print STDERR "=== Host State ($label): multipath -ll (tail 200) ===\n";
+    my $mpath = `multipath -ll 2>/dev/null | tail -n 200`;
+    print STDERR ($mpath || "No multipath output\n");
+
+    print STDERR "=== Host State ($label): /dev/disk/by-id/scsi-3* (head 200) ===\n";
+    my $byid = `ls -l /dev/disk/by-id/scsi-3* 2>/dev/null | head -n 200`;
+    print STDERR ($byid || "No scsi-3* entries found\n");
+
+    return;
+}
+
+sub _dump_storage_state {
+    my ($env, $vmid, $disks_ref) = @_;
+
+    return unless $env;
+
+    my @disks;
+    if ($disks_ref && ref($disks_ref) eq 'ARRAY' && @$disks_ref) {
+        @disks = @$disks_ref;
+    } elsif ($vmid) {
+        @disks = _get_vm_disks_from_config($vmid, $env->{storeid});
+    }
+
+    return unless @disks;
+
+    print STDERR "=== Storage State: disks=[" . join(', ', @disks) . "] ===\n";
+    for my $disk (@disks) {
+        print STDERR "=== Storage State: $disk ===\n";
+
+        my $uid = eval { get_volume_uid($env, $disk) };
+        if ($@ || !$uid) {
+            print STDERR "UID: (unavailable) error=" . ($@ // 'unknown') . "\n";
+        } else {
+            print STDERR "UID: $uid\n";
+            my $uid_lower = lc($uid);
+            my $mp = `multipath -ll 3$uid_lower 2>&1`;
+            print STDERR "Multipath(3$uid_lower):\n" . ($mp || "no output\n");
+        }
+
+        my $mappings = eval { get_host_mappings($env, $disk) };
+        if ($@) {
+            print STDERR "Host mappings error: $@\n";
+        } else {
+            print STDERR "Host mappings: " . encode_json($mappings) . "\n";
+        }
+
+        my $fcmaps = eval { get_flashcopy_mappings($env, $disk) };
+        if ($@) {
+            print STDERR "FlashCopy mappings error: $@\n";
+        } else {
+            print STDERR "FlashCopy mappings: " . encode_json($fcmaps) . "\n";
+        }
+    }
+
+    return;
+}
+
+sub _get_vm_disks_from_config {
+    my ($vmid, $storeid) = @_;
+    return () unless $vmid && $storeid;
+
+    my $conf = `qm config $vmid 2>/dev/null`;
+    return () unless $conf;
+
+    my @disks;
+    while ($conf =~ /\Q$storeid\E:([^\s,]+)/g) {
+        push @disks, $1;
+    }
+    return @disks;
 }
 
 sub _wait_for_task_ok {
