@@ -8,6 +8,7 @@ use warnings;
 use JSON;
 
 use PVE::Storage::Custom::IBMFlashSystem::Client;
+use PVE::Storage::Custom::IBMFlashSystem::Error;
 use PVE::Storage::Custom::IBMFlashSystem::Logger;
 use PVE::Storage::Custom::IBMFlashSystem::Common;
 
@@ -280,16 +281,19 @@ sub create_fcmap {
             $class, $scfg, $storeid, 'POST', '/mkfcmap', $params);
     };
     if ($@) {
+        my $err = PVE::Storage::Custom::IBMFlashSystem::Error->wrap($@);
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
-            $class, $scfg, "Failed to create FlashCopy mapping (error=%s)", $@);
-        return undef;
+            $class, $scfg, "Failed to create FlashCopy mapping (error=%s)", $err);
+        return wantarray ? (undef, $err) : undef;
     }
 
     my $fcmap_id = _extract_fcmap_id($fcmap_result);
     unless (defined $fcmap_id) {
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
             $class, $scfg, "Failed to extract FlashCopy mapping ID from response");
-        return undef;
+        my $err = PVE::Storage::Custom::IBMFlashSystem::Error->new(
+            kind => 'api', area => 'fcmap', message => "Failed to extract FlashCopy mapping ID from response\n");
+        return wantarray ? (undef, $err) : undef;
     }
 
     my $source = $params->{source} // '';
@@ -299,7 +303,7 @@ sub create_fcmap {
         "FlashCopy mapping created (fcmap_id=%s, source=%s, target=%s)",
         $fcmap_id, $source, $target);
 
-    return $fcmap_id;
+    return wantarray ? ($fcmap_id, undef) : $fcmap_id;
 }
 
 # Wait for a resource to be completely deleted from the storage array
@@ -318,13 +322,14 @@ sub prestart_fcmap {
         1;
     };
     if (!$ok) {
+        my $err = PVE::Storage::Custom::IBMFlashSystem::Error->wrap($@);
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_error(
-            $class, $scfg, "Failed to prestart FlashCopy mapping (fcmap_id=%s, error=%s)", $fcmap_id, $@);
-        return undef;
+            $class, $scfg, "Failed to prestart FlashCopy mapping (fcmap_id=%s, error=%s)", $fcmap_id, $err);
+        return wantarray ? (undef, $err) : undef;
     }
 
     $ok = wait_for_fcmap_state($class, $scfg, $storeid, $fcmap_id, ['prepared'], $timeout_secs);
-    return $ok ? 1 : undef;
+    return wantarray ? ($ok ? 1 : undef, undef) : ($ok ? 1 : undef);
 }
 
 sub start_fcmap {
@@ -343,12 +348,12 @@ sub start_fcmap {
             $class, $scfg, $storeid, 'POST', "/startfcmap/$fcmap_id", $params);
         1;
     };
-    return 1 if $ok;
+    return wantarray ? (1, undef) : 1 if $ok;
 
-    my $error = $@ // 'unknown error';
+    my $error = PVE::Storage::Custom::IBMFlashSystem::Error->wrap($@);
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
         $class, $scfg, "Failed to start FlashCopy mapping (fcmap_id=%s, error=%s)", $fcmap_id, $error);
-    return undef;
+    return wantarray ? (undef, $error) : undef;
 }
 
 # Stop FlashCopy mapping (idempotent)
@@ -365,13 +370,14 @@ sub stop_fcmap {
     # Ignore errors if already stopped
     if (!$ok) {
         if ($@ !~ /already stopped|not active|not found|in the stopped state|stopping|CMMVC5897E|CMMVC5951E/i) {
+            my $err = PVE::Storage::Custom::IBMFlashSystem::Error->wrap($@);
             PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
-                $class, $scfg, "Failed to stop FlashCopy mapping (fcmap_id=%s, error=%s)", $fcmap_id, $@);
-            return undef;
+                $class, $scfg, "Failed to stop FlashCopy mapping (fcmap_id=%s, error=%s)", $fcmap_id, $err);
+            return wantarray ? (undef, $err) : undef;
         }
     }
 
-    return 1;
+    return wantarray ? (1, undef) : 1;
 }
 
 # Remove FlashCopy mapping (with force option)
@@ -391,13 +397,14 @@ sub remove_fcmap {
         1;
     };
     if (!$ok) {
+        my $err = PVE::Storage::Custom::IBMFlashSystem::Error->wrap($@);
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
-            $class, $scfg, "Failed to remove FlashCopy mapping (fcmap_id=%s, error=%s)", $fcmap_id, $@);
-        return undef;
+            $class, $scfg, "Failed to remove FlashCopy mapping (fcmap_id=%s, error=%s)", $fcmap_id, $err);
+        return wantarray ? (undef, $err) : undef;
     }
 
     $ok = wait_for_fcmap_state($class, $scfg, $storeid, $fcmap_id, ['absent'], $timeout_secs);
-    return $ok ? 1 : undef;
+    return wantarray ? ($ok ? 1 : undef, undef) : ($ok ? 1 : undef);
 }
 
 sub remove_dependent_fcmaps_from_list {

@@ -7,6 +7,7 @@ use strict;
 use warnings;
 use JSON;
 use PVE::Storage::Custom::IBMFlashSystem::Logger;
+use PVE::Storage::Custom::IBMFlashSystem::Error;
 
 # Import common functions
 use PVE::Storage::Custom::IBMFlashSystem::Common qw(_snapshot_name);
@@ -17,6 +18,21 @@ use PVE::Storage::Custom::IBMFlashSystem::Volume;
 # Snapshot Operations
 # ============================================================================
 
+sub _throw_snapshot_error {
+    my ($class, $message, $cause) = @_;
+    my $err = defined $cause ? PVE::Storage::Custom::IBMFlashSystem::Error->wrap($cause) : undef;
+    my %args = (
+        kind => 'snapshot',
+        area => 'snapshot',
+        message => $message,
+    );
+    if (defined $err) {
+        $args{cause} = $err;
+        $args{code} = $err->code if defined $err->code;
+    }
+    die PVE::Storage::Custom::IBMFlashSystem::Error->new(%args);
+}
+
 
 # Create a snapshot using FlashCopy
 sub volume_snapshot {
@@ -24,16 +40,17 @@ sub volume_snapshot {
 
     my $source_info = PVE::Storage::Custom::IBMFlashSystem::Volume::_get_volume_info(
         $class, $scfg, $storeid, $volname);
-    die "Volume '$volname' not found\n" unless $source_info;
+    _throw_snapshot_error($class, "Volume '$volname' not found\n") unless $source_info;
 
     my $snapshot_name = _snapshot_name($class, $volname, $snapname);
     my $snapshot_info = PVE::Storage::Custom::IBMFlashSystem::Volume::_get_volume_info(
         $class, $scfg, $storeid, $snapshot_name);
-    die "Snapshot volume '$snapshot_name' already exists\n" if $snapshot_info;
+    _throw_snapshot_error($class, "Snapshot volume '$snapshot_name' already exists\n") if $snapshot_info;
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Creating snapshot (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname);
 
-    my $pool_name = $scfg->{pool} or die "Pool not configured\n";
+    my $pool_name = $scfg->{pool};
+    _throw_snapshot_error($class, "Pool not configured\n") unless $pool_name;
 
     # Get source volume size - capacity is in bytes from API
     my $size_bytes = $source_info->{capacity} || 0;
@@ -50,31 +67,42 @@ sub volume_snapshot {
             thin => JSON::true,
         });
     unless (defined $vol_id) {
-        die "Failed to create snapshot volume '$snapshot_name'\n";
+        _throw_snapshot_error($class, "Failed to create snapshot volume '$snapshot_name'\n");
     }
 
     # Step 2: Create FlashCopy mapping using volume names (not IDs)
     # copyrate: 0 = copy-on-write (snapshot mode), data copied only on change
     # Note: Not specifying 'name' parameter - let IBM auto-generate to avoid length issues
-    $fcmap_id = PVE::Storage::Custom::IBMFlashSystem::FCMap::create_fcmap($class, $scfg, $storeid, {
+    my $fcmap_err;
+    ($fcmap_id, $fcmap_err) = PVE::Storage::Custom::IBMFlashSystem::FCMap::create_fcmap($class, $scfg, $storeid, {
         source => $volname,
         target => $snapshot_name,
         copyrate => 0,
     });
     unless (defined $fcmap_id) {
-        $error = "Failed to create FlashCopy mapping";
+        my $err = defined $fcmap_err ? PVE::Storage::Custom::IBMFlashSystem::Error->wrap($fcmap_err) : undef;
+        my $suffix = $err ? sprintf(" (%s): %s", ($err->is_client ? 'client' : 'fcmap'), $err) : '';
+        $error = "Failed to create FlashCopy mapping$suffix";
         goto CLEANUP_SNAPSHOT;
     }
 
     # Step 3: Prepare FlashCopy
-    unless (PVE::Storage::Custom::IBMFlashSystem::FCMap::prestart_fcmap($class, $scfg, $storeid, $fcmap_id, 60)) {
-        $error = "Failed to prepare FlashCopy mapping";
+    my ($prestart_ok, $prestart_err) = PVE::Storage::Custom::IBMFlashSystem::FCMap::prestart_fcmap(
+        $class, $scfg, $storeid, $fcmap_id, 60);
+    unless ($prestart_ok) {
+        my $err = defined $prestart_err ? PVE::Storage::Custom::IBMFlashSystem::Error->wrap($prestart_err) : undef;
+        my $suffix = $err ? sprintf(" (%s): %s", ($err->is_client ? 'client' : 'fcmap'), $err) : '';
+        $error = "Failed to prepare FlashCopy mapping$suffix";
         goto CLEANUP_FCMAP;
     }
 
     # Step 4: Start FlashCopy
-    unless (PVE::Storage::Custom::IBMFlashSystem::FCMap::start_fcmap($class, $scfg, $storeid, $fcmap_id)) {
-        $error = "Failed to start FlashCopy mapping";
+    my ($start_ok, $start_err) = PVE::Storage::Custom::IBMFlashSystem::FCMap::start_fcmap(
+        $class, $scfg, $storeid, $fcmap_id);
+    unless ($start_ok) {
+        my $err = defined $start_err ? PVE::Storage::Custom::IBMFlashSystem::Error->wrap($start_err) : undef;
+        my $suffix = $err ? sprintf(" (%s): %s", ($err->is_client ? 'client' : 'fcmap'), $err) : '';
+        $error = "Failed to start FlashCopy mapping$suffix";
         goto CLEANUP_FCMAP;
     }
 
@@ -103,7 +131,7 @@ CLEANUP_SNAPSHOT:
             { removehostmappings => 1, removefcmappings => 1 });
     };
 
-    die "$error\n";
+    _throw_snapshot_error($class, "$error\n");
 }
 
 # Rollback to a snapshot using FlashCopy restore (prestart -restore).
@@ -118,16 +146,16 @@ sub volume_snapshot_rollback {
 
     my $source_info = PVE::Storage::Custom::IBMFlashSystem::Volume::_get_volume_info(
         $class, $scfg, $storeid, $volname);
-    die "Volume '$volname' not found\n" unless $source_info;
+    _throw_snapshot_error($class, "Volume '$volname' not found\n") unless $source_info;
 
     my $snapshot_name = _snapshot_name($class, $volname, $snapname);
     my $snapshot_info = PVE::Storage::Custom::IBMFlashSystem::Volume::_get_volume_info(
         $class, $scfg, $storeid, $snapshot_name);
-    die "Snapshot volume '$snapshot_name' not found\n" unless $snapshot_info;
+    _throw_snapshot_error($class, "Snapshot volume '$snapshot_name' not found\n") unless $snapshot_info;
 
     my $mapping_ok = PVE::Storage::Custom::IBMFlashSystem::FCMap::validate_snapshot_source_mapping(
         $class, $scfg, $storeid, $volname, $snapshot_name, $snapshot_info);
-    die "Snapshot mapping validation failed for '$snapshot_name'\n" unless $mapping_ok;
+    _throw_snapshot_error($class, "Snapshot mapping validation failed for '$snapshot_name'\n") unless $mapping_ok;
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Rolling back to snapshot (restore mapping, keeping existing snapshots) (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname);
 
@@ -135,7 +163,9 @@ sub volume_snapshot_rollback {
     PVE::Storage::Custom::IBMFlashSystem::Common::_task_log($class, $scfg, 'info', "Rollback: Creating FlashCopy Map (source=$snapshot_name target=$volname)");
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Creating temporary reverse mapping for restore (source=%s, target=%s)", $snapshot_name, $volname);
 
-    my $reverse_fcmap_id = PVE::Storage::Custom::IBMFlashSystem::FCMap::create_fcmap($class, $scfg, $storeid, {
+    my $reverse_fcmap_err;
+    my $reverse_fcmap_id;
+    ($reverse_fcmap_id, $reverse_fcmap_err) = PVE::Storage::Custom::IBMFlashSystem::FCMap::create_fcmap($class, $scfg, $storeid, {
         source => $snapshot_name,
         target => $volname,
         copyrate => 150,
@@ -143,7 +173,9 @@ sub volume_snapshot_rollback {
         autodelete => JSON::true,
     });
     unless (defined $reverse_fcmap_id) {
-        die "Failed to create reverse FlashCopy mapping\n";
+        my $err = defined $reverse_fcmap_err ? PVE::Storage::Custom::IBMFlashSystem::Error->wrap($reverse_fcmap_err) : undef;
+        my $suffix = $err ? sprintf(" (%s): %s", ($err->is_client ? 'client' : 'fcmap'), $err) : '';
+        _throw_snapshot_error($class, "Failed to create reverse FlashCopy mapping$suffix\n", $reverse_fcmap_err);
     }
 
     # Step 3: Start the reverse mapping (data flows from snapshot to disk)
@@ -152,13 +184,21 @@ sub volume_snapshot_rollback {
 
     my $restore_error;
     PVE::Storage::Custom::IBMFlashSystem::Common::_task_log($class, $scfg, 'info', "Rollback: Preparing FlashCopy Start (fcmap=$reverse_fcmap_id)");
-    unless (PVE::Storage::Custom::IBMFlashSystem::FCMap::prestart_fcmap($class, $scfg, $storeid, $reverse_fcmap_id, 60, { restore => JSON::true })) {
-        $restore_error = "Failed to prepare FlashCopy mapping for restore";
+    my ($reverse_prestart_ok, $reverse_prestart_err) = PVE::Storage::Custom::IBMFlashSystem::FCMap::prestart_fcmap(
+        $class, $scfg, $storeid, $reverse_fcmap_id, 60, { restore => JSON::true });
+    unless ($reverse_prestart_ok) {
+        my $err = defined $reverse_prestart_err ? PVE::Storage::Custom::IBMFlashSystem::Error->wrap($reverse_prestart_err) : undef;
+        my $suffix = $err ? sprintf(" (%s): %s", ($err->is_client ? 'client' : 'fcmap'), $err) : '';
+        $restore_error = "Failed to prepare FlashCopy mapping for restore$suffix";
         goto CLEANUP_RESTORE;
     }
     PVE::Storage::Custom::IBMFlashSystem::Common::_task_log($class, $scfg, 'info', "Rollback: Starting FlashCopy Map (fcmap=$reverse_fcmap_id)");
-    unless (PVE::Storage::Custom::IBMFlashSystem::FCMap::start_fcmap($class, $scfg, $storeid, $reverse_fcmap_id, { restore => JSON::true })) {
-        $restore_error = "Failed to start FlashCopy mapping for restore";
+    my ($reverse_start_ok, $reverse_start_err) = PVE::Storage::Custom::IBMFlashSystem::FCMap::start_fcmap(
+        $class, $scfg, $storeid, $reverse_fcmap_id, { restore => JSON::true });
+    unless ($reverse_start_ok) {
+        my $err = defined $reverse_start_err ? PVE::Storage::Custom::IBMFlashSystem::Error->wrap($reverse_start_err) : undef;
+        my $suffix = $err ? sprintf(" (%s): %s", ($err->is_client ? 'client' : 'fcmap'), $err) : '';
+        $restore_error = "Failed to start FlashCopy mapping for restore$suffix";
         goto CLEANUP_RESTORE;
     }
 
@@ -183,7 +223,7 @@ CLEANUP_RESTORE:
         PVE::Storage::Custom::IBMFlashSystem::FCMap::stop_fcmap($class, $scfg, $storeid, $reverse_fcmap_id);
         PVE::Storage::Custom::IBMFlashSystem::FCMap::remove_fcmap($class, $scfg, $storeid, $reverse_fcmap_id);
     };
-    die "Rollback failed during restore phase: $restore_error\n";
+    _throw_snapshot_error($class, "Rollback failed during restore phase: $restore_error\n", $restore_error);
 }
 
 # Delete a snapshot with idempotency (success if already deleted)
@@ -192,18 +232,18 @@ sub volume_snapshot_delete {
 
     my $source_info = PVE::Storage::Custom::IBMFlashSystem::Volume::_get_volume_info(
         $class, $scfg, $storeid, $volname);
-    die "Volume '$volname' not found\n" unless $source_info;
+    _throw_snapshot_error($class, "Volume '$volname' not found\n") unless $source_info;
 
     my $snapshot_name = _snapshot_name($class, $volname, $snapname);
     my $snapshot_info = PVE::Storage::Custom::IBMFlashSystem::Volume::_get_volume_info(
         $class, $scfg, $storeid, $snapshot_name);
-    die "Snapshot volume '$snapshot_name' not found\n" unless $snapshot_info;
+    _throw_snapshot_error($class, "Snapshot volume '$snapshot_name' not found\n") unless $snapshot_info;
 
     my $as_source = PVE::Storage::Custom::IBMFlashSystem::FCMap::list_fcmaps_as_source(
         $class, $scfg, $storeid, $snapshot_name);
-    die "Failed to check if snapshot is source for clones\n" unless defined $as_source;
+    _throw_snapshot_error($class, "Failed to check if snapshot is source for clones\n") unless defined $as_source;
     if (@$as_source) {
-        die "Cannot delete snapshot '$snapshot_name': is source for active clones\n";
+        _throw_snapshot_error($class, "Cannot delete snapshot '$snapshot_name': is source for active clones\n");
     }
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info(
@@ -227,7 +267,7 @@ sub volume_snapshot_delete {
                 $class, $scfg, $storeid, $fc_id, 3600, "Deleting snapshot");
             
             unless ($result) {
-                die "Timeout waiting for FlashCopy mapping to stop\n";
+                _throw_snapshot_error($class, "Timeout waiting for FlashCopy mapping to stop\n");
             }
         }
 
@@ -236,7 +276,7 @@ sub volume_snapshot_delete {
             $class, $scfg, $storeid, $fc_id, 1);  # force=1
         
         unless ($done) {
-            die "Failed to remove FlashCopy mapping for snapshot\n";
+            _throw_snapshot_error($class, "Failed to remove FlashCopy mapping for snapshot\n");
         }
     }
 
@@ -250,7 +290,7 @@ sub volume_snapshot_delete {
         return;
     }
     if (!$delete_result) {
-        die "Failed to delete snapshot volume '$snapshot_name'\n";
+        _throw_snapshot_error($class, "Failed to delete snapshot volume '$snapshot_name'\n");
     }
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info(
@@ -287,7 +327,7 @@ sub _wait_for_fcmap_state_with_progress {
                     sprintf("%sfcmap=%s status=missing", $prefix, $fcmap_id));
                 return { status => 'missing' };
             }
-            die $error;
+            _throw_snapshot_error($class, "$error", $error);
         }
 
         if (!$fcmap || ref($fcmap) ne 'HASH') {
@@ -297,7 +337,7 @@ sub _wait_for_fcmap_state_with_progress {
                     sprintf("%sfcmap=%s status=missing", $prefix, $fcmap_id));
                 return { status => 'missing' };
             }
-            die "FlashCopy mapping not found (fcmap_id=$fcmap_id)\n";
+            _throw_snapshot_error($class, "FlashCopy mapping not found (fcmap_id=$fcmap_id)\n");
         }
 
         my $status = $fcmap->{status} // '';
@@ -330,8 +370,8 @@ sub _wait_for_fcmap_state_with_progress {
         sleep 1;
     }
 
-    die "Timeout waiting for fcmap $fcmap_id to reach states: "
-        . join(', ', @$expected_states) . " (waited " . (time() - $start_time) . "s)\n";
+    _throw_snapshot_error($class, "Timeout waiting for fcmap $fcmap_id to reach states: "
+        . join(', ', @$expected_states) . " (waited " . (time() - $start_time) . "s)\n");
 }
 
 1;

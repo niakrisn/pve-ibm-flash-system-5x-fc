@@ -13,6 +13,7 @@ use URI;
 use PVE::Tools qw(file_get_contents file_set_contents file_read_firstline);
 
 use PVE::Storage::Custom::IBMFlashSystem::Logger;
+use PVE::Storage::Custom::IBMFlashSystem::Error;
 
 # ============================================================================
 # Public API
@@ -21,13 +22,13 @@ use PVE::Storage::Custom::IBMFlashSystem::Logger;
 # Authentication
 sub authenticate {
     my ($class, $scfg, $storeid, $password) = @_;
-    die "No storage ID provided\n" unless $storeid;
+    _throw_error($class, kind => 'client', message => "No storage ID provided\n") unless $storeid;
     return _authenticate($class, $scfg, $storeid, $password);
 }
 
 sub api_request {
     my ($class, $scfg, $storeid, $method, $endpoint, $data, $options) = @_;
-    die "No storage ID provided\n" unless $storeid;
+    _throw_error($class, kind => 'client', message => "No storage ID provided\n") unless $storeid;
     return _api_request($class, $scfg, $storeid, $method, $endpoint, $data, $options);
 }
 
@@ -187,7 +188,7 @@ sub on_delete_hook {
 # Get token cache file path (storage-specific to avoid conflicts)
 sub _get_token_path {
     my ($class, $storeid) = @_;
-    die "No storeid for token path\n" unless $storeid;
+    _throw_error($class, kind => 'client', area => 'token', message => "No storeid for token path\n") unless $storeid;
     return "/etc/pve/priv/storage/${storeid}.token";
 }
 
@@ -217,7 +218,7 @@ sub _set_cached_token {
 
     eval { file_set_contents($token_path, $token, 0600) };
     if ($@) {
-        die "Failed to write token cache: $@\n";
+        _throw_error($class, kind => 'client', area => 'token', message => "Failed to write token cache: $@\n");
     }
 
     return;
@@ -260,6 +261,74 @@ sub _normalize_response {
     return $result;
 }
 
+# Extract error info from JSON or text response
+sub _extract_error_info {
+    my ($class, $content) = @_;
+
+    return (undef, '') unless defined $content;
+
+    my $data;
+    my $error_code;
+    my $error_message;
+
+    if (length $content) {
+        $data = eval { decode_json($content) };
+        if ($@) {
+            $error_message = $content;
+        } else {
+            if (ref($data) eq 'HASH') {
+                $error_code = $data->{error_code} // $data->{code};
+                $error_message = $data->{message} // $data->{error} // $data->{description};
+            } elsif (ref($data) eq 'ARRAY') {
+                my $first = $data->[0];
+                if (ref($first) eq 'HASH') {
+                    $error_code = $first->{error_code} // $first->{code};
+                    $error_message = $first->{message} // $first->{error} // $first->{description};
+                }
+            }
+            $error_message //= $content;
+        }
+    } else {
+        $error_message = '';
+    }
+
+    if (!$error_code && $error_message && $error_message =~ /(CMMVC\d+E)/i) {
+        $error_code = uc($1);
+    }
+
+    return ($error_code, $error_message);
+}
+
+sub _matches_error_codes {
+    my ($class, $error_code, $error_message, $codes) = @_;
+
+    return 0 unless $codes && ref($codes) eq 'ARRAY';
+
+    for my $code (@$codes) {
+        next unless defined $code;
+        return 1 if (defined $error_code && $error_code =~ /\Q$code\E/i);
+        return 1 if (defined $error_message && $error_message =~ /\Q$code\E/i);
+    }
+
+    return 0;
+}
+
+sub _decode_json_response {
+    my ($class, $endpoint, $response, $content) = @_;
+
+    return {} unless defined $content && length $content;
+
+    my $result = eval { decode_json($content) };
+    if ($@) {
+        my $status = $response->status_line;
+        _throw_error($class, kind => 'client', area => _area_from_endpoint($endpoint),
+            endpoint => $endpoint, status => $status,
+            message => "Failed to decode JSON response (endpoint=$endpoint, status=$status): $@\n");
+    }
+
+    return $result;
+}
+
 # Initialize LWP::UserAgent
 sub _init_ua {
     my ($class, $scfg) = @_;
@@ -284,7 +353,7 @@ sub _init_ua {
 sub _build_url {
     my ($class, $scfg, $endpoint) = @_;
 
-    my $portal = $scfg->{portal} || die "Portal not configured\n";
+    my $portal = $scfg->{portal} || _throw_error($class, kind => 'client', area => 'config', message => "Portal not configured\n");
     $portal =~ s/^https?:\/\///;  # Remove protocol if present
 
     my $port = $scfg->{port};
@@ -331,7 +400,7 @@ sub _get_password {
 sub _authenticate {
     my ($class, $scfg, $storeid, $password) = @_;
 
-    die "No storage ID provided (in _authenticate)\n" unless $storeid;
+    _throw_error($class, kind => 'client', area => 'auth', message => "No storage ID provided (in _authenticate)\n") unless $storeid;
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "ENTER _authenticate (storeid=%s)", $storeid);
 
@@ -349,7 +418,8 @@ sub _authenticate {
     # Use provided password or fallback to storage file
     my $auth_password = $password // _get_password($class, $scfg, $storeid);
     
-    die "Password not found. Please set password using configuration update.\n" unless $auth_password;
+    _throw_error($class, kind => 'client', area => 'auth',
+        message => "Password not found. Please set password using configuration update.\n") unless $auth_password;
     
     $request->header('X-Auth-Password' => $auth_password);
 
@@ -371,7 +441,7 @@ sub _authenticate {
             "Authentication failed (storeid=%s, endpoint=/auth, status=%s, duration=%dms)",
             $storeid, $response->status_line, int($duration));
 
-        die "Authentication failed: $error_msg\n";
+        _throw_error($class, kind => 'client', area => 'auth', message => "Authentication failed: $error_msg\n");
     }
 
     my $token = $response->header('X-Auth-Token');
@@ -385,10 +455,11 @@ sub _authenticate {
             PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg,
                 "Failed to parse authentication response (storeid=%s, endpoint=/auth, error=%s, duration=%dms)",
                 $storeid, $@, int($duration));
-            die "Failed to parse authentication response: $@\n";
+            _throw_error($class, kind => 'client', area => 'auth', message => "Failed to parse authentication response: $@\n");
         }
 
-        $token = $data->{token} or die "No token in authentication response\n";
+        $token = $data->{token}
+            or _throw_error($class, kind => 'client', area => 'auth', message => "No token in authentication response\n");
     }
 
     # Cache the token
@@ -410,9 +481,11 @@ sub _api_request {
     my ($class, $scfg, $storeid, $method, $endpoint, $data, $options) = @_;
 
     $method = uc($method);
-    die "Invalid HTTP method: $method\n" unless $method =~ /^(GET|POST|PUT|DELETE)$/;
+    _throw_error($class, kind => 'client', area => 'request', message => "Invalid HTTP method: $method\n")
+        unless $method =~ /^(GET|POST|PUT|DELETE)$/;
 
-    die "No storage ID provided (endpoint=$endpoint, method=$method)\n" unless $storeid;
+    _throw_error($class, kind => 'client', area => 'request',
+        message => "No storage ID provided (endpoint=$endpoint, method=$method)\n") unless $storeid;
 
     my $start_time = time;
 
@@ -432,6 +505,17 @@ sub _api_request {
     my $response;
     my $busy_attempts = 0;
     my $max_busy_retries = 5;
+    my $expect = $options->{expect} if $options;
+    my @busy_codes = qw(
+        CMMVC5701E
+        CMMVC5906E
+        CMMVC6470E
+        CMMVC6048E
+        CMMVC6050E
+        CMMVC6021E
+        CMMVC6022E
+        CMMVC6023E
+    );
 
     REQUEST_LOOP: while (1) {
         $attempts = 0;
@@ -457,16 +541,30 @@ sub _api_request {
 
             $response = $ua->request($request);
 
-            # Check for authentication errors
             my $status_code = $response->code;
             my $content = $response->decoded_content || '';
 
-            if ($status_code == 401 || $status_code == 403 || $content =~ /InvalidToken/i) {
+            # Check for authentication errors first by status code
+            if ($status_code == 401 || $status_code == 403) {
                 PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
                     "Token expired, re-authenticating (storeid=%s, endpoint=%s, status=%d, attempt=%d)",
                     $storeid, $endpoint, $status_code, $attempts + 1);
 
                 # Clear cache and re-authenticate
+                _clear_cached_token($class, $storeid);
+                $token = _authenticate($class, $scfg, $storeid);
+
+                $attempts++;
+                sleep($retry_delay) if $attempts <= $max_retries;
+                next;
+            }
+
+            # Some IBM responses encode invalid token in body without 401/403
+            if ($content =~ /InvalidToken/i) {
+                PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
+                    "Token invalid per response body, re-authenticating (storeid=%s, endpoint=%s, status=%d, attempt=%d)",
+                    $storeid, $endpoint, $status_code, $attempts + 1);
+
                 _clear_cached_token($class, $storeid);
                 $token = _authenticate($class, $scfg, $storeid);
 
@@ -485,26 +583,26 @@ sub _api_request {
             PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg,
                 "API request failed after %d authentication retries (storeid=%s, endpoint=%s, duration=%dms)",
                 $max_retries, $storeid, $endpoint, int($duration));
-            die "API request failed (endpoint=$endpoint) after $max_retries authentication retries\n";
+            _throw_error($class, kind => 'client', area => _area_from_endpoint($endpoint),
+                endpoint => $endpoint, method => $method,
+                message => "API request failed (endpoint=$endpoint) after $max_retries authentication retries\n");
         }
 
         # Parse response
         unless ($response->is_success) {
             my $status = $response->status_line;
+            my $status_code = $response->code;
             my $content = $response->decoded_content || '';
+            my ($error_code, $error_message) = _extract_error_info($class, $content);
 
-            if ($content =~ /CMMVC(?:6048E|6050E|6021E|6022E|6023E)/i && $busy_attempts < $max_busy_retries) {
-                $busy_attempts++;
-                PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
-                    "API request failed with BUSY code, retrying (storeid=%s, endpoint=%s, attempt=%d/%d)",
-                    $storeid, $endpoint, $busy_attempts, $max_busy_retries);
-                sleep(1);
-                next REQUEST_LOOP;
+            if ($options && _matches_error_codes($class, $error_code, $error_message, $options->{ignore_codes})) {
+                PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
+                    "Ignoring API error (storeid=%s, endpoint=%s, method=%s, code=%s)",
+                    $storeid, $endpoint, $method, $error_code // 'unknown');
+                return _normalize_response(undef, $expect);
             }
 
-            # Retry on 50x server errors (transient failures)
-            my $status_code = $response->code;
-            if ($status_code >= 500 && $status_code < 600 && $busy_attempts < $max_busy_retries) {
+            if ($status_code =~ /^(502|503|504)$/ && $busy_attempts < $max_busy_retries) {
                 $busy_attempts++;
                 PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
                     "API request failed with server error %d, retrying (storeid=%s, endpoint=%s, attempt=%d/%d)",
@@ -513,11 +611,30 @@ sub _api_request {
                 next REQUEST_LOOP;
             }
 
+            if ($status_code == 500) {
+                PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
+                    "API request failed with server error 500, not retrying (storeid=%s, endpoint=%s)",
+                    $storeid, $endpoint);
+            }
+
+            if (_matches_error_codes($class, $error_code, $error_message, \@busy_codes)
+                && $busy_attempts < $max_busy_retries) {
+                $busy_attempts++;
+                PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
+                    "API request failed with BUSY code, retrying (storeid=%s, endpoint=%s, attempt=%d/%d)",
+                    $storeid, $endpoint, $busy_attempts, $max_busy_retries);
+                sleep(1);
+                next REQUEST_LOOP;
+            }
+
             my $duration = (time - $start_time) * 1000;
             PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg,
-                "API request failed (storeid=%s, endpoint=%s, method=%s, status=%s, duration=%dms)",
-                $storeid, $endpoint, $method, $status, int($duration));
-            die "API request failed (endpoint=$endpoint, method=$method): $status - $content\n";
+                "API request failed (storeid=%s, endpoint=%s, method=%s, status=%s, code=%s, duration=%dms)",
+                $storeid, $endpoint, $method, $status, $error_code // 'unknown', int($duration));
+            my $detail = $error_message // $content;
+            _throw_error($class, kind => 'api', area => _area_from_endpoint($endpoint),
+                endpoint => $endpoint, method => $method, status => $status_code, code => $error_code,
+                message => "API request failed (endpoint=$endpoint, method=$method): $status - $detail\n");
         }
 
         last;
@@ -532,11 +649,22 @@ sub _api_request {
         $storeid, $endpoint, $response->code, int($duration));
 
     # Decode JSON if there's content
-    my $result = $content ? decode_json($content) : {};
+    my $result = _decode_json_response($class, $endpoint, $response, $content);
 
     # Normalize response based on expected type
-    my $expect = $options->{expect} if $options;
     return _normalize_response($result, $expect);
+}
+
+sub _throw_error {
+    my ($class, %args) = @_;
+    die PVE::Storage::Custom::IBMFlashSystem::Error->new(%args);
+}
+
+sub _area_from_endpoint {
+    my ($endpoint) = @_;
+    return undef unless defined $endpoint;
+    return 'fcmap' if $endpoint =~ m{/(?:lsvdiskfcmappings|lsvdiskdependentmaps|lsrmvdiskdependentmaps|lsfcmap|mkfcmap|prestartfcmap|startfcmap|stopfcmap|rmfcmap)\b}i;
+    return undef;
 }
 
 1;

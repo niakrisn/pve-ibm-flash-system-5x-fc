@@ -7,6 +7,7 @@ use strict;
 use warnings;
 
 use PVE::Storage::Custom::IBMFlashSystem::Logger;
+use PVE::Storage::Custom::IBMFlashSystem::Error;
 
 use Exporter 'import';
 our @EXPORT_OK = qw(_get_hostname _snapshot_name _task_log error_code_matches is_not_found_error);
@@ -90,10 +91,19 @@ sub error_code_matches {
 
     return 0 unless defined $error;
 
+    my $err = PVE::Storage::Custom::IBMFlashSystem::Error->wrap($error);
+    my $error_code = $err->code;
+    my $message = $err->message;
+
     for my $code (@codes) {
-        if ($error =~ /$code/i) {
+        if (defined $error_code && $error_code =~ /$code/i) {
             PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, undef,
-                "Error code match found: %s in error: %s", $code, substr($error, 0, 100));
+                "Error code match found: %s in error: %s", $code, substr($message // '', 0, 100));
+            return 1;
+        }
+        if (defined $message && $message =~ /$code/i) {
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, undef,
+                "Error code match found: %s in error: %s", $code, substr($message, 0, 100));
             return 1;
         }
     }
