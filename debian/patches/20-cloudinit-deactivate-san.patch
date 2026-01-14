@@ -6,8 +6,8 @@
      rmtree($path);
 +
 +    # Deactivate volume if VM is not running - important for SAN storage
-+    my $running = PVE::QemuServer::check_running($vmid);
-+    if (!$running) {
++    my $is_vm_running = PVE::QemuServer::check_running($vmid);
++    if (!$is_vm_running) {
 +        if (PVE::Storage::Plugin::storage_is_san($scfg->{type})) {
 +            eval { $plugin->deactivate_volume($storeid, $scfg, $volname); };
 +            warn $@ if $@;

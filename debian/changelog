@@ -1,10 +1,11 @@
+pve-ibm-fs5x-fc-plugin (1.5.1) unstable; urgency=medium
+
+  * Fixed Perl warning "masks earlier declaration" in Cloudinit.pm patch
+  * Renamed $running to $is_vm_running in 20-cloudinit-deactivate-san.patch
+
+ -- Nikolai Kozlov <n.kozlov@veeam.com>  Wed, 14 Jan 2026 16:30:00 +0300
+
 pve-ibm-fs5x-fc-plugin (1.5.0) unstable; urgency=medium
-
-  * Updated patching workflow with ordered patch series and Docker tooling
-  * Consolidated Docker images for patching/testing/builds
-  * Refreshed patching documentation and test workflow
-
- -- Nikolai Kozlov <n.kozlov@veeam.com>  Wed, 14 Jan 2026 15:12:35 +0300
 
 pve-ibm-fs5x-fc-plugin (1.4.0) unstable; urgency=medium
 
