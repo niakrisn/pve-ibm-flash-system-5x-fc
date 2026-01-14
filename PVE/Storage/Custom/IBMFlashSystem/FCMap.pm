@@ -323,7 +323,7 @@ sub prestart_fcmap {
     };
     if (!$ok) {
         my $err = PVE::Storage::Custom::IBMFlashSystem::Error->wrap($@);
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error(
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
             $class, $scfg, "Failed to prestart FlashCopy mapping (fcmap_id=%s, error=%s)", $fcmap_id, $err);
         return wantarray ? (undef, $err) : undef;
     }

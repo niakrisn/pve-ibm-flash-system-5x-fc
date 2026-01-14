@@ -437,7 +437,7 @@ sub _authenticate {
             $error_msg = "Authentication headers missing or invalid (plugin bug)";
         }
 
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg,
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
             "Authentication failed (storeid=%s, endpoint=/auth, status=%s, duration=%dms)",
             $storeid, $response->status_line, int($duration));
 
@@ -452,7 +452,7 @@ sub _authenticate {
         my $data = eval { decode_json($content) };
         if ($@) {
             my $duration = (time - $start_time) * 1000;
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg,
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
                 "Failed to parse authentication response (storeid=%s, endpoint=/auth, error=%s, duration=%dms)",
                 $storeid, $@, int($duration));
             _throw_error($class, kind => 'client', area => 'auth', message => "Failed to parse authentication response: $@\n");
@@ -580,7 +580,7 @@ sub _api_request {
         # Check if we exhausted retries
         if ($attempts > $max_retries) {
             my $duration = (time - $start_time) * 1000;
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg,
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
                 "API request failed after %d authentication retries (storeid=%s, endpoint=%s, duration=%dms)",
                 $max_retries, $storeid, $endpoint, int($duration));
             _throw_error($class, kind => 'client', area => _area_from_endpoint($endpoint),
@@ -628,7 +628,7 @@ sub _api_request {
             }
 
             my $duration = (time - $start_time) * 1000;
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg,
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
                 "API request failed (storeid=%s, endpoint=%s, method=%s, status=%s, code=%s, duration=%dms)",
                 $storeid, $endpoint, $method, $status, $error_code // 'unknown', int($duration));
             my $detail = $error_message // $content;
@@ -647,6 +647,27 @@ sub _api_request {
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg,
         "API response received (storeid=%s, endpoint=%s, status=%d, duration=%dms)",
         $storeid, $endpoint, $response->code, int($duration));
+
+    if (defined $content && length $content) {
+        my $body_log;
+        if ($endpoint =~ m{/auth}i) {
+            $body_log = '[redacted]';
+        } else {
+            my $decoded = eval { decode_json($content) };
+            if ($@) {
+                $body_log = $content;
+            } else {
+                $body_log = PVE::Storage::Custom::IBMFlashSystem::Logger::format_body($class, $decoded);
+            }
+        }
+        $body_log =~ s/[\r\n]+/ /g if defined $body_log;
+        if (defined $body_log && length $body_log > 1024) {
+            $body_log = substr($body_log, 0, 1024) . '...';
+        }
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg,
+            "API response body (storeid=%s, endpoint=%s, status=%d, body=%s)",
+            $storeid, $endpoint, $response->code, $body_log);
+    }
 
     # Decode JSON if there's content
     my $result = _decode_json_response($class, $endpoint, $response, $content);

@@ -9,8 +9,13 @@ This workflow enforces the **Fail-Fast** principle. You must follow this EXACTLY
 ## 1. Preparation
 1.  **Sync/Install Tests**: Рекомендуется использовать пакетную установку:
     ```bash
-    make package-docker-tests
-    # ... деплой пакета ...
+    make package-docker
+    # ... деплой пакета тестов из output/ ...
+    scp -i ~/.ssh/id_ed25519 output/pve-ibm-fs5x-fc-plugin-tests_*.deb root@10.4.0.122:/tmp/
+    ssh -i ~/.ssh/id_ed25519 root@10.4.0.122 "dpkg -i /tmp/pve-ibm-fs5x-fc-plugin-tests_*.deb"
+    # ... деплой основного пакета плагина из output/ ...
+    scp -i ~/.ssh/id_ed25519 output/pve-ibm-fs5x-fc-plugin_*.deb root@10.4.0.122:/tmp/
+    ssh -i ~/.ssh/id_ed25519 root@10.4.0.122 "dpkg -i /tmp/pve-ibm-fs5x-fc-plugin_*.deb"
     ```
 
 ## 2. Execution (FAIL-FAST)

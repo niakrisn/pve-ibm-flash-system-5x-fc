@@ -1,0 +1,6 @@
+00-storage-plugin-san-flag.patch
+10-ovmf-deactivate-san-vars.patch
+20-cloudinit-deactivate-san.patch
+30-qemuserver-fullclone-deactivate.patch
+40-api2-qemu-cloudinit-deactivate.patch
+pve-qemuserver-cleanup.patch

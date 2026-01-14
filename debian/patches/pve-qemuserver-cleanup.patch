@@ -1,0 +1,15 @@
+--- PVE/QemuServer.pm	2026-01-14 12:40:08
++++ PVE/QemuServer.pm	2026-01-14 12:40:23
+@@ -5956,6 +5956,12 @@
+         }
+         delete $conf->@{qw(lock vmstate running-nets-host-mtu runningmachine runningcpu)};
+         PVE::QemuConfig->write_config($vmid, $conf);
++    } elsif ($statefile && $statefile_is_a_volume) {
++        if (my $vmstate = $params->{statefile}) {
++            print "Started VM with state, deactivating state volume\n";
++            eval { PVE::Storage::deactivate_volumes($storecfg, [$vmstate]); };
++            warn $@ if $@;
++        }
+     } elsif (!$conf->{vmstate}) {
+         remove_left_over_vmstate_opts($vmid, $conf);
+     }

@@ -4,6 +4,12 @@ PLUGIN_FILE := PVE/Storage/Custom/IBMFlashSystem.pm
 VERSION := $(shell head -n 1 debian/changelog | cut -d'(' -f2 | cut -d')' -f1)
 
 .PHONY: all package package-docker clean install-plugin install-package install
+.PHONY: patch-check tools-image
+
+TEST_HOST ?= 10.4.0.122
+SSH_KEY ?= $(HOME)/.ssh/id_ed25519
+PATCH_VERSIONS ?= pkg-versions.txt
+SKIP_SSH ?= 0
 
 all: package
 
@@ -17,15 +23,17 @@ package:
 	mv ../$(PACKAGE_NAME)_*.buildinfo output/
 	@echo "✓ Built: output/"
 
-# Build deb package using Docker with standard debhelper tools
-docker-image:
-	@docker build -t $(PACKAGE_NAME)-builder -f Dockerfile.build .
+# Build a single tools image for build + patch workflows
+tools-image:
+	@docker build -t $(PACKAGE_NAME)-tools -f Dockerfile --build-arg SUITE=trixie .
 
-package-docker: docker-image
+docker-image: tools-image
+
+package-docker: tools-image
 	@echo "Building packages in Docker..."
 	@mkdir -p output
 	@docker run --rm -v "$$(pwd):/build/source" -w /build/source \
-		$(PACKAGE_NAME)-builder bash -c \
+		$(PACKAGE_NAME)-tools bash -c \
 		"debuild -us -uc -b && \
 		 mkdir -p /build/source/output && \
 		 mv ../$(PACKAGE_NAME)* /build/source/output/"
@@ -54,6 +62,22 @@ install-package: package-docker
 	@echo "✓ Package installed"
 
 install: install-package
+
+patch-check:
+	@set -e; \
+	if [ "$(SKIP_SSH)" = "1" ]; then \
+		echo "SKIP_SSH=1, using existing $(PATCH_VERSIONS)"; \
+	elif ssh -i $(SSH_KEY) root@$(TEST_HOST) \
+		"dpkg-query -W -f='${Package} ${Version}\n' qemu-server libpve-storage-perl pve-manager" > $(PATCH_VERSIONS); then \
+		echo "Updated $(PATCH_VERSIONS) from $(TEST_HOST)"; \
+	elif [ -f "$(PATCH_VERSIONS)" ]; then \
+		echo "SSH unavailable, using existing $(PATCH_VERSIONS)"; \
+	else \
+		echo "ERROR: SSH unavailable and $(PATCH_VERSIONS) is missing" >&2; \
+		exit 1; \
+	fi; \
+	$(MAKE) tools-image; \
+	./scripts/patch-apply-docker-check.sh --versions $(PATCH_VERSIONS)
 
 clean:
 	rm -rf output

@@ -1,0 +1,26 @@
+--- PVE/API2/Qemu.pm	2026-01-13 11:58:55
++++ PVE/API2/Qemu.pm	2026-01-13 12:17:33
+@@ -4605,6 +4605,23 @@
+                 }
+ 
+                 PVE::AccessControl::add_vm_to_pool($newid, $pool) if $pool;
++
++                # Deactivate CloudInit volumes for SAN storage
++                foreach my $opt (sort keys %$newconf) {
++                    next if $opt !~ m/^(ide|sata|scsi|virtio)\d+$/;
++                    my $drive = PVE::QemuServer::parse_drive($opt, $newconf->{$opt});
++                    next if !PVE::QemuServer::drive_is_cloudinit($drive);
++                    
++                    my $newvolid = $drive->{file};
++                    my ($newstoreid) = PVE::Storage::parse_volume_id($newvolid);
++                    my $newscfg = PVE::Storage::storage_config($storecfg, $newstoreid);
++                    
++                    if (PVE::Storage::Plugin::storage_is_san($newscfg->{type})) {
++                        eval { PVE::Storage::deactivate_volumes($storecfg, [$newvolid]); };
++                        warn $@ if $@;
++                    }
++                }
++
+             };
+             if (my $err = $@) {
+                 eval { PVE::QemuServer::BlockJob::qemu_blockjobs_cancel($vmid, $jobs) };

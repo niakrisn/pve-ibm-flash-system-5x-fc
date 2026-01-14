@@ -18,6 +18,8 @@ use PVE::Storage::Custom::IBMFlashSystem::Volume;
 # Snapshot Operations
 # ============================================================================
 
+our ($CURRENT_OP_CTX, $CURRENT_OP_SCFG, $CURRENT_OP_START, $CURRENT_OP_LOGGED);
+
 sub _throw_snapshot_error {
     my ($class, $message, $cause) = @_;
     my $err = defined $cause ? PVE::Storage::Custom::IBMFlashSystem::Error->wrap($cause) : undef;
@@ -30,13 +32,32 @@ sub _throw_snapshot_error {
         $args{cause} = $err;
         $args{code} = $err->code if defined $err->code;
     }
-    die PVE::Storage::Custom::IBMFlashSystem::Error->new(%args);
+    my $error_obj = PVE::Storage::Custom::IBMFlashSystem::Error->new(%args);
+    if ($CURRENT_OP_CTX && !$CURRENT_OP_LOGGED) {
+        $CURRENT_OP_LOGGED = 1;
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_error(
+            $class, $CURRENT_OP_SCFG, $CURRENT_OP_CTX, $CURRENT_OP_START, $error_obj);
+    }
+    die $error_obj;
 }
 
 
 # Create a snapshot using FlashCopy
 sub volume_snapshot {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+
+    my $ctx = {
+        op => 'volume_snapshot',
+        store => $storeid,
+        vol => $volname,
+        snap => $snapname,
+    };
+    my $op_start = PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_start(
+        $class, $scfg, $ctx, "start");
+    local $CURRENT_OP_CTX = $ctx;
+    local $CURRENT_OP_SCFG = $scfg;
+    local $CURRENT_OP_START = $op_start;
+    local $CURRENT_OP_LOGGED = 0;
 
     my $source_info = PVE::Storage::Custom::IBMFlashSystem::Volume::_get_volume_info(
         $class, $scfg, $storeid, $volname);
@@ -46,8 +67,6 @@ sub volume_snapshot {
     my $snapshot_info = PVE::Storage::Custom::IBMFlashSystem::Volume::_get_volume_info(
         $class, $scfg, $storeid, $snapshot_name);
     _throw_snapshot_error($class, "Snapshot volume '$snapshot_name' already exists\n") if $snapshot_info;
-
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Creating snapshot (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname);
 
     my $pool_name = $scfg->{pool};
     _throw_snapshot_error($class, "Pool not configured\n") unless $pool_name;
@@ -114,7 +133,9 @@ sub volume_snapshot {
         goto CLEANUP_FCMAP;
     }
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Snapshot created successfully (storeid=%s, volname=%s, snapname=%s, snapshot_name=%s)", $storeid, $volname, $snapname, $snapshot_name);
+    $ctx->{target} = $snapshot_name;
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_end(
+        $class, $scfg, $ctx, $op_start, "ok");
 
     return $snapshot_name;
 
@@ -144,6 +165,19 @@ CLEANUP_SNAPSHOT:
 sub volume_snapshot_rollback {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
 
+    my $ctx = {
+        op => 'volume_snapshot_rollback',
+        store => $storeid,
+        vol => $volname,
+        snap => $snapname,
+    };
+    my $op_start = PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_start(
+        $class, $scfg, $ctx, "start");
+    local $CURRENT_OP_CTX = $ctx;
+    local $CURRENT_OP_SCFG = $scfg;
+    local $CURRENT_OP_START = $op_start;
+    local $CURRENT_OP_LOGGED = 0;
+
     my $source_info = PVE::Storage::Custom::IBMFlashSystem::Volume::_get_volume_info(
         $class, $scfg, $storeid, $volname);
     _throw_snapshot_error($class, "Volume '$volname' not found\n") unless $source_info;
@@ -156,8 +190,6 @@ sub volume_snapshot_rollback {
     my $mapping_ok = PVE::Storage::Custom::IBMFlashSystem::FCMap::validate_snapshot_source_mapping(
         $class, $scfg, $storeid, $volname, $snapshot_name, $snapshot_info);
     _throw_snapshot_error($class, "Snapshot mapping validation failed for '$snapshot_name'\n") unless $mapping_ok;
-
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Rolling back to snapshot (restore mapping, keeping existing snapshots) (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname);
 
     # Step 1: Create temporary REVERSE mapping for restore (snapshot -> disk)
     PVE::Storage::Custom::IBMFlashSystem::Common::_task_log($class, $scfg, 'info', "Rollback: Creating FlashCopy Map (source=$snapshot_name target=$volname)");
@@ -213,12 +245,13 @@ sub volume_snapshot_rollback {
         goto CLEANUP_RESTORE;
     }
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Rollback completed (other snapshots preserved) (storeid=%s, volname=%s, snapname=%s)", $storeid, $volname, $snapname);
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_end(
+        $class, $scfg, $ctx, $op_start, "ok");
 
     return;
 
 CLEANUP_RESTORE:
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg, "Reverse mapping failed during restore: %s", $restore_error);
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg, "Reverse mapping failed during restore: %s", $restore_error);
     eval {
         PVE::Storage::Custom::IBMFlashSystem::FCMap::stop_fcmap($class, $scfg, $storeid, $reverse_fcmap_id);
         PVE::Storage::Custom::IBMFlashSystem::FCMap::remove_fcmap($class, $scfg, $storeid, $reverse_fcmap_id);
@@ -229,6 +262,19 @@ CLEANUP_RESTORE:
 # Delete a snapshot with idempotency (success if already deleted)
 sub volume_snapshot_delete {
     my ($class, $scfg, $storeid, $volname, $snapname) = @_;
+
+    my $ctx = {
+        op => 'volume_snapshot_delete',
+        store => $storeid,
+        vol => $volname,
+        snap => $snapname,
+    };
+    my $op_start = PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_start(
+        $class, $scfg, $ctx, "start");
+    local $CURRENT_OP_CTX = $ctx;
+    local $CURRENT_OP_SCFG = $scfg;
+    local $CURRENT_OP_START = $op_start;
+    local $CURRENT_OP_LOGGED = 0;
 
     my $source_info = PVE::Storage::Custom::IBMFlashSystem::Volume::_get_volume_info(
         $class, $scfg, $storeid, $volname);
@@ -245,10 +291,6 @@ sub volume_snapshot_delete {
     if (@$as_source) {
         _throw_snapshot_error($class, "Cannot delete snapshot '$snapshot_name': is source for active clones\n");
     }
-
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info(
-        $class, $scfg, "Deleting snapshot (storeid=%s, volname=%s, snapname=%s)", 
-        $storeid, $volname, $snapname);
 
     # Get FC_id from snapshot volume info
     my $fc_id = $snapshot_info->{FC_id};
@@ -293,9 +335,8 @@ sub volume_snapshot_delete {
         _throw_snapshot_error($class, "Failed to delete snapshot volume '$snapshot_name'\n");
     }
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info(
-        $class, $scfg, "Snapshot deleted successfully (storeid=%s, volname=%s, snapname=%s)", 
-        $storeid, $volname, $snapname);
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_end(
+        $class, $scfg, $ctx, $op_start, "ok");
 
     return;
 }

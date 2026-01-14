@@ -1,3 +1,11 @@
+pve-ibm-fs5x-fc-plugin (1.5.0) unstable; urgency=medium
+
+  * Updated patching workflow with ordered patch series and Docker tooling
+  * Consolidated Docker images for patching/testing/builds
+  * Refreshed patching documentation and test workflow
+
+ -- Nikolai Kozlov <n.kozlov@veeam.com>  Wed, 14 Jan 2026 15:12:35 +0300
+
 pve-ibm-fs5x-fc-plugin (1.4.0) unstable; urgency=medium
 
   * MAJOR: Removed Linked Clone support (copyrate 0 mappings)

@@ -20,6 +20,36 @@ log() {
     echo "[IBM FlashSystem Plugin] $*"
 }
 
+# Collect patch list in a deterministic order
+collect_patches() {
+    local order="$1"
+    local series="$PATCH_DIR/series"
+    local patches=()
+
+    if [ -f "$series" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+            line="${line%%#*}"
+            line="$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            [ -z "$line" ] && continue
+            patches+=("$PATCH_DIR/$line")
+        done < "$series"
+    else
+        for _patch in "$PATCH_DIR"/*.patch; do
+            [ -f "$_patch" ] && patches+=("$_patch")
+        done
+    fi
+
+    if [ "$order" = "reverse" ]; then
+        for ((i=${#patches[@]}-1; i>=0; i--)); do
+            echo "${patches[$i]}"
+        done
+    else
+        for _patch in "${patches[@]}"; do
+            echo "$_patch"
+        done
+    fi
+}
+
 # Check if Perl patches are applied
 is_patched() {
     grep -q "$MARKER_PREFIX" "$QEMU_TARGET" 2>/dev/null
@@ -84,57 +114,62 @@ case "$1" in
         cd /usr/share/perl5
 
         # Apply each patch
-        for _patch in "$PATCH_DIR"/*.patch; do
-            if [ -f "$_patch" ]; then
-                _patch_name=$(basename "$_patch")
+        while IFS= read -r _patch; do
+            [ -z "$_patch" ] && continue
+            if [ ! -f "$_patch" ]; then
+                log "  ⚠ Missing patch file: $_patch"
+                _failed_patches="$_failed_patches $(basename "$_patch")"
+                continue
+            fi
 
-                # Skip GUI patch (handled separately)
-                if [ "$_patch_name" = "pve-manager-index-html-gui.patch" ]; then
-                    continue
-                fi
+            _patch_name=$(basename "$_patch")
 
-                log "Checking: $_patch_name"
+            # Skip GUI patch (handled separately)
+            if [ "$_patch_name" = "pve-manager-index-html-gui.patch" ]; then
+                continue
+            fi
 
-                # Check if already applied
-                if patch -R -p0 -s -f --dry-run < "$_patch" >/dev/null 2>&1; then
-                    log "  ✓ Patch already applied: $_patch_name"
-                    _applied_count=$((_applied_count + 1))
-                    continue
-                fi
+            log "Checking: $_patch_name"
 
-                log "Applying: $_patch_name"
+            # Check if already applied
+            if patch -R -p0 -s -f --dry-run < "$_patch" >/dev/null 2>&1; then
+                log "  ✓ Patch already applied: $_patch_name"
+                _applied_count=$((_applied_count + 1))
+                continue
+            fi
 
-                # Try to apply - we use || true to prevent set -e from exiting
-                _out=$(patch -p0 -N < "$_patch" 2>&1) || _patch_res=$?
-                
-                if [ "$_patch_res" != "" ] && [ "$_patch_res" != "0" ]; then
-                     # If it failed, check if it's because it was actually applied (false negative in dry-run)
-                     if echo "$_out" | grep -q "Reversed (or previously applied) patch detected"; then
-                         log "  ✓ Patch detected as applied (via output): $_patch_name"
+            log "Applying: $_patch_name"
+
+            # Try to apply - we use || true to prevent set -e from exiting
+            _out=$(patch -p0 -N < "$_patch" 2>&1) || _patch_res=$?
+
+            if [ "$_patch_res" != "" ] && [ "$_patch_res" != "0" ]; then
+                 # If it failed, check if it's because it was actually applied (false negative in dry-run)
+                 if echo "$_out" | grep -q "Reversed (or previously applied) patch detected"; then
+                     log "  ✓ Patch detected as applied (via output): $_patch_name"
+                     _applied_count=$((_applied_count + 1))
+                     _patch_res=0
+                 else
+                     # Try with fuzz
+                     log "  ⚠ First attempt failed (exit $_patch_res), trying with fuzz..."
+                     if patch -p0 -N --fuzz=3 < "$_patch" >/dev/null 2>&1; then
+                         log "  ✓ Applied (with fuzz): $_patch_name"
                          _applied_count=$((_applied_count + 1))
                          _patch_res=0
                      else
-                         # Try with fuzz
-                         log "  ⚠ First attempt failed (exit $_patch_res), trying with fuzz..."
-                         if patch -p0 -N --fuzz=3 < "$_patch" >/dev/null 2>&1; then
-                             log "  ✓ Applied (with fuzz): $_patch_name"
-                             _applied_count=$((_applied_count + 1))
-                             _patch_res=0
-                         else
-                             log "  ⚠ Failed: $_patch_name"
-                             _failed_patches="$_failed_patches $_patch_name"
-                             # Dump output for debug
-                             echo "$_out" | while read -r line; do log "    > $line"; done
-                         fi
+                         log "  ⚠ Failed: $_patch_name"
+                         _failed_patches="$_failed_patches $_patch_name"
+                         # Dump output for debug
+                         echo "$_out" | while read -r line; do log "    > $line"; done
                      fi
-                else
-                    log "  ✓ Applied: $_patch_name"
-                    _applied_count=$((_applied_count + 1))
-                fi
-                # Reset result for next loop
-                _patch_res=0
+                 fi
+            else
+                log "  ✓ Applied: $_patch_name"
+                _applied_count=$((_applied_count + 1))
             fi
-        done
+            # Reset result for next loop
+            _patch_res=0
+        done < <(collect_patches)
 
         # Update marker if at least one patch was applied or detected as applied
         if [ $_applied_count -gt 0 ]; then
@@ -170,23 +205,27 @@ case "$1" in
             cd /usr/share/perl5
 
             # Reverse each patch
-            for _patch in "$PATCH_DIR"/*.patch; do
-                if [ -f "$_patch" ]; then
-                    _patch_name=$(basename "$_patch")
-
-                    # Skip GUI patch for now
-                    if [ "$_patch_name" = "pve-manager-index-html-gui.patch" ]; then
-                        continue
-                    fi
-
-                    if patch -R -p0 < "$_patch" 2>/dev/null; then
-                        log "  ✓ Reversed: $_patch_name"
-                        _removed_count=$((_removed_count + 1))
-                    else 
-                         log "  ⚠ Failed to reverse: $_patch_name"
-                    fi
+            while IFS= read -r _patch; do
+                [ -z "$_patch" ] && continue
+                if [ ! -f "$_patch" ]; then
+                    log "  ⚠ Missing patch file: $_patch"
+                    continue
                 fi
-            done
+
+                _patch_name=$(basename "$_patch")
+
+                # Skip GUI patch for now
+                if [ "$_patch_name" = "pve-manager-index-html-gui.patch" ]; then
+                    continue
+                fi
+
+                if patch -R -p0 < "$_patch" 2>/dev/null; then
+                    log "  ✓ Reversed: $_patch_name"
+                    _removed_count=$((_removed_count + 1))
+                else 
+                     log "  ⚠ Failed to reverse: $_patch_name"
+                fi
+            done < <(collect_patches reverse)
 
             # Remove marker if we removed any patches
             if [ $_removed_count -gt 0 ]; then

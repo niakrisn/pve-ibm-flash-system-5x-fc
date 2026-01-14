@@ -46,9 +46,9 @@ subtest 'Snapshot VM Lifecycle (EFI + 1 SCSI)' => sub {
     run_cmd_checked("qm start $vmid", 'qm', 'start', $vmid);
     ok(StateVerifier::verify_activated($env, $vmid, $disks), "VM $vmid is ACTIVATED");
     
-    # Step 4: Create snapshot 'snap1'
-    diag("Creating snapshot 'snap1'...");
-    run_cmd_checked("qm snapshot $vmid snap1", 'qm', 'snapshot', $vmid, 'snap1');
+    # Step 4: Create snapshot 'snap1' with RAM
+    diag("Creating snapshot 'snap1' (implicit --vmstate 1)...");
+    run_cmd_checked("qm snapshot $vmid snap1 --vmstate 1", 'qm', 'snapshot', $vmid, 'snap1', '--vmstate', '1');
     ok(StateVerifier::verify_snapshot($env, $vmid, 'snap1', $disks), "Snapshot 'snap1' verified on storage");
     
     # Step 5: Create snapshot 'snap2'
@@ -59,7 +59,29 @@ subtest 'Snapshot VM Lifecycle (EFI + 1 SCSI)' => sub {
     # Step 6: Rollback to snap1
     diag("Rolling back to snap1...");
     run_cmd_checked("qm rollback $vmid snap1", 'qm', 'rollback', $vmid, 'snap1');
-    run_cmd_checked("qm start $vmid (after rollback)", 'qm', 'start', $vmid);
+    
+    # CRITICAL CHECK for PVE Bug: Ensure vmstate volume is NOT mapped after rollback
+    diag("Verifying vmstate volume is NOT mapped after rollback...");
+    # Construct state volume name: vm-<vmid>-state-<snapname>
+    my $state_vol = "vm-${vmid}-state-snap1";
+    
+    # Check mappings on storage (host mappings)
+    my $mappings = StorageHelpers::get_host_mappings($env, $state_vol);
+    is(scalar(@$mappings), 0, "State volume $state_vol should not be mapped after rollback (PVE Core Bug Check)")
+        or diag("State volume $state_vol is still mapped! This indicates the PVE Core bug.");
+
+    # Also check multipath on host (using WWN if possible, or just rely on mappings check which implies host access)
+    
+    # Resume normal flow
+    # Explicit start might fail if VM is already running, so we check status first
+    my $status = `qm status $vmid`;
+    if ($status =~ /stopped/) {
+        diag("VM stopped after rollback, starting...");
+        run_cmd_checked("qm start $vmid (after rollback)", 'qm', 'start', $vmid);
+    } else {
+        diag("VM already running after rollback.");
+    }
+
     ok(StateVerifier::verify_activated($env, $vmid, $disks), "VM $vmid is ACTIVATED after rollback");
     ok(StateVerifier::verify_snapshot($env, $vmid, 'snap1', $disks), "Snapshot 'snap1' still valid after rollback");
     
@@ -85,6 +107,10 @@ subtest 'Snapshot VM Lifecycle (EFI + 1 SCSI)' => sub {
     # Verify snap1 FlashCopy mapping and volume are removed
     my $snap1_vol = _snapshot_name('PVE::Storage::Custom::IBMFlashSystem', $disks->[1], 'snap1');
     ok(!StorageHelpers::volume_exists($env, $snap1_vol), "Snapshot volume snap1 removed from storage");
+    
+    # Check state volume removal
+    ok(!StorageHelpers::volume_exists($env, $state_vol), "State volume $state_vol removed from storage");
+
     ok(StateVerifier::verify_fcmap_removed($env, $disks->[1], "snap1"), "FlashCopy mapping for snap1 removed from storage");
     StateVerifier::verify_no_orphans($env, "snapshot_del_snap1_vm${vmid}");
     

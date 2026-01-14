@@ -1,0 +1,17 @@
+--- PVE/QemuServer/OVMF.pm	2026-01-13 11:25:34
++++ PVE/QemuServer/OVMF.pm	2026-01-13 11:31:50
+@@ -176,6 +176,14 @@
+     PVE::Storage::activate_volumes($storecfg, [$volid]);
+ 
+     PVE::QemuServer::QemuImage::convert($ovmf_vars, $volid, $vars_size_b);
++
++    # Deactivate SAN volumes after EFI initialization
++    ($storeid) = PVE::Storage::parse_volume_id($volid);
++    ($storecfg) = PVE::Storage::config();
++    my $scfg = PVE::Storage::storage_config($storecfg, $storeid);
++    if (PVE::Storage::Plugin::storage_is_san($scfg->{type})) {
++        PVE::Storage::deactivate_volumes($storecfg, [$volid]);
++    }
+     my $size = PVE::Storage::volume_size_info($storecfg, $volid, 3);
+ 
+     if ($efidisk->{'pre-enrolled-keys'} && is_ms_2023_cert_enrolled($ovmf_vars)) {

@@ -6,6 +6,7 @@ package PVE::Storage::Custom::IBMFlashSystem::Logger;
 use strict;
 use warnings;
 use POSIX qw(strftime);
+use Time::HiRes qw(time);
 use JSON;
 
 # Log file path
@@ -33,6 +34,81 @@ sub init {
 #   log_info($class, $scfg, "Volume %s activated", $volname)
 #   log_warn($class, $scfg, "Retry attempt %d", $attempt)
 #   log_error($class, $scfg, "Failed to connect: %s", $error)
+
+sub format_ctx {
+    my ($class, $ctx) = @_;
+    return '' unless $ctx && ref($ctx) eq 'HASH';
+
+    my @ordered_keys = qw(
+        op store vol snap vmid host pool endpoint method fcmap uid device size delta elapsed_ms code reason
+    );
+
+    my @pairs;
+    my %seen;
+    for my $key (@ordered_keys) {
+        next unless exists $ctx->{$key} && defined $ctx->{$key};
+        push @pairs, "$key=$ctx->{$key}";
+        $seen{$key} = 1;
+    }
+
+    for my $key (sort keys %$ctx) {
+        next if $seen{$key};
+        next unless defined $ctx->{$key};
+        push @pairs, "$key=$ctx->{$key}";
+    }
+
+    return join(' ', @pairs);
+}
+
+sub log_op_start {
+    my ($class, $scfg, $ctx, $format, @args) = @_;
+    my $message = @args ? sprintf($format, @args) : $format;
+    my $prefix = format_ctx($class, $ctx);
+    $message = $prefix ? "$prefix msg=$message" : $message;
+    log_info($class, $scfg, $message);
+    return time();
+}
+
+sub log_op_end {
+    my ($class, $scfg, $ctx, $start_time, $format, @args) = @_;
+    my %ctx_copy = ($ctx && ref($ctx) eq 'HASH') ? %$ctx : ();
+    if (defined $start_time) {
+        $ctx_copy{elapsed_ms} = int((time() - $start_time) * 1000);
+    }
+
+    my $message = @args ? sprintf($format, @args) : $format;
+    my $prefix = format_ctx($class, \%ctx_copy);
+    $message = $prefix ? "$prefix msg=$message" : $message;
+    log_info($class, $scfg, $message);
+    return;
+}
+
+sub log_op_error {
+    my ($class, $scfg, $ctx, $start_time, $err) = @_;
+    my %ctx_copy = ($ctx && ref($ctx) eq 'HASH') ? %$ctx : ();
+    if (defined $start_time) {
+        $ctx_copy{elapsed_ms} = int((time() - $start_time) * 1000);
+    }
+
+    my $reason = defined $err ? "$err" : '';
+    $reason =~ s/[\r\n]+/ /g;
+    if (length $reason > 300) {
+        $reason = substr($reason, 0, 300) . '...';
+    }
+    $ctx_copy{reason} = $reason if length $reason;
+
+    if (defined $err && ref($err) && eval { $err->can('code') }) {
+        my $code = $err->code;
+        $ctx_copy{code} = $code if defined $code;
+    } elsif ($reason =~ /(CMMVC\d+E)/i) {
+        $ctx_copy{code} = uc($1);
+    }
+
+    my $prefix = format_ctx($class, \%ctx_copy);
+    my $message = $prefix ? "$prefix msg=fail" : "msg=fail";
+    log_error($class, $scfg, $message);
+    return;
+}
 
 sub log_debug {
     my ($class, $scfg, $format, @args) = @_;

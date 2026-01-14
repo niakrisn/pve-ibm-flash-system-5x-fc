@@ -18,6 +18,8 @@ use PVE::Storage::Custom::IBMFlashSystem::Common qw(_get_hostname _snapshot_name
 use PVE::Storage::Custom::IBMFlashSystem::FCMap;
 use PVE::Storage::Custom::IBMFlashSystem::Protocol;
 
+our ($CURRENT_OP_CTX, $CURRENT_OP_SCFG, $CURRENT_OP_START, $CURRENT_OP_LOGGED);
+
 # ============================================================================
 # Volume Helpers
 # ============================================================================
@@ -80,7 +82,13 @@ sub _throw_volume_error {
         $args{cause} = $err;
         $args{code} = $err->code if defined $err->code;
     }
-    die PVE::Storage::Custom::IBMFlashSystem::Error->new(%args);
+    my $error_obj = PVE::Storage::Custom::IBMFlashSystem::Error->new(%args);
+    if ($CURRENT_OP_CTX && !$CURRENT_OP_LOGGED) {
+        $CURRENT_OP_LOGGED = 1;
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_error(
+            $class, $CURRENT_OP_SCFG, $CURRENT_OP_CTX, $CURRENT_OP_START, $error_obj);
+    }
+    die $error_obj;
 }
 
 # Get volume info from storage array
@@ -133,7 +141,7 @@ sub _extract_volume_id {
         };
     }
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_error(
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
         $class, $scfg, "Volume '%s' created but ID missing from response", $volname);
     return undef;
 }
@@ -254,7 +262,7 @@ sub create_volume {
     $opts //= {};
 
     if (!defined($size_bytes) || $size_bytes < MIN_VOLUME_SIZE_BYTES) {
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error(
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
             $class, $scfg, "Requested volume '%s' size is below minimum (%d bytes)", $name, MIN_VOLUME_SIZE_BYTES);
         return undef;
     }
@@ -281,7 +289,7 @@ sub create_volume {
         my $error = $@ // '';
         my ($code) = $error =~ /(CMMVC\d+E)/i;
         $code //= 'unknown';
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error(
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
             $class, $scfg, "Failed to create volume (volname=%s, error_code=%s, error=%s)",
             $name, $code, $error);
         return undef;
@@ -289,7 +297,7 @@ sub create_volume {
 
     my $wait_timeout = $opts->{wait_timeout} // 30;
     unless (wait_for_vdisk_state($class, $scfg, $storeid, $name, 'exists', $wait_timeout)) {
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error(
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
             $class, $scfg, "Volume '%s' was created but is not visible in API after timeout", $name);
         return undef;
     }
@@ -322,12 +330,12 @@ sub delete_volume {
     if (!$remove_hostmappings) {
         my $hostmaps = _list_hostmaps($class, $scfg, $storeid, $volname);
         unless (defined $hostmaps) {
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_error(
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
                 $class, $scfg, "Failed to list host mappings (volname=%s)", $volname);
             return 0;
         }
         if (%$hostmaps) {
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_error(
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
                 $class, $scfg, "Volume has host mappings (volname=%s)", $volname);
             return 0;
         }
@@ -337,12 +345,12 @@ sub delete_volume {
         my $fcmaps = PVE::Storage::Custom::IBMFlashSystem::FCMap::list_volume_dependent_maps(
             $class, $scfg, $storeid, $volname);
         unless (defined $fcmaps) {
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_error(
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
                 $class, $scfg, "Failed to list dependent FlashCopy mappings (volname=%s)", $volname);
             return 0;
         }
         if (@$fcmaps) {
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_error(
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
                 $class, $scfg, "Volume has dependent FlashCopy mappings (volname=%s)", $volname);
             return 0;
         }
@@ -350,7 +358,7 @@ sub delete_volume {
         my $removed = PVE::Storage::Custom::IBMFlashSystem::FCMap::remove_dependent_fcmaps(
             $class, $scfg, $storeid, $volname);
         unless (defined $removed) {
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_error(
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
                 $class, $scfg, "Failed to remove dependent FlashCopy mappings (volname=%s)", $volname);
             return 0;
         }
@@ -372,7 +380,7 @@ sub delete_volume {
                 $class, $scfg, "Volume already deleted (volname=%s)", $volname);
             return -1;
         }
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error(
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
             $class, $scfg, "Failed to delete volume (volname=%s, error=%s)", $volname, $error);
         return 0;
     }
@@ -435,6 +443,19 @@ sub get_pool_info {
 sub alloc_image {
     my ($class, $storeid, $scfg, $vmid, $fmt, $name, $size) = @_;
 
+    my $ctx = {
+        op => 'alloc_image',
+        store => $storeid,
+        vmid => $vmid,
+        vol => $name,
+    };
+    my $op_start = PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_start(
+        $class, $scfg, $ctx, "start");
+    local $CURRENT_OP_CTX = $ctx;
+    local $CURRENT_OP_SCFG = $scfg;
+    local $CURRENT_OP_START = $op_start;
+    local $CURRENT_OP_LOGGED = 0;
+
     my $pool_name = $scfg->{pool};
     _throw_volume_error($class, "Pool not configured\n") unless $pool_name;
     _throw_volume_error($class, "Volume size cannot be zero or undefined\n") if !$size || $size <= 0;
@@ -443,14 +464,13 @@ sub alloc_image {
     my $size_bytes = $size * 1024;
     $size_bytes = _align_size_bytes($class, $size_bytes);
 
+    $ctx->{pool} = $pool_name;
+    $ctx->{size} = $size_bytes;
+
     # Fail-fast if volume already exists
     if (_get_volume_info($class, $scfg, $storeid, $name)) {
         _throw_volume_error($class, "Volume '$name' already exists\n");
     }
-
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info(
-        $class, $scfg, "Allocating volume (storeid=%s, vmid=%s, volname=%s, pool=%s, size=%d)",
-        $storeid, $vmid, $name, $pool_name, $size_bytes);
 
     my $vol_id = PVE::Storage::Custom::IBMFlashSystem::Volume::create_volume(
         $class, $scfg, $storeid, $name, $size_bytes, {
@@ -460,7 +480,8 @@ sub alloc_image {
         });
     _throw_volume_error($class, "Failed to create volume '$name'\n") unless defined $vol_id;
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Volume allocated successfully (storeid=%s, vmid=%s, volname=%s)", $storeid, $vmid, $name);
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_end(
+        $class, $scfg, $ctx, $op_start, "ok");
     return $name;
 }
 
@@ -469,17 +490,29 @@ sub alloc_image {
 sub clone_image {
     my ($class, $scfg, $storeid, $volname, $vmid, $snapname) = @_;
 
+    my $source_volname = $snapname ? _snapshot_name($class, $volname, $snapname) : $volname;
+
+    my $ctx = {
+        op => 'clone_image',
+        store => $storeid,
+        vmid => $vmid,
+        vol => $source_volname,
+    };
+    $ctx->{snap} = $snapname if defined $snapname;
+    my $op_start = PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_start(
+        $class, $scfg, $ctx, "start");
+    local $CURRENT_OP_CTX = $ctx;
+    local $CURRENT_OP_SCFG = $scfg;
+    local $CURRENT_OP_START = $op_start;
+    local $CURRENT_OP_LOGGED = 0;
+
     my $pool_name = $scfg->{pool};
     _throw_volume_error($class, "Pool not configured\n") unless $pool_name;
-
-    my $source_volname = $snapname ? _snapshot_name($class, $volname, $snapname) : $volname;
+    $ctx->{pool} = $pool_name;
 
     # Generate new volume name for the clone
     my $new_name = $class->find_free_diskname($storeid, $scfg, $vmid, 'raw');
-
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
-        "Creating linked clone from template (storeid=%s, source=%s, target_vmid=%s, target=%s)",
-        $storeid, $volname, $vmid, $new_name);
+    $ctx->{target} = $new_name;
 
     # Get source volume size
     my $vdisk_info = _get_volume_info($class, $scfg, $storeid, $source_volname);
@@ -542,12 +575,13 @@ sub clone_image {
         goto CLEANUP_FCMAP;
     }
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Linked clone created successfully (storeid=%s, source=%s, target=%s)", $storeid, $volname, $new_name);
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_end(
+        $class, $scfg, $ctx, $op_start, "ok");
 
     return $new_name;
 
 CLEANUP_FCMAP:
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg, "Clone operation failed, performing cleanup (target=%s, error=%s)", $new_name, $error);
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg, "Clone operation failed, performing cleanup (target=%s, error=%s)", $new_name, $error);
     eval {
         PVE::Storage::Custom::IBMFlashSystem::FCMap::stop_fcmap($class, $scfg, $storeid, $fcmap_id);
         PVE::Storage::Custom::IBMFlashSystem::FCMap::remove_fcmap($class, $scfg, $storeid, $fcmap_id);
@@ -566,7 +600,17 @@ CLEANUP_VOLUME:
 sub create_base {
     my ($class, $storeid, $scfg, $volname) = @_;
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Creating base template (storeid=%s, volname=%s)", $storeid, $volname);
+    my $ctx = {
+        op => 'create_base',
+        store => $storeid,
+        vol => $volname,
+    };
+    my $op_start = PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_start(
+        $class, $scfg, $ctx, "start");
+    local $CURRENT_OP_CTX = $ctx;
+    local $CURRENT_OP_SCFG = $scfg;
+    local $CURRENT_OP_START = $op_start;
+    local $CURRENT_OP_LOGGED = 0;
 
     my ($vtype, undef, $vmid, undef, undef, $is_base, undef) = parse_volname($class, $volname);
     _throw_volume_error($class, "Cannot convert volume '$volname' to base template: naming convention mismatch\n")
@@ -586,11 +630,13 @@ sub create_base {
         rename_volume($class, $scfg, $storeid, $volname, $vmid, $new_name);
     };
     if ($@) {
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg, "Failed to rename volume for template: %s", $@);
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg, "Failed to rename volume for template: %s", $@);
         _throw_volume_error($class, "Failed to convert to base template: $@\n", $@);
     }
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Base template created successfully (new_name=%s)", $new_name);
+    $ctx->{target} = $new_name;
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_end(
+        $class, $scfg, $ctx, $op_start, "ok");
 
     return $new_name;
 }
@@ -599,7 +645,19 @@ sub create_base {
 sub rename_volume {
     my ($class, $scfg, $storeid, $source_volname, $target_vmid, $target_volname) = @_;
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Renaming volume (storeid=%s, old=%s, new=%s, target_vmid=%s)", $storeid, $source_volname, $target_volname, $target_vmid);
+    my $ctx = {
+        op => 'rename_volume',
+        store => $storeid,
+        vol => $source_volname,
+        target => $target_volname,
+        vmid => $target_vmid,
+    };
+    my $op_start = PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_start(
+        $class, $scfg, $ctx, "start");
+    local $CURRENT_OP_CTX = $ctx;
+    local $CURRENT_OP_SCFG = $scfg;
+    local $CURRENT_OP_START = $op_start;
+    local $CURRENT_OP_LOGGED = 0;
 
     _throw_volume_error($class, "Volume '$source_volname' not found\n")
         unless _get_volume_info($class, $scfg, $storeid, $source_volname);
@@ -615,11 +673,12 @@ sub rename_volume {
         });
     };
     if ($@) {
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg, "Failed to rename volume (storeid=%s, old=%s, new=%s, error=%s)", $storeid, $source_volname, $target_volname, $@);
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg, "Failed to rename volume (storeid=%s, old=%s, new=%s, error=%s)", $storeid, $source_volname, $target_volname, $@);
         _throw_volume_error($class, "Failed to rename volume: $@\n", $@);
     }
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Volume renamed successfully (new=%s)", $target_volname);
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_end(
+        $class, $scfg, $ctx, $op_start, "ok");
     
     return "${storeid}:${target_volname}";
 }
@@ -644,6 +703,18 @@ sub volume_resize {
 
     # Proxmox passes size in bytes to volume_resize
     my $new_size_bytes = _align_size_bytes($class, $size);
+    my $ctx = {
+        op => 'volume_resize',
+        store => $storeid,
+        vol => $volname,
+        size => $new_size_bytes,
+    };
+    my $op_start = PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_start(
+        $class, $scfg, $ctx, "start");
+    local $CURRENT_OP_CTX = $ctx;
+    local $CURRENT_OP_SCFG = $scfg;
+    local $CURRENT_OP_START = $op_start;
+    local $CURRENT_OP_LOGGED = 0;
 
     # Get current size from storage array
     my $vdisk_info = _get_volume_info($class, $scfg, $storeid, $volname);
@@ -655,11 +726,12 @@ sub volume_resize {
     my $delta_bytes = $new_size_bytes - $current_size_bytes;
 
     if ($delta_bytes <= 0) {
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "No resize needed (storeid=%s, volname=%s)", $storeid, $volname);
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_end(
+            $class, $scfg, $ctx, $op_start, "no_change");
         return;  # No resize needed or shrink not supported
     }
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Resizing volume (storeid=%s, volname=%s, current=%d, new=%d, delta=%d)", $storeid, $volname, $current_size_bytes, $new_size_bytes, $delta_bytes);
+    $ctx->{delta} = $delta_bytes;
 
     my $fcmaps = PVE::Storage::Custom::IBMFlashSystem::FCMap::list_vdisk_fcmappings($class, $scfg, $storeid, $volname);
     _throw_volume_error($class, "Failed to list FlashCopy mappings for '$volname'\n") unless defined $fcmaps;
@@ -672,7 +744,8 @@ sub volume_resize {
         _throw_volume_error($class, "$@", $@);
     }
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Volume resized successfully (storeid=%s, volname=%s, new_bytes=%d)", $storeid, $volname, $new_size_bytes);
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_end(
+        $class, $scfg, $ctx, $op_start, "ok");
 
     return;
 }
@@ -776,7 +849,18 @@ sub free_image {
         return;
     }
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Deleting volume (storeid=%s, volname=%s, is_base=%d)", $storeid, $volname, $isBase);
+    my $ctx = {
+        op => 'free_image',
+        store => $storeid,
+        vol => $volname,
+        base => $isBase,
+    };
+    my $op_start = PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_start(
+        $class, $scfg, $ctx, "start");
+    local $CURRENT_OP_CTX = $ctx;
+    local $CURRENT_OP_SCFG = $scfg;
+    local $CURRENT_OP_START = $op_start;
+    local $CURRENT_OP_LOGGED = 0;
 
     my $dependent_fcmaps = PVE::Storage::Custom::IBMFlashSystem::FCMap::list_volume_dependent_maps($class, $scfg, $storeid, $volname);
     _throw_volume_error($class, "Failed to list FlashCopy mappings for '$volname'\n") unless defined $dependent_fcmaps;
@@ -795,7 +879,8 @@ sub free_image {
         $class, $scfg, $storeid, $volname, { removehostmappings => 1, removefcmappings => 1 });
     _throw_volume_error($class, "Failed to delete volume '$volname'\n") unless $deleted;
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Volume deleted successfully (storeid=%s, volname=%s)", $storeid, $volname);
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_end(
+        $class, $scfg, $ctx, $op_start, "ok");
     return;
 }
 
@@ -806,6 +891,20 @@ sub activate_volume {
     my $hostname = _get_hostname($class);
     my $target_volname = $snapname ? _snapshot_name($class, $volname, $snapname) : $volname;
 
+    my $ctx = {
+        op => 'activate_volume',
+        store => $storeid,
+        vol => $target_volname,
+        host => $hostname,
+    };
+    $ctx->{snap} = $snapname if defined $snapname;
+    my $op_start = PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_start(
+        $class, $scfg, $ctx, "start");
+    local $CURRENT_OP_CTX = $ctx;
+    local $CURRENT_OP_SCFG = $scfg;
+    local $CURRENT_OP_START = $op_start;
+    local $CURRENT_OP_LOGGED = 0;
+
     my $vol_info = _get_volume_info($class, $scfg, $storeid, $target_volname);
     _throw_volume_error($class, "Volume '$target_volname' not found\n") unless $vol_info;
 
@@ -815,6 +914,8 @@ sub activate_volume {
     if (defined $vol_info->{status} && $vol_info->{status} ne 'online') {
         _throw_volume_error($class, "Volume '$target_volname' is not online (status=$vol_info->{status})\n");
     }
+
+    $ctx->{uid} = $vdisk_uid;
 
     # 1. State check: Is it already mapped?
     my $mappings = _list_hostmaps($class, $scfg, $storeid, $target_volname);
@@ -833,6 +934,8 @@ sub activate_volume {
     if ($is_mapped && $device_ready) {
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg,
             "Volume already mapped and ready (volname=%s, host=%s, device=%s)", $target_volname, $hostname, $device_path);
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_end(
+            $class, $scfg, $ctx, $op_start, "already_active");
         return;
     }
 
@@ -852,7 +955,7 @@ sub activate_volume {
             my $err = $@;
             # Catch CMMVC5878E (already mapped) just in case of race condition since our check
             if ($err !~ /CMMVC5878E/ && $err !~ /already mapped to this host/) {
-                 PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg, "Failed to map volume: %s", $err);
+                 PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg, "Failed to map volume: %s", $err);
                  _throw_volume_error($class, "Failed to map volume: $err", $err);
             }
             # If already mapped, we didn't create it
@@ -865,7 +968,7 @@ sub activate_volume {
     };
     if ($@) {
         my $wait_error = $@;
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg, "Device discovery timed out for vdisk_uid=%s", $vdisk_uid);
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg, "Device discovery timed out for vdisk_uid=%s", $vdisk_uid);
 
         # Cleanup: if we created the mapping but device didn't appear, remove mapping
         # This prevents "half-state" where mapping exists but device is not accessible
@@ -876,7 +979,7 @@ sub activate_volume {
                 _remove_hostmap($class, $scfg, $storeid, $target_volname, $hostname);
             };
             if ($@) {
-                PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, $scfg,
+                PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
                     "Failed to cleanup host mapping: %s", $@);
             }
         }
@@ -884,7 +987,8 @@ sub activate_volume {
         _throw_volume_error($class, "Device discovery failed for '$target_volname': $wait_error", $wait_error);
     }
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Volume activated (storeid=%s, volname=%s, vdisk_uid=%s)", $storeid, $target_volname, $vdisk_uid);
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_end(
+        $class, $scfg, $ctx, $op_start, "ok");
     return;
 }
 
@@ -895,9 +999,24 @@ sub deactivate_volume {
     my $hostname = _get_hostname($class);
     my $target_volname = $snapname ? _snapshot_name($class, $volname, $snapname) : $volname;
 
+    my $ctx = {
+        op => 'deactivate_volume',
+        store => $storeid,
+        vol => $target_volname,
+        host => $hostname,
+    };
+    $ctx->{snap} = $snapname if defined $snapname;
+    my $op_start = PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_start(
+        $class, $scfg, $ctx, "start");
+    local $CURRENT_OP_CTX = $ctx;
+    local $CURRENT_OP_SCFG = $scfg;
+    local $CURRENT_OP_START = $op_start;
+    local $CURRENT_OP_LOGGED = 0;
+
     # Get volume info (non-fatal as volume might already be deleted)
     my $vol_info = _get_volume_info($class, $scfg, $storeid, $target_volname);
     my $vdisk_uid = $vol_info ? $vol_info->{vdisk_UID} : undef;
+    $ctx->{uid} = $vdisk_uid if $vdisk_uid;
 
     if (!$vdisk_uid) {
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg,
@@ -917,6 +1036,8 @@ sub deactivate_volume {
     if (!$mapped_to_us && !$device_present) {
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg,
             "Volume already deactivated (volname=%s, host=%s)", $target_volname, $hostname);
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_end(
+            $class, $scfg, $ctx, $op_start, "already_inactive");
         return;
     }
 
@@ -934,7 +1055,8 @@ sub deactivate_volume {
         _remove_hostmap($class, $scfg, $storeid, $target_volname, $hostname);
     }
 
-    PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Volume deactivated (storeid=%s, volname=%s, hostname=%s)", $storeid, $volname, $hostname);
+    PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_end(
+        $class, $scfg, $ctx, $op_start, "ok");
     return;
 }
 

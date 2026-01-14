@@ -1,5 +1,6 @@
 # Install patches
 debian/patches/*.patch usr/share/pve-ibm-fs5x-fc-plugin/patches/
+debian/patches/series usr/share/pve-ibm-fs5x-fc-plugin/patches/
 
 # Install patch manager script
 scripts/patch-manager.sh usr/share/pve-ibm-fs5x-fc-plugin/scripts/

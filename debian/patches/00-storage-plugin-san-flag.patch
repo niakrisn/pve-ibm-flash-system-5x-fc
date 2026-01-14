@@ -1,0 +1,16 @@
+--- PVE/Storage/Plugin.pm	2026-01-13 11:25:32
++++ PVE/Storage/Plugin.pm	2026-01-13 11:26:05
+@@ -289,6 +289,13 @@
+     return [qw(encryption-key keyring master-pubkey password)];
+ }
+ 
++# Check if storage type requires explicit deactivation (SAN storage)
++sub storage_is_san {
++    my ($type) = @_;
++    my $data = $defaultData->{plugindata}->{$type};
++    return $data->{san} ? 1 : 0;
++}
++
+ sub storage_has_feature {
+     my ($type, $feature) = @_;
+ 
