@@ -14,6 +14,12 @@ use PVE::Tools qw(file_get_contents file_set_contents file_read_firstline);
 
 use PVE::Storage::Custom::IBMFlashSystem::Logger;
 use PVE::Storage::Custom::IBMFlashSystem::Error;
+use PVE::Storage::Custom::IBMFlashSystem::Constants qw(
+    MAX_API_RETRIES
+    MAX_BUSY_RETRIES
+    RETRY_DELAY_SEC
+    BUSY_RETRY_DELAY_SEC
+);
 
 # ============================================================================
 # Public API
@@ -88,7 +94,7 @@ sub on_update_hook {
     # Log received parameters for debugging
     my @sensitive_keys = keys %sensitive_params;
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
-        "on_update_hook called (storeid=%s, sensitive=[%s])", 
+        "on_update_hook called (storeid=%s, sensitive=[%s])",
         $storeid, join(',', @sensitive_keys));
 
     # 1. Determine if we need to verify connectivity (Only for sensitive updates)
@@ -98,8 +104,8 @@ sub on_update_hook {
 
     if (exists($sensitive_params{password})) {
         $password_update_requested = 1;
-        if (defined($sensitive_params{password})) { 
-            $verify = 1; 
+        if (defined($sensitive_params{password})) {
+            $verify = 1;
             $new_password = $sensitive_params{password};
         } else {
              # Password is being deleted - no verification needed
@@ -112,19 +118,19 @@ sub on_update_hook {
 
         # 2. Construct the Candidate Configuration
         # We need to merge the CURRENT config with the UPDATES to test the new state.
-        
+
         my $cfg = PVE::Storage::config();
         my $current_scfg = $cfg->{ids}->{$storeid};
         die "Storage '$storeid' not found in config\n" unless $current_scfg;
-        
+
         # Create a shallow copy for modification
         my $candidate_scfg = { %$current_scfg };
-        
+
         # Note: We cannot get non-sensitive updates here (PVE doesn't pass them).
         # So we can only verify the new password against the OLD non-sensitive config.
         # This is better than nothing, but means we can't verify "new password + new IP" together
         # in this hook.
-        
+
         # Clear token to force fresh authentication using new params
         _clear_cached_token($class, $storeid);
 
@@ -140,7 +146,7 @@ sub on_update_hook {
             my $error = $@;
             PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, undef,
                 "Verification failed: $error");
-            
+
             # Since we haven't written anything to disk yet, we don't need rollback!
             # Just die, and PVE will abort the edit.
 
@@ -153,7 +159,7 @@ sub on_update_hook {
                  die "[IBM FlashSystem] Connectivity check failed: $error\n";
             }
         }
-         
+
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, undef,
             "Configuration verified, applying changes (storeid=%s)", $storeid);
     }
@@ -414,13 +420,13 @@ sub _authenticate {
 
     my $request = HTTP::Request->new(POST => $url);
     $request->header('X-Auth-Username' => $scfg->{username});
-    
+
     # Use provided password or fallback to storage file
     my $auth_password = $password // _get_password($class, $scfg, $storeid);
-    
+
     _throw_error($class, kind => 'client', area => 'auth',
         message => "Password not found. Please set password using configuration update.\n") unless $auth_password;
-    
+
     $request->header('X-Auth-Password' => $auth_password);
 
     my $response = $ua->request($request);
@@ -476,16 +482,40 @@ sub _authenticate {
     return $token;
 }
 
+# Helper functions for API request decomposition
+sub _validate_request_params {
+    my ($class, $storeid, $method, $endpoint) = @_;
+    my $method_uc = uc($method);
+    _throw_error($class, kind => 'client', area => 'request', message => "Invalid HTTP method: $method_uc\n")
+        unless $method_uc =~ /^(GET|POST|PUT|DELETE)$/;
+    _throw_error($class, kind => 'client', area => 'request',
+        message => "No storage ID provided (endpoint=$endpoint, method=$method_uc)\n") unless $storeid;
+    return $method_uc;
+}
+
+sub _is_auth_error {
+    my ($status_code, $content) = @_;
+    return 1 if $status_code == 401 || $status_code == 403;
+    return 1 if defined $content && $content =~ /InvalidToken/i;
+    return 0;
+}
+
+sub _is_busy_error {
+    my ($class, $status_code, $error_code, $error_message) = @_;
+    return 1 if $status_code =~ /^(502|503|504)$/;
+
+    my @busy_codes = qw(
+        CMMVC5701E CMMVC5906E CMMVC6470E CMMVC6048E
+        CMMVC6050E CMMVC6021E CMMVC6022E CMMVC6023E
+    );
+    return _matches_error_codes($class, $error_code, $error_message, \@busy_codes);
+}
+
 # Core API request method with token retry logic
 sub _api_request {
     my ($class, $scfg, $storeid, $method, $endpoint, $data, $options) = @_;
 
-    $method = uc($method);
-    _throw_error($class, kind => 'client', area => 'request', message => "Invalid HTTP method: $method\n")
-        unless $method =~ /^(GET|POST|PUT|DELETE)$/;
-
-    _throw_error($class, kind => 'client', area => 'request',
-        message => "No storage ID provided (endpoint=$endpoint, method=$method)\n") unless $storeid;
+    $method = _validate_request_params($class, $storeid, $method, $endpoint);
 
     my $start_time = time;
 
@@ -499,23 +529,15 @@ sub _api_request {
     my $ua = _init_ua($class, $scfg);
     my $url = _build_url($class, $scfg, $endpoint);
 
-    my $max_retries = $scfg->{max_retries} || 3;
-    my $retry_delay = $scfg->{retry_delay} || 1;
+    my $max_retries = $scfg->{max_retries} || MAX_API_RETRIES;
+    my $retry_delay = $scfg->{retry_delay} || RETRY_DELAY_SEC;
     my $attempts = 0;
-    my $response;
     my $busy_attempts = 0;
-    my $max_busy_retries = 5;
+    my $max_busy_retries = MAX_BUSY_RETRIES;
     my $expect = $options->{expect} if $options;
-    my @busy_codes = qw(
-        CMMVC5701E
-        CMMVC5906E
-        CMMVC6470E
-        CMMVC6048E
-        CMMVC6050E
-        CMMVC6021E
-        CMMVC6022E
-        CMMVC6023E
-    );
+
+    my $response;
+    my $content;
 
     REQUEST_LOOP: while (1) {
         $attempts = 0;
@@ -540,31 +562,16 @@ sub _api_request {
             }
 
             $response = $ua->request($request);
-
+            $content = $response->decoded_content || '';
             my $status_code = $response->code;
-            my $content = $response->decoded_content || '';
 
             # Check for authentication errors first by status code
-            if ($status_code == 401 || $status_code == 403) {
+            if (_is_auth_error($status_code, $content)) {
                 PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
-                    "Token expired, re-authenticating (storeid=%s, endpoint=%s, status=%d, attempt=%d)",
+                    "Token expired or invalid, re-authenticating (storeid=%s, endpoint=%s, status=%d, attempt=%d)",
                     $storeid, $endpoint, $status_code, $attempts + 1);
 
                 # Clear cache and re-authenticate
-                _clear_cached_token($class, $storeid);
-                $token = _authenticate($class, $scfg, $storeid);
-
-                $attempts++;
-                sleep($retry_delay) if $attempts <= $max_retries;
-                next;
-            }
-
-            # Some IBM responses encode invalid token in body without 401/403
-            if ($content =~ /InvalidToken/i) {
-                PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
-                    "Token invalid per response body, re-authenticating (storeid=%s, endpoint=%s, status=%d, attempt=%d)",
-                    $storeid, $endpoint, $status_code, $attempts + 1);
-
                 _clear_cached_token($class, $storeid);
                 $token = _authenticate($class, $scfg, $storeid);
 
@@ -588,59 +595,49 @@ sub _api_request {
                 message => "API request failed (endpoint=$endpoint) after $max_retries authentication retries\n");
         }
 
-        # Parse response
-        unless ($response->is_success) {
-            my $status = $response->status_line;
-            my $status_code = $response->code;
-            my $content = $response->decoded_content || '';
-            my ($error_code, $error_message) = _extract_error_info($class, $content);
-
-            if ($options && _matches_error_codes($class, $error_code, $error_message, $options->{ignore_codes})) {
-                PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
-                    "Ignoring API error (storeid=%s, endpoint=%s, method=%s, code=%s)",
-                    $storeid, $endpoint, $method, $error_code // 'unknown');
-                return _normalize_response(undef, $expect);
-            }
-
-            if ($status_code =~ /^(502|503|504)$/ && $busy_attempts < $max_busy_retries) {
-                $busy_attempts++;
-                PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
-                    "API request failed with server error %d, retrying (storeid=%s, endpoint=%s, attempt=%d/%d)",
-                    $status_code, $storeid, $endpoint, $busy_attempts, $max_busy_retries);
-                sleep(2);  # Longer delay for server errors
-                next REQUEST_LOOP;
-            }
-
-            if ($status_code == 500) {
-                PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
-                    "API request failed with server error 500, not retrying (storeid=%s, endpoint=%s)",
-                    $storeid, $endpoint);
-            }
-
-            if (_matches_error_codes($class, $error_code, $error_message, \@busy_codes)
-                && $busy_attempts < $max_busy_retries) {
-                $busy_attempts++;
-                PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
-                    "API request failed with BUSY code, retrying (storeid=%s, endpoint=%s, attempt=%d/%d)",
-                    $storeid, $endpoint, $busy_attempts, $max_busy_retries);
-                sleep(1);
-                next REQUEST_LOOP;
-            }
-
-            my $duration = (time - $start_time) * 1000;
-            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
-                "API request failed (storeid=%s, endpoint=%s, method=%s, status=%s, code=%s, duration=%dms)",
-                $storeid, $endpoint, $method, $status, $error_code // 'unknown', int($duration));
-            my $detail = $error_message // $content;
-            _throw_error($class, kind => 'api', area => _area_from_endpoint($endpoint),
-                endpoint => $endpoint, method => $method, status => $status_code, code => $error_code,
-                message => "API request failed (endpoint=$endpoint, method=$method): $status - $detail\n");
+        # Check for success
+        if ($response->is_success) {
+            last REQUEST_LOOP;
         }
 
-        last;
-    }
+        # Handle API Errors
+        my $status_code = $response->code;
+        my ($error_code, $error_message) = _extract_error_info($class, $content);
 
-    my $content = $response->decoded_content;
+        # Check ignore
+        if ($options && _matches_error_codes($class, $error_code, $error_message, $options->{ignore_codes})) {
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg,
+                "Ignoring API error (storeid=%s, endpoint=%s, method=%s, code=%s)",
+                $storeid, $endpoint, $method, $error_code // 'unknown');
+            return _normalize_response(undef, $expect);
+        }
+
+        # Check busy
+        if (_is_busy_error($class, $status_code, $error_code, $error_message) && $busy_attempts < $max_busy_retries) {
+            $busy_attempts++;
+            PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
+                "API request failed with BUSY/Server error, retrying (storeid=%s, endpoint=%s, code=%s, attempt=%d/%d)",
+                $storeid, $endpoint, $error_code // $status_code, $busy_attempts, $max_busy_retries);
+            sleep($status_code =~ /^5/ ? BUSY_RETRY_DELAY_SEC : RETRY_DELAY_SEC);
+            next REQUEST_LOOP;
+        }
+
+        # Log 500 error specifically if not retried
+        if ($status_code == 500) {
+             PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
+                "API request failed with server error 500, not retrying (storeid=%s, endpoint=%s)",
+                $storeid, $endpoint);
+        }
+
+        my $duration = (time - $start_time) * 1000;
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn($class, $scfg,
+            "API request failed (storeid=%s, endpoint=%s, method=%s, status=%s, code=%s, duration=%dms)",
+            $storeid, $endpoint, $method, $response->status_line, $error_code // 'unknown', int($duration));
+        my $detail = $error_message // $content;
+        _throw_error($class, kind => 'api', area => _area_from_endpoint($endpoint),
+            endpoint => $endpoint, method => $method, status => $status_code, code => $error_code,
+            message => "API request failed (endpoint=$endpoint, method=$method): " . $response->status_line . " - $detail\n");
+    }
 
     # Log successful API response (level 2: verbose)
     my $duration = (time - $start_time) * 1000;

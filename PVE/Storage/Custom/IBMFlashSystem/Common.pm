@@ -8,6 +8,7 @@ use warnings;
 
 use PVE::Storage::Custom::IBMFlashSystem::Logger;
 use PVE::Storage::Custom::IBMFlashSystem::Error;
+use PVE::Tools;
 
 use Exporter 'import';
 our @EXPORT_OK = qw(_get_hostname _snapshot_name _task_log error_code_matches is_not_found_error);
@@ -19,8 +20,16 @@ our @EXPORT_OK = qw(_get_hostname _snapshot_name _task_log error_code_matches is
 # Get hostname for this node
 sub _get_hostname {
     my ($class) = @_;
-    my $hostname = `hostname -f 2>/dev/null || hostname`;
-    chomp $hostname;
+
+    my $hostname = '';
+    eval {
+        PVE::Tools::run_command(['hostname', '-f'], outfunc => sub { $hostname .= shift; });
+    };
+    if ($@ || !$hostname) {
+        $hostname = `hostname`;
+        chomp $hostname;
+    }
+    $hostname =~ s/\s+$//;
     return $hostname;
 }
 
@@ -36,6 +45,9 @@ sub _snapshot_name {
     # Sanitize snapshot name: replace special chars with underscore
     my $safe_snapname = $snapname;
     $safe_snapname =~ s/[^a-zA-Z0-9._-]/_/g;
+
+    # Enforce strict limit on snapshot name part to leave room for volume name prefix
+    $safe_snapname = substr($safe_snapname, 0, 32) if length($safe_snapname) > 32;
 
     # IBM FlashSystem has a 63-character limit for volume names
     # Format: snap-{volname}-{snapname}

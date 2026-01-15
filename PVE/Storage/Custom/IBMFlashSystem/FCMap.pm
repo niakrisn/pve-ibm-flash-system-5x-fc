@@ -11,6 +11,10 @@ use PVE::Storage::Custom::IBMFlashSystem::Client;
 use PVE::Storage::Custom::IBMFlashSystem::Error;
 use PVE::Storage::Custom::IBMFlashSystem::Logger;
 use PVE::Storage::Custom::IBMFlashSystem::Common;
+use PVE::Storage::Custom::IBMFlashSystem::Constants qw(
+    FCMAP_STOP_TIMEOUT
+    VOLUME_STATE_TIMEOUT
+);
 
 # ============================================================================
 # FlashCopy Mapping Operations
@@ -110,7 +114,7 @@ sub list_fcmaps_as_source {
 
     my $result = eval {
         PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
-            $class, $scfg, $storeid, 'POST', '/lsfcmap', 
+            $class, $scfg, $storeid, 'POST', '/lsfcmap',
             { filtervalue => "source_vdisk_name=$volname" },
             { expect => 'array' }
         );
@@ -224,7 +228,7 @@ sub wait_for_fcmap_state {
 sub wait_for_fcmap_stopped {
     my ($class, $scfg, $storeid, $fcmap_id, $timeout_secs, $label) = @_;
 
-    $timeout_secs //= 300;  # 5 minutes default
+    $timeout_secs //= FCMAP_STOP_TIMEOUT;  # 5 minutes default
     $label //= "FlashCopy";
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug(
@@ -235,7 +239,7 @@ sub wait_for_fcmap_stopped {
 
     while (time() - $start_time < $timeout_secs) {
         my $fcmap = get_fcmap_info($class, $scfg, $storeid, $fcmap_id);
-        
+
         unless ($fcmap && ref($fcmap) eq 'HASH') {
             PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
                 $class, $scfg, "fcmap not found while waiting for stopped (fcmap_id=%s)", $fcmap_id);
@@ -284,16 +288,15 @@ sub create_fcmap {
         my $err = PVE::Storage::Custom::IBMFlashSystem::Error->wrap($@);
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
             $class, $scfg, "Failed to create FlashCopy mapping (error=%s)", $err);
-        return wantarray ? (undef, $err) : undef;
+        die $err;
     }
 
     my $fcmap_id = _extract_fcmap_id($fcmap_result);
     unless (defined $fcmap_id) {
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
             $class, $scfg, "Failed to extract FlashCopy mapping ID from response");
-        my $err = PVE::Storage::Custom::IBMFlashSystem::Error->new(
+        die PVE::Storage::Custom::IBMFlashSystem::Error->new(
             kind => 'api', area => 'fcmap', message => "Failed to extract FlashCopy mapping ID from response\n");
-        return wantarray ? (undef, $err) : undef;
     }
 
     my $source = $params->{source} // '';
@@ -303,14 +306,14 @@ sub create_fcmap {
         "FlashCopy mapping created (fcmap_id=%s, source=%s, target=%s)",
         $fcmap_id, $source, $target);
 
-    return wantarray ? ($fcmap_id, undef) : $fcmap_id;
+    return $fcmap_id;
 }
 
 # Wait for a resource to be completely deleted from the storage array
 sub prestart_fcmap {
     my ($class, $scfg, $storeid, $fcmap_id, $timeout_secs, $opts) = @_;
 
-    $timeout_secs //= 30;
+    $timeout_secs //= VOLUME_STATE_TIMEOUT;
     $opts //= {};
 
     my $params = {};
@@ -325,11 +328,16 @@ sub prestart_fcmap {
         my $err = PVE::Storage::Custom::IBMFlashSystem::Error->wrap($@);
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
             $class, $scfg, "Failed to prestart FlashCopy mapping (fcmap_id=%s, error=%s)", $fcmap_id, $err);
-        return wantarray ? (undef, $err) : undef;
+        die $err;
     }
 
     $ok = wait_for_fcmap_state($class, $scfg, $storeid, $fcmap_id, ['prepared'], $timeout_secs);
-    return wantarray ? ($ok ? 1 : undef, undef) : ($ok ? 1 : undef);
+    if (!$ok) {
+        die PVE::Storage::Custom::IBMFlashSystem::Error->new(
+            kind => 'timeout', area => 'fcmap', message => "Timeout waiting for fcmap $fcmap_id to be prepared\n");
+    }
+
+    return 1;
 }
 
 sub start_fcmap {
@@ -348,12 +356,12 @@ sub start_fcmap {
             $class, $scfg, $storeid, 'POST', "/startfcmap/$fcmap_id", $params);
         1;
     };
-    return wantarray ? (1, undef) : 1 if $ok;
+    return 1 if $ok;
 
     my $error = PVE::Storage::Custom::IBMFlashSystem::Error->wrap($@);
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
         $class, $scfg, "Failed to start FlashCopy mapping (fcmap_id=%s, error=%s)", $fcmap_id, $error);
-    return wantarray ? (undef, $error) : undef;
+    die $error;
 }
 
 # Stop FlashCopy mapping (idempotent)
@@ -373,11 +381,11 @@ sub stop_fcmap {
             my $err = PVE::Storage::Custom::IBMFlashSystem::Error->wrap($@);
             PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
                 $class, $scfg, "Failed to stop FlashCopy mapping (fcmap_id=%s, error=%s)", $fcmap_id, $err);
-            return wantarray ? (undef, $err) : undef;
+            die $err;
         }
     }
 
-    return wantarray ? (1, undef) : 1;
+    return 1;
 }
 
 # Remove FlashCopy mapping (with force option)
@@ -385,7 +393,7 @@ sub remove_fcmap {
     my ($class, $scfg, $storeid, $fcmap_id, $force, $timeout_secs) = @_;
 
     $force //= 1;  # Default to force=true
-    $timeout_secs //= 30;
+    $timeout_secs //= VOLUME_STATE_TIMEOUT;
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_debug($class, $scfg, "Removing FlashCopy mapping (fcmap_id=%s, force=%d)", $fcmap_id, $force);
 
@@ -400,11 +408,16 @@ sub remove_fcmap {
         my $err = PVE::Storage::Custom::IBMFlashSystem::Error->wrap($@);
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
             $class, $scfg, "Failed to remove FlashCopy mapping (fcmap_id=%s, error=%s)", $fcmap_id, $err);
-        return wantarray ? (undef, $err) : undef;
+        die $err;
     }
 
     $ok = wait_for_fcmap_state($class, $scfg, $storeid, $fcmap_id, ['absent'], $timeout_secs);
-    return wantarray ? ($ok ? 1 : undef, undef) : ($ok ? 1 : undef);
+    if (!$ok || (ref($ok) eq 'HASH' && $ok->{status} ne 'absent')) {
+        die PVE::Storage::Custom::IBMFlashSystem::Error->new(
+            kind => 'timeout', area => 'fcmap', message => "Timeout waiting for fcmap $fcmap_id to be absent\n");
+    }
+
+    return 1;
 }
 
 sub remove_dependent_fcmaps_from_list {

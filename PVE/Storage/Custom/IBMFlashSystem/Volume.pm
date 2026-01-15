@@ -17,6 +17,11 @@ use PVE::Storage::Custom::IBMFlashSystem::Logger;
 use PVE::Storage::Custom::IBMFlashSystem::Common qw(_get_hostname _snapshot_name);
 use PVE::Storage::Custom::IBMFlashSystem::FCMap;
 use PVE::Storage::Custom::IBMFlashSystem::Protocol;
+use PVE::Storage::Custom::IBMFlashSystem::Constants qw(
+    MIN_VOLUME_SIZE_BYTES
+    VOLUME_STATE_TIMEOUT
+    FCMAP_PREPARE_TIMEOUT
+);
 
 our ($CURRENT_OP_CTX, $CURRENT_OP_SCFG, $CURRENT_OP_START, $CURRENT_OP_LOGGED);
 
@@ -97,7 +102,7 @@ sub _throw_volume_error {
 sub _get_volume_info {
     my ($class, $scfg, $storeid, $volname) = @_;
 
-    my $result = eval { 
+    my $result = eval {
         PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
             $class, $scfg, $storeid, 'POST', "/lsvdisk/$volname", { bytes => JSON::true }, { expect => 'object' })
     };
@@ -111,19 +116,18 @@ sub _get_volume_info {
     return $result;
 }
 
-# Minimum volume size (4 MB) for FlashCopy compatibility
+# Minimum volume size (4 MB) imported from Constants.pm
 # FlashCopy grain_size=256KB requires volumes to be at least 4MB for reliable snapshots
-use constant MIN_VOLUME_SIZE_BYTES => 4 * 1024 * 1024;  # 4 MB
 
 # Align size to minimum 4MB and 512-byte blocks (SVC + FlashCopy requirement)
 sub _align_size_bytes {
     my ($class, $size_bytes) = @_;
-    
+
     # Enforce minimum 4 MB for FlashCopy compatibility
     if ($size_bytes < MIN_VOLUME_SIZE_BYTES) {
         $size_bytes = MIN_VOLUME_SIZE_BYTES;
     }
-    
+
     # Align to 512-byte blocks
     return $size_bytes if $size_bytes % 512 == 0;
     return $size_bytes - ($size_bytes % 512) + 512;
@@ -200,7 +204,7 @@ sub _remove_hostmap {
 sub wait_for_vdisk_state {
     my ($class, $scfg, $storeid, $volname, $desired_state, $timeout) = @_;
 
-    $timeout //= 30;
+    $timeout //= VOLUME_STATE_TIMEOUT;
     my $poll_interval = 1;
     my $elapsed = 0;
 
@@ -294,7 +298,7 @@ sub create_volume {
         return undef;
     };
 
-    my $wait_timeout = $opts->{wait_timeout} // 30;
+    my $wait_timeout = $opts->{wait_timeout} // VOLUME_STATE_TIMEOUT;
     unless (wait_for_vdisk_state($class, $scfg, $storeid, $name, 'exists', $wait_timeout)) {
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_warn(
             $class, $scfg, "Volume '%s' was created but is not visible in API after timeout", $name);
@@ -540,34 +544,28 @@ sub clone_image {
         copyrate => 0,
         autodelete => JSON::true,
     };
-    my ($fcmap_err);
-    ($fcmap_id, $fcmap_err) = PVE::Storage::Custom::IBMFlashSystem::FCMap::create_fcmap(
-        $class, $scfg, $storeid, $fcmap_params);
-    unless (defined $fcmap_id) {
-        my $err = defined $fcmap_err ? PVE::Storage::Custom::IBMFlashSystem::Error->wrap($fcmap_err) : undef;
-        my $suffix = $err ? sprintf(" (%s): %s", ($err->is_client ? 'client' : 'fcmap'), $err) : '';
-        $error = "Failed to create FlashCopy mapping$suffix";
+
+    eval {
+        $fcmap_id = PVE::Storage::Custom::IBMFlashSystem::FCMap::create_fcmap(
+            $class, $scfg, $storeid, $fcmap_params);
+    };
+    if ($@) {
+        $error = "Failed to create FlashCopy mapping: " . PVE::Storage::Custom::IBMFlashSystem::Error->wrap($@);
         goto CLEANUP_VOLUME;
     }
 
     # Step 3: Prepare and start the FlashCopy mapping
-    PVE::Storage::Custom::IBMFlashSystem::Common::_task_log($class, $scfg, 'info', "Clone: Preparing FlashCopy Start (fcmap=$fcmap_id)");
-    my ($prestart_ok, $prestart_err) = PVE::Storage::Custom::IBMFlashSystem::FCMap::prestart_fcmap(
-        $class, $scfg, $storeid, $fcmap_id, 60);
-    unless ($prestart_ok) {
-        my $err = defined $prestart_err ? PVE::Storage::Custom::IBMFlashSystem::Error->wrap($prestart_err) : undef;
-        my $suffix = $err ? sprintf(" (%s): %s", ($err->is_client ? 'client' : 'fcmap'), $err) : '';
-        $error = "Failed to prepare FlashCopy mapping$suffix";
-        goto CLEANUP_FCMAP;
-    }
+    eval {
+        PVE::Storage::Custom::IBMFlashSystem::Common::_task_log($class, $scfg, 'info', "Clone: Preparing FlashCopy Start (fcmap=$fcmap_id)");
+        PVE::Storage::Custom::IBMFlashSystem::FCMap::prestart_fcmap(
+            $class, $scfg, $storeid, $fcmap_id, FCMAP_PREPARE_TIMEOUT);
 
-    PVE::Storage::Custom::IBMFlashSystem::Common::_task_log($class, $scfg, 'info', "Clone: Starting FlashCopy Map (fcmap=$fcmap_id)");
-    my ($start_ok, $start_err) = PVE::Storage::Custom::IBMFlashSystem::FCMap::start_fcmap(
-        $class, $scfg, $storeid, $fcmap_id);
-    unless ($start_ok) {
-        my $err = defined $start_err ? PVE::Storage::Custom::IBMFlashSystem::Error->wrap($start_err) : undef;
-        my $suffix = $err ? sprintf(" (%s): %s", ($err->is_client ? 'client' : 'fcmap'), $err) : '';
-        $error = "Failed to start FlashCopy mapping$suffix";
+        PVE::Storage::Custom::IBMFlashSystem::Common::_task_log($class, $scfg, 'info', "Clone: Starting FlashCopy Map (fcmap=$fcmap_id)");
+        PVE::Storage::Custom::IBMFlashSystem::FCMap::start_fcmap(
+            $class, $scfg, $storeid, $fcmap_id);
+    };
+    if ($@) {
+        $error = "Failed to start FlashCopy mapping: " . PVE::Storage::Custom::IBMFlashSystem::Error->wrap($@);
         goto CLEANUP_FCMAP;
     }
 
@@ -675,7 +673,7 @@ sub rename_volume {
 
     PVE::Storage::Custom::IBMFlashSystem::Logger::log_op_end(
         $class, $scfg, $ctx, $op_start, "ok");
-    
+
     return "${storeid}:${target_volname}";
 }
 
@@ -759,14 +757,14 @@ sub list_images {
     my $max_attempts = 5;
     my $attempt = 0;
     my $vdisks = [];
-    
+
     while ($attempt < $max_attempts) {
-        my $result = eval { 
+        my $result = eval {
             PVE::Storage::Custom::IBMFlashSystem::Client::api_request(
                 $class, $scfg, $storeid, 'POST', '/lsvdisk', { bytes => JSON::true }, { expect => 'array' })
         };
         $vdisks = $result || [];
-        
+
         # If we are looking for a specific VMID, and found nothing for it, retry
         if (defined($vmid)) {
             my $found_vmid = 0;
@@ -787,7 +785,7 @@ sub list_images {
         }
         last;
     }
-    
+
     my $volumes = [];
 
     for my $vdisk (@$vdisks) {
@@ -915,7 +913,7 @@ sub activate_volume {
     # 1. State check: Is it already mapped?
     my $mappings = _list_hostmaps($class, $scfg, $storeid, $target_volname);
     _throw_volume_error($class, "Failed to list host mappings for '$target_volname'\n") unless defined $mappings;
-    
+
     my $is_mapped = $mappings->{$hostname} ? 1 : 0;
 
     my $protocol = PVE::Storage::Custom::IBMFlashSystem::Protocol->get_handler($scfg);

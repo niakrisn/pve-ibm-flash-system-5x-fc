@@ -6,8 +6,11 @@ scripts/pve-ibm-fs5x-test-runner usr/bin/
 t/integration/scenarios/*.t usr/share/pve-ibm-fs5x-fc-plugin-tests/scenarios/
 t/integration/lib/*.pm usr/share/pve-ibm-fs5x-fc-plugin-tests/lib/
 
+# Install unit tests
+t/unit/*.t usr/share/pve-ibm-fs5x-fc-plugin-tests/unit/
+t/unit/lib/*.pm usr/share/pve-ibm-fs5x-fc-plugin-tests/unit/lib/
+
 # Install cleanup script
 scripts/cleanup_host_san.sh usr/share/pve-ibm-fs5x-fc-plugin-tests/
-
 # Install evidence collection script
 scripts/collect_evidence.sh usr/share/pve-ibm-fs5x-fc-plugin-tests/
