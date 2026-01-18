@@ -411,27 +411,35 @@ sub _ensure_host_exists {
         my $protocol = PVE::Storage::Custom::IBMFlashSystem::Protocol->get_handler($scfg);
         my $wwpns = $protocol->get_local_ports();
 
-        # Step 1: Create host without cluster
+        die "No FC ports found on this host - cannot create host on storage array\n" unless @$wwpns;
+
+        my $total_wwpn_count = scalar(@$wwpns);
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Found %d FC ports to add", $total_wwpn_count);
+
+        # Build comma-separated list of WWPNs (16-char hex without colons)
+        my @wwpn_list;
+        for my $wwpn (@$wwpns) {
+            my $wwpn_raw = $wwpn;
+            $wwpn_raw =~ s/://g;  # Remove colons
+            push @wwpn_list, $wwpn_raw;
+        }
+        my $fcwwpn_param = join(':', @wwpn_list);
+
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Creating host with FC ports (fcwwpn=%s)", $fcwwpn_param);
+
+        # Create host with all FC ports at once
         my $create_result = PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', '/mkhost', {
             name => $hostname,
             type => 'generic',
+            fcwwpn => $fcwwpn_param,
         });
 
-        # Step 2: Add FC ports
-        for my $wwpn (@$wwpns) {
-            eval {
-                PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/mkport/$hostname", {
-                    fcport_name => $wwpn,
-                });
-            };
-        }
-
-        # Step 3: Add host to cluster
-        PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/mkhostclustermember/$host_cluster", {
+        # Add host to cluster
+        PVE::Storage::Custom::IBMFlashSystem::Client::api_request($class, $scfg, $storeid, 'POST', "/addhostclustermember/$host_cluster", {
             host => $hostname,
         });
 
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Host created and added to cluster successfully (hostname=%s, hostcluster=%s, wwpn_count=%d)", $hostname, $host_cluster, scalar(@$wwpns));
+        PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, $scfg, "Host created and added to cluster successfully (hostname=%s, hostcluster=%s, wwpn_count=%d)", $hostname, $host_cluster, $total_wwpn_count);
     }
 
     return $hostname;

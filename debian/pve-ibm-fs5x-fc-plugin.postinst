@@ -1,10 +1,19 @@
 #!/bin/bash
 set -e
 
+# Path to patch manager script
 PATCH_MANAGER="/usr/share/pve-ibm-fs5x-fc-plugin/scripts/patch-manager.sh"
 
 case "$1" in
     configure)
+        # Ensure storage private directory exists (for tokens and secrets)
+        # We handle this manually because pmxcfs (fuse) often rejects dpkg/chown operations
+        if [ ! -d "/etc/pve/priv/storage" ]; then
+            echo "Creating /etc/pve/priv/storage directory..."
+            mkdir -p "/etc/pve/priv/storage" || true
+            chmod 0700 "/etc/pve/priv/storage" || true
+        fi
+
         # Make patch manager executable
         if [ -f "$PATCH_MANAGER" ]; then
             chmod +x "$PATCH_MANAGER"

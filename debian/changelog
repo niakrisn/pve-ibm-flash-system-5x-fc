@@ -1,3 +1,14 @@
+pve-ibm-fs5x-fc-plugin (1.5.3) unstable; urgency=medium
+
+  * Fix: Create /etc/pve/priv/storage/ directory on package install
+  * Fix: mkhost API - use fcwwpn with comma-separated list of WWPNs
+  * Fix: Changed mkhostclustermember to addhostclustermember (correct API command)
+  * Fix: All WWPNs now formatted as 16-char hex without colons for IBM API
+  * Add: Validate pool and hostcluster existence in on_add_hook and on_update_hook
+  * Docs: Updated AGENTS.md with correct host management API documentation
+
+ -- Nikolai Kozlov <n.kozlov@veeam.com>  Sat, 18 Jan 2026 14:38:00 +0300
+
 pve-ibm-fs5x-fc-plugin (1.5.2) unstable; urgency=medium
 
   * Refactor: Centralized timeouts in Constants.pm

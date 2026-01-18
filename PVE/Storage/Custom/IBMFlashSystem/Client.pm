@@ -81,6 +81,41 @@ sub on_add_hook {
             }
         }
 
+        # Verify pool exists
+        my $pool_name = $scfg->{pool};
+        if ($pool_name) {
+            eval {
+                _api_request($class, $check_scfg, $storeid, 'POST', "/lsmdiskgrp/$pool_name", { bytes => JSON::true });
+            };
+            if ($@) {
+                my $error = $@;
+                if ($error =~ /CMMVC5754E|not found|does not exist/i) {
+                    die "[IBM FlashSystem] ERROR: Pool '$pool_name' does not exist on the storage array.\n" .
+                        "Storage '$storeid' was NOT created. Please check pool name.\n";
+                } else {
+                    die "[IBM FlashSystem] ERROR: Failed to verify pool '$pool_name' - $error";
+                }
+            }
+        }
+
+        # Verify hostcluster exists
+        my $host_cluster = $scfg->{hostcluster};
+        if ($host_cluster) {
+            eval {
+                _api_request($class, $check_scfg, $storeid, 'POST', "/lshostcluster/$host_cluster", {});
+            };
+            if ($@) {
+                my $error = $@;
+                if ($error =~ /CMMVC5753E|CMMVC5754E|not found|does not exist/i) {
+                    die "[IBM FlashSystem] ERROR: Host cluster '$host_cluster' does not exist on the storage array.\n" .
+                        "Storage '$storeid' was NOT created. Please create it first:\n" .
+                        "  mkhostcluster -name $host_cluster\n";
+                } else {
+                    die "[IBM FlashSystem] ERROR: Failed to verify host cluster '$host_cluster' - $error";
+                }
+            }
+        }
+
         # Only save password to disk AFTER successful verification
         _set_password($class, $scfg, $storeid, $password);
     }
@@ -97,74 +132,84 @@ sub on_update_hook {
         "on_update_hook called (storeid=%s, sensitive=[%s])",
         $storeid, join(',', @sensitive_keys));
 
-    # 1. Determine if we need to verify connectivity (Only for sensitive updates)
+    # Determine password update
     my $new_password = undef;
     my $password_update_requested = 0;
-    my $verify = 0;
 
     if (exists($sensitive_params{password})) {
         $password_update_requested = 1;
-        if (defined($sensitive_params{password})) {
-            $verify = 1;
-            $new_password = $sensitive_params{password};
-        } else {
-             # Password is being deleted - no verification needed
-        }
+        $new_password = $sensitive_params{password} if defined($sensitive_params{password});
     }
 
-    if ($verify) {
-        PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, undef,
-            "Verifying connectivity for updated password...");
+    # Create check config with short timeout
+    my $check_scfg = { %$scfg, timeout => 5 };
 
-        # 2. Construct the Candidate Configuration
-        # We need to merge the CURRENT config with the UPDATES to test the new state.
+    # Always verify pool and hostcluster exist (they may have been changed)
+    # Need to authenticate first to make API calls
+    my $password_for_auth = $new_password // _get_password($class, $scfg, $storeid);
 
-        my $cfg = PVE::Storage::config();
-        my $current_scfg = $cfg->{ids}->{$storeid};
-        die "Storage '$storeid' not found in config\n" unless $current_scfg;
-
-        # Create a shallow copy for modification
-        my $candidate_scfg = { %$current_scfg };
-
-        # Note: We cannot get non-sensitive updates here (PVE doesn't pass them).
-        # So we can only verify the new password against the OLD non-sensitive config.
-        # This is better than nothing, but means we can't verify "new password + new IP" together
-        # in this hook.
-
-        # Clear token to force fresh authentication using new params
+    if ($password_for_auth) {
+        # Clear token to force fresh authentication
         _clear_cached_token($class, $storeid);
 
-        # Verify credentials immediately with short timeout (5s) user request
-        $candidate_scfg->{timeout} = 5;
-
+        # Authenticate
         eval {
-            # Use the CANDIDATE config for authentication!
-            # Pass explicit password if it's being updated
-            PVE::Storage::Custom::IBMFlashSystem::Client::authenticate($class, $candidate_scfg, $storeid, $new_password);
+            PVE::Storage::Custom::IBMFlashSystem::Client::authenticate($class, $check_scfg, $storeid, $password_for_auth);
         };
         if ($@) {
             my $error = $@;
             PVE::Storage::Custom::IBMFlashSystem::Logger::log_error($class, undef,
-                "Verification failed: $error");
-
-            # Since we haven't written anything to disk yet, we don't need rollback!
-            # Just die, and PVE will abort the edit.
+                "Authentication verification failed: $error");
 
             if ($error =~ /Invalid username or password/) {
-                 die "[IBM FlashSystem] Authentication failed using NEW password: Invalid username or password.\n";
+                die "[IBM FlashSystem] Authentication failed: Invalid username or password.\n";
             } elsif ($error =~ /Connection refused|Timeout|Can't connect|Host is unreachable/) {
-                 die "[IBM FlashSystem] Connection failed: Cannot connect to " . ($candidate_scfg->{portal} // 'target') . ". Check IP/Port ($error).\n";
+                die "[IBM FlashSystem] Connection failed: Cannot connect to " . ($check_scfg->{portal} // 'target') . ". Check IP/Port.\n";
             } else {
-                 # Fallback for any other error - enforce failure
-                 die "[IBM FlashSystem] Connectivity check failed: $error\n";
+                die "[IBM FlashSystem] Connectivity check failed: $error\n";
+            }
+        }
+
+        # Verify pool exists
+        my $pool_name = $scfg->{pool};
+        if ($pool_name) {
+            eval {
+                _api_request($class, $check_scfg, $storeid, 'POST', "/lsmdiskgrp/$pool_name", { bytes => JSON::true });
+            };
+            if ($@) {
+                my $error = $@;
+                if ($error =~ /CMMVC5754E|not found|does not exist/i) {
+                    die "[IBM FlashSystem] ERROR: Pool '$pool_name' does not exist on the storage array.\n" .
+                        "Configuration was NOT updated. Please check pool name.\n";
+                } else {
+                    die "[IBM FlashSystem] ERROR: Failed to verify pool '$pool_name' - $error";
+                }
+            }
+        }
+
+        # Verify hostcluster exists
+        my $host_cluster = $scfg->{hostcluster};
+        if ($host_cluster) {
+            eval {
+                _api_request($class, $check_scfg, $storeid, 'POST', "/lshostcluster/$host_cluster", {});
+            };
+            if ($@) {
+                my $error = $@;
+                if ($error =~ /CMMVC5753E|CMMVC5754E|not found|does not exist/i) {
+                    die "[IBM FlashSystem] ERROR: Host cluster '$host_cluster' does not exist on the storage array.\n" .
+                        "Configuration was NOT updated. Please create it first:\n" .
+                        "  mkhostcluster -name $host_cluster\n";
+                } else {
+                    die "[IBM FlashSystem] ERROR: Failed to verify host cluster '$host_cluster' - $error";
+                }
             }
         }
 
         PVE::Storage::Custom::IBMFlashSystem::Logger::log_info($class, undef,
-            "Configuration verified, applying changes (storeid=%s)", $storeid);
+            "Configuration verified successfully (storeid=%s)", $storeid);
     }
 
-    # 3. Persist changes (only if verification passed or skipped)
+    # Persist password changes (only if verification passed)
     if ($password_update_requested) {
         if (defined($new_password)) {
             _set_password($class, undef, $storeid, $new_password);

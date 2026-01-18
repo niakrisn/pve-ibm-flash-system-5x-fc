@@ -215,12 +215,14 @@ IBM FlashSystem 5.x предоставляет REST API для управлен�
 
 #### Управление хостами
 
-| Endpoint                             | Описание              | Параметры                                |
-| ------------------------------------ | --------------------- | ---------------------------------------- |
-| `POST /rest/lshost`                  | Список хостов         | `{}`                                     |
-| `POST /rest/mkhost`                  | Создать хост          | `name`, `hostcluster`, `type: "generic"` |
-| `POST /rest/mkport/<host>`           | Добавить FC порт      | `fcport_name: "XX:XX:XX:XX:XX:XX:XX:XX"` |
-| `POST /rest/lshostcluster/<cluster>` | Информация о кластере | `{}`                                     |
+| Endpoint                                    | Описание                 | Параметры                                                       |
+| ------------------------------------------- | ------------------------ | --------------------------------------------------------------- |
+| `POST /rest/lshost`                         | Список хостов            | `{}`                                                            |
+| `POST /rest/mkhost`                         | Создать хост             | `name`, `type: "generic"`, `fcwwpn` (16-char hex без двоеточий) |
+| `POST /rest/addhostport/<host>`             | Добавить FC порт         | `fcwwpn` (16-char hex без двоеточий)                            |
+| `POST /rest/addhostclustermember/<cluster>` | Добавить хост в кластер  | `host`                                                          |
+| `POST /rest/rmhostclustermember/<cluster>`  | Удалить хост из кластера | `host`                                                          |
+| `POST /rest/lshostcluster/<cluster>`        | Информация о кластере    | `{}`                                                            |
 
 #### Подключение томов к хостам (LUN Mapping)
 
