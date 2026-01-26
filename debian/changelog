@@ -1,3 +1,12 @@
+pve-ibm-fs5x-fc-plugin (1.5.4) unstable; urgency=medium
+
+  * Improve APT hook: trigger patches only when relevant PVE packages are updated
+  * Add apt-trigger.sh (Pre-Install-Pkgs handler) to detect qemu-server/pve-manager updates
+  * Add apt-post-invoke.sh (Post-Invoke handler) to apply patches conditionally
+  * Reduce unnecessary patch-manager runs during unrelated package installations
+
+ -- Nikolai Kozlov <n.kozlov@veeam.com>  Sun, 26 Jan 2026 14:45:00 +0300
+
 pve-ibm-fs5x-fc-plugin (1.5.3) unstable; urgency=medium
 
   * Fix: Create /etc/pve/priv/storage/ directory on package install

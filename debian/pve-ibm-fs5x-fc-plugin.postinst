@@ -14,10 +14,13 @@ case "$1" in
             chmod 0700 "/etc/pve/priv/storage" || true
         fi
 
-        # Make patch manager executable
-        if [ -f "$PATCH_MANAGER" ]; then
-            chmod +x "$PATCH_MANAGER"
-        fi
+        # Make scripts executable
+        SCRIPTS_DIR="/usr/share/pve-ibm-fs5x-fc-plugin/scripts"
+        for script in patch-manager.sh apt-trigger.sh apt-post-invoke.sh; do
+            if [ -f "$SCRIPTS_DIR/$script" ]; then
+                chmod +x "$SCRIPTS_DIR/$script"
+            fi
+        done
 
         # Apply patches via patch manager
         if [ -x "$PATCH_MANAGER" ]; then

@@ -4,6 +4,8 @@ debian/patches/series usr/share/pve-ibm-fs5x-fc-plugin/patches/
 
 # Install patch manager script
 scripts/patch-manager.sh usr/share/pve-ibm-fs5x-fc-plugin/scripts/
+scripts/apt-trigger.sh usr/share/pve-ibm-fs5x-fc-plugin/scripts/
+scripts/apt-post-invoke.sh usr/share/pve-ibm-fs5x-fc-plugin/scripts/
 
 # Install GUI integration script
 configs/ibmflash-gui.js usr/share/pve-ibm-fs5x-fc-plugin/
