@@ -1,3 +1,24 @@
+pve-ibm-fs5x-fc-plugin (1.5.6) unstable; urgency=high
+
+  * Fix: APT hook never detected watched packages - Pre-Install-Pkgs passes
+    .deb paths (qemu-server_<ver>_<arch>.deb) and `grep -w` treats "_" as a
+    word character, so patches were not re-applied after PVE updates
+
+ -- Nikolai Kozlov <n.kozlov@veeam.com>  Mon, 26 Oct 2026 16:00:00 +0300
+
+pve-ibm-fs5x-fc-plugin (1.5.5) unstable; urgency=high
+
+  * Fix: qemu-server 9.2.x broke `qm` after patching (Cloudinit.pm referenced
+    removed `$plugin` variable) - regenerate all patches against
+    qemu-server 9.2.11, libpve-storage-perl 9.1.13, pve-manager 9.2.21
+  * Fix: patch-manager no longer retries with --fuzz=3, which inserted hunks
+    into unrelated code in QemuServer.pm; patches now require exact context
+  * Add: patch-manager compile-checks patched files with `perl -c` and
+    restores the originals if any of them fails to compile
+  * Fix: APT hook also re-applies patches when libpve-storage-perl is updated
+
+ -- Nikolai Kozlov <n.kozlov@veeam.com>  Mon, 26 Oct 2026 15:00:00 +0300
+
 pve-ibm-fs5x-fc-plugin (1.5.4) unstable; urgency=medium
 
   * Improve APT hook: trigger patches only when relevant PVE packages are updated

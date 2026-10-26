@@ -1,6 +1,6 @@
---- PVE/QemuServer.pm	2026-01-14 12:40:08
-+++ PVE/QemuServer.pm	2026-01-14 12:40:23
-@@ -5956,6 +5956,12 @@
+--- PVE/QemuServer.pm
++++ PVE/QemuServer.pm
+@@ -5980,6 +5980,12 @@
          }
          delete $conf->@{qw(lock vmstate running-nets-host-mtu runningmachine runningcpu)};
          PVE::QemuConfig->write_config($vmid, $conf);
@@ -10,6 +10,6 @@
 +            eval { PVE::Storage::deactivate_volumes($storecfg, [$vmstate]); };
 +            warn $@ if $@;
 +        }
-     } elsif (!$conf->{vmstate}) {
+     } elsif (!$conf->{vmstate} && !$migratedfrom) {
          remove_left_over_vmstate_opts($vmid, $conf);
      }

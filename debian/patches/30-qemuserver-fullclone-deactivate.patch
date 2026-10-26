@@ -1,30 +1,30 @@
---- PVE/QemuServer.pm	2026-01-13 11:25:40
-+++ PVE/QemuServer.pm	2026-01-13 11:44:32
-@@ -7991,6 +7991,27 @@
+--- PVE/QemuServer.pm
++++ PVE/QemuServer.pm
+@@ -8075,6 +8075,27 @@
+             clone_disk_copy_data(
+                 $storecfg, $source, $dest, $use_drive_mirror, $jobs, $completion, $qga, $bwlimit,
+             );
++
++            # Deactivate SAN volumes after full clone
++            if (!$running) {
++                # Source volume
++                my $src_scfg = PVE::Storage::storage_config($storecfg, $src_storeid);
++                if (PVE::Storage::Plugin::storage_is_san($src_scfg->{type})) {
++                    print "Deactivating SAN source volume $drive->{file}\n";
++                    eval {
++                        PVE::Storage::deactivate_volumes($storecfg, [$drive->{file}], $snapname);
++                    };
++                    warn $@ if $@;
++                }
++
++                # Destination volume
++                my $dst_scfg = PVE::Storage::storage_config($storecfg, $storeid);
++                if (PVE::Storage::Plugin::storage_is_san($dst_scfg->{type})) {
++                    print "Deactivating SAN destination volume $newvolid\n";
++                    eval { PVE::Storage::deactivate_volumes($storecfg, [$newvolid]); };
++                    warn $@ if $@;
++                }
++            }
          }
      }
- 
-+    # Deactivate SAN volumes after full clone
-+    if ($full && !$running) {
-+        # Source volume
-+        my ($src_storeid) = PVE::Storage::parse_volume_id($drive->{file});
-+        my $src_scfg = PVE::Storage::storage_config($storecfg, $src_storeid);
-+        if (PVE::Storage::Plugin::storage_is_san($src_scfg->{type})) {
-+            print "Deactivating SAN source volume $drive->{file}\n";
-+            eval { PVE::Storage::deactivate_volumes($storecfg, [$drive->{file}], $snapname); };
-+            warn $@ if $@;
-+        }
-+
-+        # Destination volume
-+        my ($dst_storeid) = PVE::Storage::parse_volume_id($newvolid);
-+        my $dst_scfg = PVE::Storage::storage_config($storecfg, $dst_storeid);
-+        if (PVE::Storage::Plugin::storage_is_san($dst_scfg->{type})) {
-+            print "Deactivating SAN destination volume $newvolid\n";
-+            eval { PVE::Storage::deactivate_volumes($storecfg, [$newvolid]); };
-+            warn $@ if $@;
-+        }
-+    }
-+
- no_data_clone:
-     my $size = eval { PVE::Storage::volume_size_info($storecfg, $newvolid, 10) };
  

@@ -9,7 +9,7 @@
 PATCH_MANAGER="/usr/share/pve-ibm-fs5x-fc-plugin/scripts/patch-manager.sh"
 
 # Packages that require re-patching when updated
-WATCHED_PACKAGES="qemu-server pve-manager pve-qemu-kvm"
+WATCHED_PACKAGES="qemu-server libpve-storage-perl pve-manager pve-qemu-kvm"
 
 log() {
     logger -t "ibm-fs-plugin" "$*"
@@ -21,7 +21,9 @@ needs_patching=0
 
 while IFS= read -r line; do
     for pkg in $WATCHED_PACKAGES; do
-        if echo "$line" | grep -qw "$pkg"; then
+        # Lines are .deb paths (e.g. .../qemu-server_9.2.11_amd64.deb); "_" is a word char,
+        # so grep -w never matches - anchor on the name followed by "_" or whitespace
+        if echo "$line" | grep -qE "(^|[/[:space:]])${pkg}(_|[[:space:]]|\$)"; then
             log "Detected update of watched package: $pkg"
             needs_patching=1
             break 2

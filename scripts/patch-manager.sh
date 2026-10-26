@@ -68,6 +68,49 @@ patch_applied() {
     patch -R -p0 -s -f --dry-run "$_target_file" < "$_patch_file" >/dev/null 2>&1
 }
 
+# Target file of a patch (path from the first "+++" header, relative to /usr/share/perl5)
+patch_target() {
+    sed -n 's/^+++ \([^[:space:]]*\).*/\1/p' "$1" | head -n 1
+}
+
+# Save a pristine copy of a target once per run, so a failed validation can be rolled back
+backup_target() {
+    _target="$1"
+    [ -e "$BACKUP_DIR/$_target" ] && return 0
+    mkdir -p "$BACKUP_DIR/$(dirname "$_target")"
+    cp -p "$_target" "$BACKUP_DIR/$_target"
+    echo "$_target" >> "$BACKUP_DIR/.files"
+}
+
+# Restore all targets modified in this run
+restore_targets() {
+    [ -f "$BACKUP_DIR/.files" ] || return 0
+    while IFS= read -r _target; do
+        if cp -p "$BACKUP_DIR/$_target" "$_target"; then
+            log "  ↺ Restored original: $_target"
+        else
+            log "  ✗ Failed to restore: $_target"
+        fi
+    done < "$BACKUP_DIR/.files"
+}
+
+# Compile-check all targets modified in this run (catches patches that apply
+# textually but reference variables/functions missing in the installed version)
+validate_targets() {
+    [ -f "$BACKUP_DIR/.files" ] || return 0
+    _valid=0
+    while IFS= read -r _target; do
+        if _out=$(perl -c "$_target" 2>&1); then
+            log "  ✓ Compiles: $_target"
+        else
+            log "  ✗ Compilation failed: $_target"
+            echo "$_out" | grep -v 'implementing an older storage API' | head -n 20 | while read -r line; do log "    > $line"; done
+            _valid=1
+        fi
+    done < "$BACKUP_DIR/.files"
+    return $_valid
+}
+
 # Ensure GUI is fully applied (both files)
 ensure_gui() {
     # Check if script tag exists in template
@@ -110,6 +153,9 @@ case "$1" in
             exit 1
         fi
 
+        BACKUP_DIR=$(mktemp -d /tmp/ibm-fs-plugin-patch.XXXXXX)
+        trap 'rm -rf "$BACKUP_DIR"' EXIT
+
         # Change to Perl library base for relative patch paths
         cd /usr/share/perl5
 
@@ -132,44 +178,41 @@ case "$1" in
             log "Checking: $_patch_name"
 
             # Check if already applied
-            if patch -R -p0 -s -f --dry-run < "$_patch" >/dev/null 2>&1; then
+            if patch -R -p0 -s -f --fuzz=0 --dry-run < "$_patch" >/dev/null 2>&1; then
                 log "  ✓ Patch already applied: $_patch_name"
                 _applied_count=$((_applied_count + 1))
                 continue
             fi
 
+            # Exact context only (offsets allowed). Fuzzy matching may insert code into an
+            # unrelated function of a newer qemu-server and break `qm` on the whole node.
+            if ! _out=$(patch -p0 -N -s --fuzz=0 --dry-run < "$_patch" 2>&1); then
+                log "  ⚠ Skipped (does not match installed package version): $_patch_name"
+                _failed_patches="$_failed_patches $_patch_name"
+                echo "$_out" | while read -r line; do log "    > $line"; done
+                continue
+            fi
+
             log "Applying: $_patch_name"
+            backup_target "$(patch_target "$_patch")"
 
-            # Try to apply - we use || true to prevent set -e from exiting
-            _out=$(patch -p0 -N < "$_patch" 2>&1) || _patch_res=$?
-
-            if [ "$_patch_res" != "" ] && [ "$_patch_res" != "0" ]; then
-                 # If it failed, check if it's because it was actually applied (false negative in dry-run)
-                 if echo "$_out" | grep -q "Reversed (or previously applied) patch detected"; then
-                     log "  ✓ Patch detected as applied (via output): $_patch_name"
-                     _applied_count=$((_applied_count + 1))
-                     _patch_res=0
-                 else
-                     # Try with fuzz
-                     log "  ⚠ First attempt failed (exit $_patch_res), trying with fuzz..."
-                     if patch -p0 -N --fuzz=3 < "$_patch" >/dev/null 2>&1; then
-                         log "  ✓ Applied (with fuzz): $_patch_name"
-                         _applied_count=$((_applied_count + 1))
-                         _patch_res=0
-                     else
-                         log "  ⚠ Failed: $_patch_name"
-                         _failed_patches="$_failed_patches $_patch_name"
-                         # Dump output for debug
-                         echo "$_out" | while read -r line; do log "    > $line"; done
-                     fi
-                 fi
-            else
+            if _out=$(patch -p0 -N -s --fuzz=0 --no-backup-if-mismatch < "$_patch" 2>&1); then
                 log "  ✓ Applied: $_patch_name"
                 _applied_count=$((_applied_count + 1))
+            else
+                log "  ⚠ Failed: $_patch_name"
+                _failed_patches="$_failed_patches $_patch_name"
+                echo "$_out" | while read -r line; do log "    > $line"; done
             fi
-            # Reset result for next loop
-            _patch_res=0
         done < <(collect_patches)
+
+        # Never leave the node with uncompilable PVE modules: roll back everything on failure
+        if ! validate_targets; then
+            log "ERROR: Patched files do not compile, restoring originals"
+            restore_targets
+            _applied_count=0
+            _failed_patches=" (all, rolled back)"
+        fi
 
         # Update marker if at least one patch was applied or detected as applied
         if [ $_applied_count -gt 0 ]; then

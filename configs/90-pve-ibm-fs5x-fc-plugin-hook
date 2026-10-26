@@ -1,5 +1,5 @@
 // APT hook for IBM FlashSystem 5.x FC Plugin
-// Re-applies patches only when relevant PVE packages (qemu-server, pve-manager) are updated
+// Re-applies patches only when relevant PVE packages (qemu-server, libpve-storage-perl, pve-manager) are updated
 
 // Pre-Install-Pkgs: Check if watched packages are being updated
 DPkg::Pre-Install-Pkgs { "/usr/share/pve-ibm-fs5x-fc-plugin/scripts/apt-trigger.sh || true"; };

@@ -1,6 +1,6 @@
---- PVE/API2/Qemu.pm	2026-01-13 11:58:55
-+++ PVE/API2/Qemu.pm	2026-01-13 12:17:33
-@@ -4605,6 +4605,23 @@
+--- PVE/API2/Qemu.pm
++++ PVE/API2/Qemu.pm
+@@ -4739,6 +4739,23 @@
                  }
  
                  PVE::AccessControl::add_vm_to_pool($newid, $pool) if $pool;
@@ -23,4 +23,4 @@
 +
              };
              if (my $err = $@) {
-                 eval { PVE::QemuServer::BlockJob::qemu_blockjobs_cancel($vmid, $jobs) };
+                 eval {

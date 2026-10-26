@@ -1,6 +1,6 @@
---- PVE/QemuServer/OVMF.pm	2026-01-13 11:25:34
-+++ PVE/QemuServer/OVMF.pm	2026-01-13 11:31:50
-@@ -176,6 +176,14 @@
+--- PVE/QemuServer/OVMF.pm
++++ PVE/QemuServer/OVMF.pm
+@@ -198,6 +198,14 @@
      PVE::Storage::activate_volumes($storecfg, [$volid]);
  
      PVE::QemuServer::QemuImage::convert($ovmf_vars, $volid, $vars_size_b);

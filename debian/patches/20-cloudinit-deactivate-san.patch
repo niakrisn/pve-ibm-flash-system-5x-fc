@@ -1,6 +1,6 @@
---- PVE/QemuServer/Cloudinit.pm	2026-01-13 11:25:37
-+++ PVE/QemuServer/Cloudinit.pm	2026-01-13 11:32:15
-@@ -70,6 +70,15 @@
+--- PVE/QemuServer/Cloudinit.pm
++++ PVE/QemuServer/Cloudinit.pm
+@@ -88,6 +88,15 @@
      };
      my $err = $@;
      rmtree($path);
@@ -9,7 +9,7 @@
 +    my $is_vm_running = PVE::QemuServer::check_running($vmid);
 +    if (!$is_vm_running) {
 +        if (PVE::Storage::Plugin::storage_is_san($scfg->{type})) {
-+            eval { $plugin->deactivate_volume($storeid, $scfg, $volname); };
++            eval { PVE::Storage::deactivate_volumes($storecfg, [$drive->{file}]); };
 +            warn $@ if $@;
 +        }
 +    }

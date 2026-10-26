@@ -1,6 +1,6 @@
---- PVE/Storage/Plugin.pm	2026-01-13 11:25:32
-+++ PVE/Storage/Plugin.pm	2026-01-13 11:26:05
-@@ -289,6 +289,13 @@
+--- PVE/Storage/Plugin.pm
++++ PVE/Storage/Plugin.pm
+@@ -296,6 +296,13 @@
      return [qw(encryption-key keyring master-pubkey password)];
  }
  
