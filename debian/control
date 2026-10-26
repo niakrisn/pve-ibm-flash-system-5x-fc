@@ -7,8 +7,7 @@ Standards-Version: 4.5.0
 
 Package: pve-ibm-fs5x-fc-plugin
 Architecture: all
-Depends: pve-manager (>= 9.0), pve-manager (<< 10.0), multipath-tools, patch, ${perl:Depends}, ${misc:Depends}
-Recommends: liblwp-protocol-https-perl, libjson-perl
+Depends: pve-manager (>= 9.0), pve-manager (<< 10.0), multipath-tools, patch, liblwp-protocol-https-perl, libregexp-ipv6-perl, libjson-perl, ${perl:Depends}, ${misc:Depends}
 Description: Proxmox VE plugin for IBM FlashSystem 5.x FC storage
  Proxmox VE storage plugin for IBM FlashSystem 5.x series storage
  arrays via Fibre Channel. Supports volume management, snapshots,
